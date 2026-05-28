@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>AdBrain Image Matcher (sandbox)</title>
+</head>
+<body>
+  <!-- Sandboxed extension page. Hosts CLIP via @xenova/transformers in an
+       environment with 'unsafe-eval' + 'wasm-unsafe-eval' (transformers.js
+       needs both for ONNX Runtime Web).
+       Communication with the parent offscreen.html is via postMessage. -->
+  <script type="module">
+    // ESM import lands here; we re-export to window so non-module code in
+    // sandbox.js can reach the pipeline factory.
+    import { pipeline, env } from './lib/transformers.min.js';
+
+    // Configure transformers.js for sandbox context:
+    //   - Pull models from HuggingFace CDN
+    //   - DISABLE browser Cache API — Chrome rejects custom sandbox CSPs
+    //     with `allow-same-origin`, so the Cache API isn't available. The
+    //     model downloads fresh on each session-start (the service worker
+    //     and offscreen document keep it warm during a run; subsequent
+    //     products in the same run reuse the in-memory cache).
+    //   - Single-threaded ONNX so we don't depend on cross-origin workers
+    env.allowRemoteModels = true;
+    env.allowLocalModels  = false;
+    env.useBrowserCache   = false;
+    env.useFSCache        = false;
+    env.useCustomCache    = false;
+    if (env.backends?.onnx?.wasm) {
+      env.backends.onnx.wasm.numThreads = 1;
+    }
+
+    window.__transformers = { pipeline, env };
+    window.dispatchEvent(new Event('transformers-ready'));
+  </script>
+  <script src="sandbox.js"></script>
+</body>
+</html>

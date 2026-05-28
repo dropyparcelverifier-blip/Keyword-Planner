@@ -1,0 +1,75 @@
+{
+  "manifest_version": 3,
+  "name": "AdBrain Discovery",
+  "version": "1.0.0",
+  "description": "Per product: Keyword Planner -> keyword discovery + CLIP image matching on Google SERPs.",
+  "permissions": [
+    "storage",
+    "scripting",
+    "activeTab",
+    "downloads",
+    "tabs",
+    "sidePanel",
+    "offscreen",
+    "search",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://www.google.com/*",
+    "https://www.google.co.in/*",
+    "https://www.google.co.uk/*",
+    "https://ads.google.com/*",
+    "https://dropy.in/*",
+    "https://cdn.shopify.com/*",
+    "https://*.gstatic.com/*",
+    "https://*.googleusercontent.com/*",
+    "https://*.supabase.co/*",
+    "https://huggingface.co/*",
+    "https://cdn-lfs.huggingface.co/*",
+    "https://www.amazon.in/*",
+    "https://www.amazon.com/*"
+  ],
+  "action": {
+    "default_title": "AdBrain Discovery"
+  },
+  "side_panel": {
+    "default_path": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.google.com/search*",
+        "https://www.google.co.in/search*",
+        "https://www.google.co.uk/search*"
+      ],
+      "js": ["serp-reader.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://ads.google.com/aw/keywordplanner/*"],
+      "js": ["kp.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.amazon.in/*",
+        "https://www.amazon.com/*"
+      ],
+      "js": ["amazon-reader.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["lib/xlsx.mjs", "lib/transformers.min.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "sandbox": {
+    "pages": ["sandbox.html"]
+  }
+}

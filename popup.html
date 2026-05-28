@@ -1,0 +1,1005 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>AdBrain Discovery</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a1f29;
+      --border: #2a3240;
+      --text: #e6e9ef;
+      --muted: #8b94a7;
+      --accent: #4f8cff;
+      --accent-hover: #6ba1ff;
+      --success: #34d399;
+      --warn: #fbbf24;
+      --danger: #f87171;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      width: 100%;
+      min-width: 320px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    header {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 { font-size: 15px; margin: 0; letter-spacing: 0.3px; }
+    header .sub { font-size: 11px; color: var(--muted); }
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    .tab {
+      flex: 1;
+      padding: 10px;
+      text-align: center;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--muted);
+      border-bottom: 2px solid transparent;
+    }
+    .tab.active {
+      color: var(--text);
+      border-bottom-color: var(--accent);
+      background: var(--bg);
+    }
+    .panel { padding: 14px 16px; display: none; }
+    .panel.active { display: block; }
+    .section { margin-bottom: 14px; }
+    .label {
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    input[type="file"], input[type="text"], input[type="password"], input[type="number"] {
+      width: 100%;
+      padding: 8px 10px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 12px;
+      font-family: inherit;
+    }
+    button {
+      padding: 9px 14px;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      font-size: 12px;
+      font-family: inherit;
+    }
+    button:hover:not(:disabled) { background: var(--accent-hover); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary { background: var(--panel); border: 1px solid var(--border); color: var(--text); }
+    button.secondary:hover:not(:disabled) { background: #232b38; }
+    button.danger { background: var(--danger); color: #1a0d0d; }
+    button.danger:hover:not(:disabled) { background: #fca5a5; }
+    .button-row { display: flex; gap: 8px; }
+    .button-row button { flex: 1; }
+    .progress {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px;
+      font-size: 12px;
+      min-height: 80px;
+    }
+    .progress .stat { display: flex; justify-content: space-between; margin-bottom: 4px; }
+    .progress .stat span:first-child { color: var(--muted); }
+    .progress .stat span:last-child { color: var(--text); font-weight: 500; }
+    .log {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--muted);
+      max-height: 320px;
+      overflow-y: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .log-line { margin-bottom: 2px; }
+    .log-line.err { color: var(--danger); }
+    .log-line.ok { color: var(--success); }
+    .hint { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
+    .file-info { margin-top: 6px; font-size: 11px; color: var(--success); }
+    .source-pill {
+      display: inline-block; padding: 1px 6px; border-radius: 9px;
+      background: var(--border); color: var(--text);
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .bar-label {
+      display: flex; justify-content: space-between;
+      font-size: 11px; color: var(--muted); margin: 8px 0 4px;
+    }
+    .bar-track {
+      background: #0a0e15; border: 1px solid var(--border); border-radius: 999px;
+      height: 10px; overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+      transition: width 0.35s ease;
+      width: 0%;
+    }
+    .bar-fill.complete {
+      background: linear-gradient(90deg, var(--success), #4ade80);
+    }
+
+    /* Inline reset button on the Run tab — small and out of the way */
+    .reset-section {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: flex-end;
+    }
+    .btn-danger-outline {
+      background: transparent;
+      border: 1px solid var(--danger);
+      color: var(--danger);
+      padding: 4px 12px;
+      border-radius: 6px;
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.15s;
+      font-family: inherit;
+    }
+    .btn-danger-outline:hover {
+      background: var(--danger);
+      color: #1a0d0d;
+    }
+    .btn-danger-outline:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ============ Progress card ============ */
+    .progress-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 10px;
+    }
+    .pc-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .pc-bar-outer {
+      height: 6px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-bottom: 12px;
+    }
+    .pc-bar-inner {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+      transition: width 0.45s ease;
+      width: 0%;
+    }
+    .pc-product {
+      margin-bottom: 10px;
+    }
+    .pc-product-name {
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .pc-product-url {
+      font-size: 10px;
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-top: 2px;
+    }
+    .pc-stages {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 12px;
+    }
+    .pc-stage {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 6px 4px;
+      border-radius: 6px;
+      font-size: 10px;
+      gap: 2px;
+      min-width: 0;
+    }
+    .pc-stage.pending {
+      background: var(--bg);
+      color: var(--muted);
+    }
+    .pc-stage.active {
+      background: #1f2944;
+      color: var(--accent-hover);
+      animation: pc-pulse 2s infinite;
+    }
+    .pc-stage.done {
+      background: #0f3328;
+      color: var(--success);
+    }
+    @keyframes pc-pulse {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.65; }
+    }
+    .pc-stage-icon  { font-size: 12px; }
+    .pc-stage-label { font-weight: 500; }
+    .pc-stage-detail {
+      font-size: 9px;
+      opacity: 0.8;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .pc-counters {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .pc-counter {
+      flex: 1;
+      text-align: center;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 4px;
+      min-width: 0;
+    }
+    .pc-counter-value {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+    .pc-counter-label {
+      font-size: 9px;
+      color: var(--muted);
+      margin-top: 1px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .pc-action {
+      font-size: 11px;
+      color: var(--muted);
+      padding: 6px 8px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      margin-bottom: 6px;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      overflow: hidden;
+    }
+    .pc-action-type {
+      background: #1f2944;
+      color: var(--accent-hover);
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 9px;
+      font-weight: 600;
+      white-space: nowrap;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .pc-action-text {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+    .pc-time {
+      font-size: 11px;
+      color: var(--muted);
+      text-align: center;
+    }
+    .pc-time-sep { margin: 0 6px; opacity: 0.5; }
+
+    /* ============ Settings tab — grouped sections ============ */
+    .settings-group {
+      margin: 18px 0 4px;
+      padding: 8px 12px 6px;
+      border-left: 2px solid var(--accent);
+      background: linear-gradient(90deg, rgba(79,140,255,0.08), transparent 60%);
+      border-radius: 0 6px 6px 0;
+    }
+    .settings-group-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--accent-hover);
+      margin: 0;
+    }
+    .settings-group-sub {
+      font-size: 10px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    /* The CLIP-threshold control gets its own emphasis — it's the biggest
+       lever the user has on accuracy. */
+    .clip-threshold-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: 6px;
+      padding: 10px 12px;
+    }
+    .clip-threshold-card .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 6px;
+    }
+    .clip-threshold-card input[type="range"] {
+      flex: 1;
+      accent-color: var(--accent);
+    }
+    .clip-threshold-card .slider-value {
+      min-width: 48px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    /* ============ Results tab ============ */
+    .results-filters {
+      display: flex; flex-direction: column; gap: 6px;
+      padding: 10px 0;
+    }
+    .results-search {
+      width: 100%;
+      padding: 7px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 12px;
+      font-family: inherit;
+    }
+    .results-filter-row {
+      display: flex; gap: 4px; flex-wrap: wrap;
+    }
+    .results-filter-row select {
+      flex: 1; min-width: 80px;
+      padding: 4px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 10px;
+      font-family: inherit;
+    }
+    .results-filter-check {
+      display: flex; align-items: center; gap: 4px;
+      font-size: 10px; color: var(--muted);
+      white-space: nowrap;
+      padding: 2px 4px;
+    }
+    .results-filter-check input { margin: 0; }
+    .results-summary {
+      font-size: 10px; color: var(--muted);
+      text-align: right;
+      margin-top: 2px;
+    }
+    .results-table-wrap {
+      overflow: auto;
+      max-height: calc(100vh - 380px);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    .results-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+    .results-table th {
+      position: sticky; top: 0;
+      background: var(--panel);
+      padding: 6px 8px;
+      text-align: left;
+      font-weight: 500;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      white-space: nowrap;
+      font-size: 10px;
+      user-select: none;
+    }
+    .results-table th:hover { color: var(--text); }
+    .results-table th.sort-active { color: var(--accent); }
+    .results-table th .sort-arrow { font-size: 8px; margin-left: 2px; opacity: 0.4; }
+    .results-table th.sort-active .sort-arrow { opacity: 1; }
+    .results-table td {
+      padding: 5px 8px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+      vertical-align: middle;
+    }
+    .results-table tbody tr { cursor: pointer; }
+    .results-table tbody tr:hover { background: var(--panel); }
+    .results-table tbody tr.selected { background: #1f2944; }
+    .rt-rating-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-weight: 600;
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+    }
+    .rt-rating-high { background: #0f3328; color: var(--success); }
+    .rt-rating-mid  { background: #1f2944; color: var(--accent-hover); }
+    .rt-rating-low  { background: #3a2916; color: var(--warn); }
+    .rt-rating-min  { background: var(--bg);  color: var(--muted); }
+    .rt-pill {
+      display: inline-block;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 9px;
+      font-weight: 500;
+    }
+    .rt-pill-transactional, .rt-pill-bottom { background: #0f3328; color: var(--success); }
+    .rt-pill-commercial,    .rt-pill-mid    { background: #1f2944; color: var(--accent-hover); }
+    .rt-pill-informational, .rt-pill-top    { background: #3a2916; color: var(--warn); }
+    .rt-pill-navigational                    { background: #312e81; color: #a5b4fc; }
+    .rt-img-dot { display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:3px; vertical-align: middle; }
+    .rt-img-dot-match { background: var(--success); }
+    .rt-img-dot-none  { background: var(--bg); border: 1px solid var(--border); }
+    .rt-keyword-cell {
+      max-width: 180px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    /* Sliding detail panel — appears when a row is selected. */
+    .rt-detail {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      background: var(--panel);
+      border-top: 1px solid var(--border);
+      padding: 12px 16px;
+      max-height: 55vh;
+      overflow-y: auto;
+      z-index: 100;
+      box-shadow: 0 -4px 16px rgba(0,0,0,0.4);
+    }
+    .rt-detail-close {
+      position: absolute; top: 8px; right: 12px;
+      background: none; border: none; color: var(--muted);
+      font-size: 18px; cursor: pointer; padding: 0;
+      width: 24px; height: 24px;
+    }
+    .rt-detail-close:hover { color: var(--text); }
+    .rt-detail-keyword {
+      font-size: 14px; font-weight: 500;
+      color: var(--text);
+      margin-bottom: 10px;
+      padding-right: 30px;
+    }
+    .rt-detail-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      font-size: 11px;
+    }
+    .rt-detail-item {
+      padding: 6px 8px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+    }
+    .rt-detail-item.full { grid-column: 1 / -1; }
+    .rt-detail-label {
+      font-size: 9px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      margin-bottom: 2px;
+    }
+    .rt-detail-value {
+      color: var(--text);
+      font-weight: 500;
+      word-break: break-word;
+    }
+    .rt-empty {
+      padding: 24px 8px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>AdBrain Discovery</h1>
+      <div class="sub">Autosuggest · PAA · Lens</div>
+    </div>
+    <div class="sub">v1.0.0</div>
+  </header>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="run">Run</div>
+    <div class="tab" data-tab="results">Results</div>
+    <div class="tab" data-tab="settings">Settings</div>
+  </div>
+
+  <div class="panel active" id="panel-run">
+    <div class="section">
+      <label class="label">Product file (CSV / XLSX)</label>
+      <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" />
+      <div class="file-info" id="fileInfo"></div>
+      <div class="hint">Columns (case-insensitive): "Product URL", "Priority", "SKU" (optional — used for the export filename), "Handles" (optional — pipe / comma / semicolon separated extra KP seeds)</div>
+    </div>
+
+    <div class="section">
+      <label class="label">Keyword cap (across all products)</label>
+      <input type="number" id="capInput" value="500" min="10" max="5000" />
+      <div class="hint">
+        Per-product expansion runs in TWO rounds:
+        <br>1. KP → autosuggest of each KP keyword (~25 KP + ~15 suggestions each)
+        <br>2. KP re-expansion on each of those KP keywords → autosuggest of each KP2 result
+        <br>Cap bounds total keywords stored. Default 500 gives both rounds room. Lower to
+        150 to keep runs short; raise to 2000+ for deep discovery.
+      </div>
+    </div>
+
+    <div class="section button-row">
+      <button id="startBtn" style="flex: 2;">Start Discovery</button>
+      <button id="resumeBtn" class="secondary" style="flex: 1; display: none;">Resume</button>
+      <button id="stopBtn" class="danger" style="flex: 1; display: none;">Stop</button>
+    </div>
+
+    <div class="reset-section">
+      <button id="runResetBtn" class="btn-danger-outline" title="Clear all progress and start fresh">
+        ⟲ Reset progress
+      </button>
+    </div>
+
+    <div class="section" id="paceNote" style="background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px;">
+      <div class="hint" style="margin:0;line-height:1.5;">
+        <strong style="color:var(--text);">This tool runs slowly on purpose.</strong>
+        A full run may take several hours. SERP loads are paced with long, randomised
+        pauses and grouped into small batches with rest periods. This keeps the tool
+        within normal browsing behaviour — there is no CAPTCHA-solving and no bypass.
+        If Google serves a verification check the run pauses and you can solve it
+        manually in your browser, then resume.
+      </div>
+    </div>
+
+    <div class="section" id="restBanner" style="display:none;background:#2a3240;border:1px solid var(--warn);border-radius:6px;padding:10px;">
+      <div style="font-size:12px;color:var(--warn);font-weight:600;margin-bottom:4px;">Resting between chunks</div>
+      <div style="font-size:12px;color:var(--text);">
+        Next chunk starts at <span id="restUntilText">—</span>
+        (<span id="restCountdown">—</span> remaining)
+      </div>
+    </div>
+
+    <div class="section" id="autoResumeBanner" style="display:none;background:#1c2c3a;border:1px solid #4a90d9;border-radius:6px;padding:10px;">
+      <div style="font-size:12px;color:#9cc8f0;font-weight:600;margin-bottom:4px;">
+        Auto-resume armed
+      </div>
+      <div class="hint" style="margin:0;line-height:1.5;color:var(--text);">
+        This run will resume automatically if Chrome restarts, the PC loses power,
+        or the service worker is killed. A watchdog alarm fires every minute and
+        re-launches the run from the last saved checkpoint. Click <strong>Resume</strong>
+        to continue now, or <strong>Stop</strong>/<strong>Reset progress</strong> to cancel
+        auto-resume.
+      </div>
+    </div>
+
+    <div class="section" id="captchaBanner" style="display:none;background:#3a1c1c;border:1px solid var(--danger);border-radius:6px;padding:10px;">
+      <div style="font-size:12px;color:var(--danger);font-weight:600;margin-bottom:4px;">
+        Google served a verification check
+      </div>
+      <div class="hint" style="margin:0;line-height:1.5;color:var(--text);">
+        The run has been paused and your progress is saved. Solve the check manually in
+        your browser if you wish, then click Resume to continue from where you stopped,
+        or try again later with slower settings (longer delays / smaller chunks).
+      </div>
+    </div>
+
+    <div class="section">
+      <label class="label">Progress</label>
+
+      <!-- Structured progress card — appears as soon as a run is active. -->
+      <div id="progressCard" class="progress-card" style="display:none;">
+        <div class="pc-header">
+          <span id="pcBatchLabel">Product 0 of 0</span>
+          <span id="pcBatchPct">0%</span>
+        </div>
+        <div class="pc-bar-outer"><div id="pcBatchBar" class="pc-bar-inner"></div></div>
+
+        <div class="pc-product">
+          <div id="pcProductName" class="pc-product-name">—</div>
+          <div id="pcProductUrl"  class="pc-product-url">—</div>
+        </div>
+
+        <div class="pc-stages">
+          <div id="pcStage-init"   class="pc-stage pending">
+            <span class="pc-stage-icon">○</span><span class="pc-stage-label">Init</span>
+            <span class="pc-stage-detail" id="pcStageDetail-init"></span>
+          </div>
+          <div id="pcStage-kp"     class="pc-stage pending">
+            <span class="pc-stage-icon">○</span><span class="pc-stage-label">KP</span>
+            <span class="pc-stage-detail" id="pcStageDetail-kp"></span>
+          </div>
+          <div id="pcStage-r1"     class="pc-stage pending">
+            <span class="pc-stage-icon">○</span><span class="pc-stage-label">R1</span>
+            <span class="pc-stage-detail" id="pcStageDetail-r1"></span>
+          </div>
+          <div id="pcStage-r2"     class="pc-stage pending">
+            <span class="pc-stage-icon">○</span><span class="pc-stage-label">R2</span>
+            <span class="pc-stage-detail" id="pcStageDetail-r2"></span>
+          </div>
+          <div id="pcStage-rs"     class="pc-stage pending">
+            <span class="pc-stage-icon">○</span><span class="pc-stage-label">RS</span>
+            <span class="pc-stage-detail" id="pcStageDetail-rs"></span>
+          </div>
+          <div id="pcStage-export" class="pc-stage pending">
+            <span class="pc-stage-icon">○</span><span class="pc-stage-label">Done</span>
+            <span class="pc-stage-detail" id="pcStageDetail-export"></span>
+          </div>
+        </div>
+
+        <div class="pc-counters">
+          <div class="pc-counter"><div class="pc-counter-value" id="pcKeywords">0</div><div class="pc-counter-label">Keywords</div></div>
+          <div class="pc-counter"><div class="pc-counter-value" id="pcSerps">0</div><div class="pc-counter-label">SERPs</div></div>
+          <div class="pc-counter"><div class="pc-counter-value" id="pcMatches">0</div><div class="pc-counter-label">Matches</div></div>
+          <div class="pc-counter"><div class="pc-counter-value" id="pcSellers">0</div><div class="pc-counter-label">Sellers</div></div>
+          <div class="pc-counter"><div class="pc-counter-value" id="pcFiltered">0</div><div class="pc-counter-label">Filtered</div></div>
+        </div>
+
+        <div class="pc-action">
+          <span class="pc-action-type" id="pcActionType">—</span>
+          <span class="pc-action-text" id="pcActionText">—</span>
+        </div>
+
+        <div class="pc-time">
+          <span id="pcElapsed">0:00</span> elapsed
+          <span class="pc-time-sep">·</span>
+          <span id="pcRemaining">estimating…</span>
+        </div>
+      </div>
+
+      <div class="progress">
+        <div class="stat"><span>Status</span><span id="statusText">Idle</span></div>
+        <div class="stat"><span>Current product</span><span id="currentProduct">—</span></div>
+        <div class="stat"><span>Current source</span><span><span class="source-pill" id="currentSource">—</span></span></div>
+        <div class="stat"><span>Current action</span><span id="currentAction">—</span></div>
+
+        <div class="bar-label">
+          <span>Products done</span>
+          <span><span id="productsDone">0</span> / <span id="productsTotal">0</span></span>
+        </div>
+        <div class="bar-track"><div class="bar-fill" id="productsBar"></div></div>
+
+        <div class="bar-label">
+          <span>Current product queue</span>
+          <span><span id="queueProcessed">0</span> / <span id="queueTotal">0</span></span>
+        </div>
+        <div class="bar-track"><div class="bar-fill" id="queueBar"></div></div>
+
+        <div class="stat" style="margin-top: 10px;"><span>Keywords in report</span><span id="keywordCount">0</span></div>
+        <div class="stat"><span>Queue remaining</span><span id="queueRemaining">0</span></div>
+        <div class="log" id="log"></div>
+      </div>
+    </div>
+
+    <div class="section button-row">
+      <button class="secondary" id="exportCsvBtn" disabled>Export CSV</button>
+      <button class="secondary" id="exportXlsxBtn" disabled>Export Excel</button>
+      <button id="pushBtn" disabled>Push to AdBrain</button>
+    </div>
+  </div>
+
+  <!-- ─────── Results tab — in-panel keyword viewer with sort/filter ─────── -->
+  <div class="panel" id="panel-results">
+    <div class="results-filters">
+      <input type="text" id="rtSearch" class="results-search" placeholder="Search keywords..." />
+      <div class="results-filter-row">
+        <select id="rtFilterIntent">
+          <option value="">All intents</option>
+          <option value="transactional">Transactional</option>
+          <option value="commercial">Commercial</option>
+          <option value="informational">Informational</option>
+          <option value="navigational">Navigational</option>
+        </select>
+        <select id="rtFilterFunnel">
+          <option value="">All funnels</option>
+          <option value="bottom">Bottom</option>
+          <option value="mid">Mid</option>
+          <option value="top">Top</option>
+        </select>
+        <select id="rtFilterTopic">
+          <option value="">All topics</option>
+          <option value="price">Price</option>
+          <option value="review">Review</option>
+          <option value="comparison">Comparison</option>
+          <option value="how-to">How-to</option>
+          <option value="ingredient">Ingredient</option>
+          <option value="availability">Availability</option>
+          <option value="concern">Concern</option>
+          <option value="general">General</option>
+        </select>
+      </div>
+      <div class="results-filter-row">
+        <select id="rtFilterTier">
+          <option value="">All tiers</option>
+          <option value="brand_product">Tier 1 — brand+anchor</option>
+          <option value="brand_other">Tier 2 — brand-other</option>
+          <option value="generic_product">Tier 3 — generic</option>
+          <option value="anchor_only">Tier 4 — anchor only</option>
+        </select>
+        <select id="rtFilterRating">
+          <option value="0">Any rating</option>
+          <option value="80">80+ (must bid)</option>
+          <option value="50">50+ (strong)</option>
+          <option value="30">30+ (moderate)</option>
+        </select>
+        <label class="results-filter-check"><input type="checkbox" id="rtFilterHasImage"> Has image</label>
+        <label class="results-filter-check"><input type="checkbox" id="rtFilterHasSellers"> Has sellers</label>
+      </div>
+      <div class="results-summary" id="rtSummary">No data yet — run a discovery first.</div>
+    </div>
+
+    <div class="results-table-wrap">
+      <table class="results-table" id="rtTable">
+        <thead>
+          <tr>
+            <th class="sortable" data-sort="keyword">Keyword <span class="sort-arrow">▾</span></th>
+            <th class="sortable sort-active" data-sort="adRating">Rating <span class="sort-arrow">▾</span></th>
+            <th class="sortable" data-sort="imageCount">Img <span class="sort-arrow">▾</span></th>
+            <th class="sortable" data-sort="totalSellers">Sellers <span class="sort-arrow">▾</span></th>
+            <th class="sortable" data-sort="intent">Intent <span class="sort-arrow">▾</span></th>
+            <th class="sortable" data-sort="funnel">Funnel <span class="sort-arrow">▾</span></th>
+            <th class="sortable" data-sort="tier">Tier <span class="sort-arrow">▾</span></th>
+          </tr>
+        </thead>
+        <tbody id="rtTbody">
+          <tr><td colspan="7" class="rt-empty">No data yet — run a discovery, then open this tab.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div id="rtDetail" class="rt-detail" style="display:none;">
+      <button class="rt-detail-close" id="rtDetailClose">×</button>
+      <div class="rt-detail-keyword" id="rtDetailKeyword">—</div>
+      <div class="rt-detail-grid" id="rtDetailGrid"></div>
+    </div>
+  </div>
+
+  <div class="panel" id="panel-settings">
+
+    <!-- ─────── Group 1: Keyword Planner ─────── -->
+    <div class="settings-group">
+      <div class="settings-group-title">Keyword Planner</div>
+      <div class="settings-group-sub">Your Google Ads KP tab and how much we scrape from it.</div>
+    </div>
+
+    <div class="section">
+      <label class="label">Keyword Planner URL</label>
+      <input type="text" id="kpUrl" placeholder="https://ads.google.com/aw/keywordplanner/home?..." />
+      <div class="hint">
+        Full URL incl. <code>ocid</code>, <code>euid</code>, <code>authuser</code>. You must be
+        logged in to that Google Ads account in this browser profile.
+      </div>
+    </div>
+    <div class="section">
+      <label class="label">Max KP ideas per product</label>
+      <input type="number" id="kpMaxPerProduct" value="5000" min="10" max="10000" />
+      <div class="hint">
+        Total KP keywords scraped per product (across all pages). Default 5000 = effectively "take everything KP returns". Lower it if a single product is consuming too much of your global cap.
+      </div>
+    </div>
+
+    <!-- ─────── Group 2: Run pacing ─────── -->
+    <div class="settings-group">
+      <div class="settings-group-title">Run pacing</div>
+      <div class="settings-group-sub">Delays + chunk rests that keep the run inside human-browsing patterns.</div>
+    </div>
+
+    <div class="section">
+      <label class="label">Pacing — pre-SERP delay (seconds, randomised range)</label>
+      <div style="display:flex;gap:8px;">
+        <input type="number" id="searchDelayMin" min="3" max="600" value="5" style="flex:1;" />
+        <span style="align-self:center;color:var(--muted);font-size:12px;">to</span>
+        <input type="number" id="searchDelayMax" min="3" max="600" value="12" style="flex:1;" />
+      </div>
+      <div class="hint">
+        Random delay BEFORE each product's SERP load (the rate-limited step).
+        Default 5–12 s. Each pause picks a fresh random value in this range —
+        the cadence intentionally does not look mechanical.
+      </div>
+    </div>
+
+    <div class="section">
+      <label class="label">Pacing — between-products delay (seconds, randomised range)</label>
+      <div style="display:flex;gap:8px;">
+        <input type="number" id="productDelayMin" min="5" max="900" value="15" style="flex:1;" />
+        <span style="align-self:center;color:var(--muted);font-size:12px;">to</span>
+        <input type="number" id="productDelayMax" min="5" max="900" value="35" style="flex:1;" />
+      </div>
+      <div class="hint">
+        Additional rest AFTER each product is fully processed (on top of the
+        pre-SERP delay before the next product). Default 15–35 s.
+      </div>
+    </div>
+
+    <div class="section">
+      <label class="label">Chunk size (products per batch)</label>
+      <input type="number" id="chunkSize" min="1" max="50" value="8" />
+      <div class="hint">
+        Process this many products, then rest. Default 8.
+      </div>
+    </div>
+
+    <div class="section">
+      <label class="label">Chunk rest (minutes, randomised range)</label>
+      <div style="display:flex;gap:8px;">
+        <input type="number" id="chunkRestMin" min="1" max="240" value="5" style="flex:1;" />
+        <span style="align-self:center;color:var(--muted);font-size:12px;">to</span>
+        <input type="number" id="chunkRestMax" min="1" max="240" value="10" style="flex:1;" />
+      </div>
+      <div class="hint">
+        Long rest between chunks. Default 5–10 min. Survives popup close and
+        browser restart — if you stop and restart, the rest deadline continues
+        from where it left off.
+      </div>
+    </div>
+
+    <!-- ─────── Group 3: Image matching ─────── -->
+    <div class="settings-group">
+      <div class="settings-group-title">Image matching</div>
+      <div class="settings-group-sub">CLIP threshold + strictness profile + per-keyword SERP cap.</div>
+    </div>
+
+    <!-- Threshold slider is the biggest accuracy lever — lifted above the
+         profile select and given its own emphasised card. -->
+    <div class="section">
+      <div class="clip-threshold-card">
+        <label class="label" style="margin-bottom:2px;">CLIP threshold</label>
+        <div class="hint" style="margin-top:0;">
+          Lower = more candidate matches (text + brand filters catch false positives).
+          Higher = stricter visual match (may miss our product in cross-source thumbs).
+          Defaults: loose 0.68 · normal 0.72 · strict 0.82.
+          <strong>Slider value used only when profile = Custom.</strong>
+        </div>
+        <div class="slider-row">
+          <input type="range" id="clipThreshold" min="60" max="92" value="72" step="1" />
+          <span class="slider-value" id="clipThresholdValue">0.72</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <label class="label">Image-match strictness profile</label>
+      <select id="matchProfile" style="width:100%;padding:8px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;font-family:inherit;">
+        <option value="loose">Loose &mdash; threshold 0.68</option>
+        <option value="normal" selected>Normal &mdash; threshold 0.72 (recommended)</option>
+        <option value="strict">Strict &mdash; threshold 0.82</option>
+        <option value="custom">Custom &mdash; use slider above</option>
+      </select>
+      <div class="hint" style="margin-top:6px;">
+        Pipeline: <strong>URL identity</strong> → <strong>dHash</strong> (near-identical re-encodes) →
+        <strong>CLIP cosine</strong> (different photo of same product) →
+        <strong>multi-signal verification</strong> (color palette + product-name text + brand context).
+        Final match decision is the combined score &ge; 55.
+        First run downloads ~150 MB CLIP model from HuggingFace (cached in IndexedDB).
+      </div>
+    </div>
+
+    <div class="section">
+      <label class="label">Per-keyword image-match cap</label>
+      <input type="number" id="maxImageMatchRows" value="0" min="0" max="5000" />
+      <div class="hint">
+        Each keyword gets its own Google search to count how many times the
+        product image appears for that specific query.
+        <br>
+        <strong>0 = match every keyword</strong> (slowest, ~30 s per keyword pacing).
+        Pick a number to cap; rows are processed in priority order
+        (KP keywords first, then PAA, then autosuggest).
+        Verification pages (CAPTCHA) are non-fatal &mdash; that row keeps image_count=0
+        and the loop moves on.
+      </div>
+    </div>
+
+    <!-- ─────── Group 4: Output & sync ─────── -->
+    <div class="settings-group">
+      <div class="settings-group-title">Output &amp; sync</div>
+      <div class="settings-group-sub">Auto-CSV per product + Supabase push credentials.</div>
+    </div>
+
+    <div class="section">
+      <label class="label">
+        <input type="checkbox" id="autoExport" checked style="vertical-align: middle; margin-right: 6px;" />
+        Auto-download CSV when each product completes
+      </label>
+      <div class="hint">
+        When a product's queue empties, its rows are automatically written to <code>adbrain_&lt;product&gt;_&lt;batch&gt;.csv</code> in your Downloads folder. You don't have to click Export and switch tabs.
+      </div>
+    </div>
+
+    <div class="section">
+      <label class="label">AdBrain Supabase project URL</label>
+      <input type="text" id="supabaseUrl" placeholder="https://xxxxx.supabase.co" />
+      <div class="hint">
+        Full project URL (no trailing slash). Stored in chrome.storage. If left blank,
+        the constant in <code>config/discovery-config.js</code> is used.
+      </div>
+    </div>
+    <div class="section">
+      <label class="label">AdBrain Supabase service_role key</label>
+      <input type="password" id="serviceKey" placeholder="eyJ..." />
+      <div class="hint">
+        Stored in chrome.storage as <code>adbrainServiceKey</code>. Never hardcoded.
+        Required for Push to AdBrain.
+      </div>
+    </div>
+    <div class="section">
+      <button id="saveSettings" style="width: 100%;">Save Settings</button>
+      <div class="file-info" id="settingsSaved"></div>
+    </div>
+
+    <!-- ─────── Group 5: Reset ─────── -->
+    <div class="settings-group">
+      <div class="settings-group-title">Reset</div>
+      <div class="settings-group-sub">Clear the in-flight report and done-products list.</div>
+    </div>
+
+    <div class="section">
+      <div class="hint" id="resetStatus" style="margin-bottom: 8px;">
+        <span id="doneProductsStat">0</span> products marked done.
+        Next Start will skip these and resume the existing batch.
+      </div>
+      <button id="resetBtn" class="danger" style="width: 100%;">Reset progress (clear report + done list)</button>
+      <div class="file-info" id="resetSaved"></div>
+    </div>
+
+    <div class="section">
+      <div class="hint">
+        Target table: <code>adbrain_discovered_keywords</code>. Project URL is configured
+        in <code>config/discovery-config.js</code> (constant).
+      </div>
+    </div>
+  </div>
+
+  <script src="lib/xlsx.full.min.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

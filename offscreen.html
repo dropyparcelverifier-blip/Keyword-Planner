@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>AdBrain Image Matcher (offscreen)</title>
+</head>
+<body>
+  <!-- Hosts the sandboxed CLIP iframe. Offscreen has chrome.* APIs (so the
+       service worker can talk to it). The sandbox has 'unsafe-eval' for
+       transformers.js / ONNX Runtime. offscreen.js relays chrome.runtime
+       messages into the sandbox via postMessage and forwards replies back. -->
+  <iframe id="sandbox" src="sandbox.html"
+          style="display:none;width:1px;height:1px;border:0"></iframe>
+  <script src="offscreen.js"></script>
+</body>
+</html>
