@@ -1338,8 +1338,43 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
       for (const r of results) {
         if (typeof r.score === 'number') allScores.push(Math.round(r.score * 100));
         const confPct = Math.round((r.score || 0) * 100);
-        // dHash hits are definitive — keep without further verification.
+        // dHash hits — visually near-identical to our reference. The
+        // assumption "near-identical bottle = our product" breaks when
+        // sibling SKUs share packaging design (Super Enzymes 90 vs 180
+        // capsules: same label, just different number) or when sibling
+        // products share brand visual style (Plant Enzymes vs Super
+        // Enzymes). Gate the dHash accept on the same identity + variant
+        // checks that computeMatchConfidence runs for the multi-signal
+        // path, using the surrounding SERP text.
         if (r.via === 'dhash' && r.isMatch) {
+          const dCtx = ctxByUrl.get(r.url) || {};
+          const dText = [dCtx.seller, dCtx.title, dCtx.alt, dCtx.titleAttr, dCtx.linkText]
+            .filter(Boolean).join(' ').toLowerCase();
+          let vetoReason = null;
+          if (typeof productContext?.checkProductIdentity === 'function') {
+            const ident = productContext.checkProductIdentity(dText);
+            if (ident && ident.match === false) {
+              vetoReason = `identity (missing:${(ident.missingWords || []).join(',')})`;
+            }
+          }
+          if (!vetoReason && typeof productContext?.checkVariantConflict === 'function') {
+            const conflicts = productContext.checkVariantConflict(dText) || [];
+            if (conflicts.length > 0) {
+              const c = conflicts[0];
+              vetoReason = `variant (${c.type}:${c.ours}/${c.theirs})`;
+            }
+          }
+          if (vetoReason) {
+            matchBreakdownLog.push({
+              conf:  confPct,
+              clip:  confPct,
+              via:   'dhash',
+              ctx:   dText.slice(0, 80),
+              kept:  false,
+              veto:  vetoReason,
+            });
+            continue;
+          }
           pushMatch(r.url, confPct, r.embedding || null);
           continue;
         }

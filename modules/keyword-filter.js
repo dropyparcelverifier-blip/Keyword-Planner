@@ -604,11 +604,17 @@ const CATEGORY_TERMS = {
 
 export function detectCategory(productType, productName) {
   const text = `${productType || ''} ${productName || ''}`.toLowerCase();
-  if (/\b(tablet|capsule|softgel|supplement|vitamin|extract|herbal|\d+\s*mg|\d+\s*mcg|\d+\s*iu|dosage)\b/.test(text)) return 'supplement';
-  if (/\b(cream|lotion|serum|moisturiz|cleanser|face wash|sunscreen|toner|spf)\b/.test(text)) return 'skincare';
-  if (/\b(shampoo|conditioner|hair oil|hair mask|hair serum|anti dandruff)\b/.test(text)) return 'haircare';
-  if (/\b(body wash|body lotion|shower gel|deodorant|body oil)\b/.test(text)) return 'bodycare';
-  if (/\b(protein|whey|granola|muesli|peanut butter|energy bar)\b/.test(text)) return 'food';
+  // `s?` on every form word so "Capsules", "Tablets", "Supplements" — the
+  // typical plural spelling on a product title — match the same as the
+  // singular. Without this, `\bcapsule\b` failed against "90 Capsules"
+  // and the product fell through to category='general', which in turn
+  // killed extractFormFactor (ALL_FORM_FACTORS.general = []) and the
+  // wrong-audience filter (gated on supplement/health/skincare).
+  if (/\b(tablets?|capsules?|softgels?|supplements?|vitamins?|enzymes?|probiotics?|extracts?|herbals?|\d+\s*mg|\d+\s*mcg|\d+\s*iu|dosage|digestive|immune|antioxidant)\b/.test(text)) return 'supplement';
+  if (/\b(creams?|lotions?|serums?|moisturiz|cleansers?|face wash|sunscreens?|toners?|spf|retinol)\b/.test(text)) return 'skincare';
+  if (/\b(shampoos?|conditioners?|hair oils?|hair masks?|hair serums?|anti.?dandruff)\b/.test(text)) return 'haircare';
+  if (/\b(body wash|body lotions?|shower gel|deodorants?|body oils?)\b/.test(text)) return 'bodycare';
+  if (/\b(proteins?|whey|granolas?|muesli|peanut butter|energy bars?)\b/.test(text)) return 'food';
   return 'general';
 }
 
