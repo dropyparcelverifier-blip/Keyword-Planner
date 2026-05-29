@@ -32,6 +32,9 @@ import {
   parseQty,
   baseKey,
   checkSiblingAmbiguity,
+  familiesFor,
+  computeProductFamilyValues,
+  checkAttributeFamily,
 } from './modules/keyword-filter.js';
 import {
   STORAGE_KEY_LAST_REPORT,
@@ -346,6 +349,9 @@ async function handleStart(msg) {
           parseQty,
           baseKey,
           checkSiblingAmbiguity,
+          familiesFor,
+          computeProductFamilyValues,
+          checkAttributeFamily,
           onRowAdded: async () => {
             state.report = Array.from(reportMap.values());
             await persistReport();

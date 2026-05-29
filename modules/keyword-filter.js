@@ -1448,6 +1448,13 @@ export function classifyKeyword(keyword, productContext) {
   const swap = checkNameSwap(kw, productContext);
   if (swap) return reject(`name_swap:+${swap.extras.join(',')}/-${swap.missing.join(',')}`);
 
+  // Attribute-family reject: keyword names a value of a family our
+  // product also asserts, but the value differs ("vegan omega 3 supplement"
+  // when our product is a fish-oil formulation). Symmetric with the
+  // image-side veto — keyword text is checked the same way as SERP ctx.
+  const attrFam = checkAttributeFamily(kw, productContext);
+  if (attrFam) return reject(`attribute:${attrFam.family}:${attrFam.ours}!=${attrFam.theirs}`);
+
   let hasBrand     = _hasBrandSubstr(kw, productContext.brandAliases);
   const hasAnchor   = _hasAnchor(kw, productContext.handleWords);
   const hasCategory = _hasCategoryTerm(kw, productContext.categoryTerms);
@@ -1637,6 +1644,101 @@ export function checkSiblingAmbiguity(text, productContext) {
     }
   }
   if (!sawAny) return { ambiguous: true, dims: discriminators.slice() };
+  return null;
+}
+
+// ============ Attribute-family veto (category-keyed config) ============
+// See modules/attribute-families.js for the configuration. The gate fires
+// only when the PRODUCT positively declares a value of a family AND the
+// candidate text declares a DIFFERENT value of the same family. Silent
+// product → no veto on that axis; generic informational keywords pass
+// freely. Families are resolved once per product (cached on productContext)
+// so per-thumbnail checks are just string-set lookups.
+import { ATTRIBUTE_FAMILIES, BRAND_FAMILY_OVERRIDES } from './attribute-families.js';
+
+// Resolve the effective attribute-family map for a product:
+//   _global  ←  ATTRIBUTE_FAMILIES[category]  ←  BRAND_FAMILY_OVERRIDES[brand]
+// later layers override earlier ones on family-key collision (whole family
+// is replaced, not merged value-by-value — intentional, so brand overrides
+// are atomic per axis).
+export function familiesFor(productContext) {
+  if (!productContext) return {};
+  const cat = (productContext.category || 'general').toLowerCase();
+  const brand = (productContext.brandName || '').toLowerCase();
+  const base = {
+    ...(ATTRIBUTE_FAMILIES._global || {}),
+    ...(ATTRIBUTE_FAMILIES[cat] || {}),
+  };
+  const overrides = BRAND_FAMILY_OVERRIDES[brand];
+  return overrides ? { ...base, ...overrides } : base;
+}
+
+// Cache-friendly regex builder. We compile one regex per value (sorted
+// longest-first) and store on productContext._familyRes so per-thumbnail
+// calls don't re-compile.
+function _escapeForFamilyRe(token) {
+  return token.replace(/[.+*?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+}
+
+// Returns the FIRST family value present in `text`, longest-token-first
+// so "color-treated" beats "color". null if no value of the family
+// appears. Boundary matching: token must be preceded by start-of-string
+// or a non-letter, and followed by end-of-string or a non-letter.
+// (Punctuation/digits/whitespace all count as boundaries.)
+function familyValue(text, values, cachedRes) {
+  if (!text || !Array.isArray(values) || values.length === 0) return null;
+  const t = String(text).toLowerCase();
+  const sorted = [...values].sort((a, b) => b.length - a.length);
+  for (let i = 0; i < sorted.length; i++) {
+    const v = sorted[i];
+    let re = cachedRes && cachedRes[v];
+    if (!re) {
+      re = new RegExp(`(^|[^a-z])${_escapeForFamilyRe(v)}([^a-z]|$)`, 'i');
+      if (cachedRes) cachedRes[v] = re;
+    }
+    if (re.test(t)) return v;
+  }
+  return null;
+}
+
+// Pre-compute the product's family values from its name/type tokens.
+// Called once per product at engine init; result cached on productContext.
+export function computeProductFamilyValues(productContext) {
+  if (!productContext) return {};
+  const fam = productContext.attrFamilies || familiesFor(productContext);
+  const sourceText = `${productContext.productType || ''} ${productContext.fullProductName || ''}`.toLowerCase();
+  const out = {};
+  const reCache = productContext._familyRes || (productContext._familyRes = {});
+  for (const [familyName, values] of Object.entries(fam)) {
+    reCache[familyName] = reCache[familyName] || {};
+    out[familyName] = familyValue(sourceText, values, reCache[familyName]);
+  }
+  return out;
+}
+
+// Check a candidate text for an attribute-family conflict against this
+// product. Returns:
+//   null                                       — no conflict (product silent,
+//                                                 or text matches our value,
+//                                                 or text silent on this axis)
+//   { family, ours, theirs }                   — text asserts a value of `family`
+//                                                 different from ours
+export function checkAttributeFamily(text, productContext) {
+  if (!productContext) return null;
+  const fam = productContext.attrFamilies;
+  if (!fam) return null;
+  const ours = productContext.attrFamilyValues;
+  if (!ours) return null;
+  const reCache = productContext._familyRes || (productContext._familyRes = {});
+  for (const [familyName, values] of Object.entries(fam)) {
+    const pv = ours[familyName];
+    if (!pv) continue; // product silent on this axis — gate doesn't apply
+    reCache[familyName] = reCache[familyName] || {};
+    const rv = familyValue(text, values, reCache[familyName]);
+    if (rv && rv !== pv) {
+      return { family: familyName, ours: pv, theirs: rv };
+    }
+  }
   return null;
 }
 

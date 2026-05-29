@@ -1245,6 +1245,20 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
     }
   }
 
+  // Attribute-family veto (Layer 9, category-keyed). Fires when the
+  // product declares a value of a family (e.g. supplement.formulation =
+  // "fish oil") and the SERP context declares a different value of the
+  // same family ("vegan", "algae"). Per attribute-families.js, silent
+  // product → no veto. Hard-veto on hit.
+  let attrFamilyMatch = null;
+  if (identityMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch && !colorConflictMatch && !nameSwapMatch && !siblingAmbiguity &&
+      typeof productContext?.checkAttributeFamily === 'function') {
+    attrFamilyMatch = productContext.checkAttributeFamily(originalText);
+    if (attrFamilyMatch) {
+      isMatch = false;
+    }
+  }
+
   return {
     total,
     clipScore: clipScorePct,
@@ -1268,6 +1282,7 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
     colorConflictMatch,
     nameSwapMatch,
     siblingAmbiguity,
+    attrFamilyMatch,
     isMatch,
   };
 }
@@ -1490,6 +1505,10 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
                 : `ambig (mismatch ${sa.dim}: ${sa.ours}/${sa.theirs})`;
             }
           }
+          if (!vetoReason && typeof productContext?.checkAttributeFamily === 'function') {
+            const af = productContext.checkAttributeFamily(dText);
+            if (af) vetoReason = `attr (${af.family}: ${af.ours}/${af.theirs})`;
+          }
           if (vetoReason) {
             matchBreakdownLog.push({
               conf:    confPct,
@@ -1548,6 +1567,9 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
                        ? (ms.siblingAmbiguity.ambiguous
                           ? `no_discriminator(${(ms.siblingAmbiguity.dims || []).join(',')})`
                           : `mismatch(${ms.siblingAmbiguity.dim}:${ms.siblingAmbiguity.ours}/${ms.siblingAmbiguity.theirs})`)
+                       : null,
+            attr:    ms.attrFamilyMatch
+                       ? `${ms.attrFamilyMatch.family}:${ms.attrFamilyMatch.ours}/${ms.attrFamilyMatch.theirs}`
                        : null,
             ctx:     ms.contextSample,
             kept:    ms.isMatch,
@@ -2107,6 +2129,31 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         if (typeof opts.checkNameSwap === 'function') {
           productContext.checkNameSwap = (text) =>
             opts.checkNameSwap(text, productContext);
+        }
+        // Attribute-family veto (Layer 9, category-keyed config). See
+        // modules/attribute-families.js for the value-set declarations.
+        // Resolves the family map from product.category + brand, computes
+        // OUR positive assertions once, and binds a per-thumb checker.
+        // The check fires only when the PRODUCT positively declares a
+        // value of a family; silent product → no veto on that axis.
+        if (typeof opts.familiesFor === 'function' && typeof opts.computeProductFamilyValues === 'function') {
+          productContext.attrFamilies = opts.familiesFor(productContext);
+          productContext.attrFamilyValues = opts.computeProductFamilyValues(productContext);
+          const declared = Object.entries(productContext.attrFamilyValues)
+            .filter(([, v]) => v)
+            .map(([k, v]) => `${k}=${v}`);
+          if (declared.length > 0) {
+            onProgress?.({
+              currentProduct: productName,
+              currentSource: 'context',
+              currentAction: `Attribute families (${productContext.category}): ${declared.join(', ')}`,
+              logKind: 'ok',
+            });
+          }
+          if (typeof opts.checkAttributeFamily === 'function') {
+            productContext.checkAttributeFamily = (text) =>
+              opts.checkAttributeFamily(text, productContext);
+          }
         }
         // Sibling SKU ambiguity — when this product shares a baseKey with
         // other products in the batch and differs ONLY on a quantity
@@ -2908,12 +2955,13 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                 const colorVStr   = m.colorVeto ? ` color=✗(${m.colorVeto})` : '';
                 const swapStr     = m.swap ? ` swap=✗(${m.swap})` : '';
                 const ambigStr    = m.ambig ? ` AMBIG=${m.ambig}` : '';
+                const attrStr     = m.attr ? ` attr=✗(${m.attr})` : '';
                 const variantStr  = m.variant ? ` variant=✗(${m.variant})` : '';
                 const vetoStr     = m.veto ? ` VETO=${m.veto}` : '';
                 onProgress?.({
                   currentProduct: productName,
                   currentSource: 'serp',
-                  currentAction: `${label}   ${m.kept ? '✓' : '✗'} total=${m.conf} clip=${m.clip} color=${m.color ?? '—'} text=${m.text ?? '—'}${typeof m.text === 'number' ? '%' : ''} brand=${m.brand ? '✓' : '✗'} anchor=${m.anchor ? '✓' : '✗'}${identityStr}${lineStr}${siblingStr}${slotStr}${colorVStr}${swapStr}${ambigStr}${variantStr}${vetoStr} matched=[${matchedStr}] ctx="${m.ctx}"`,
+                  currentAction: `${label}   ${m.kept ? '✓' : '✗'} total=${m.conf} clip=${m.clip} color=${m.color ?? '—'} text=${m.text ?? '—'}${typeof m.text === 'number' ? '%' : ''} brand=${m.brand ? '✓' : '✗'} anchor=${m.anchor ? '✓' : '✗'}${identityStr}${lineStr}${siblingStr}${slotStr}${colorVStr}${swapStr}${ambigStr}${attrStr}${variantStr}${vetoStr} matched=[${matchedStr}] ctx="${m.ctx}"`,
                 });
               }
             }
@@ -3665,7 +3713,10 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                 const sibAmbAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && productContext?.checkSiblingAmbiguity)
                   ? productContext.checkSiblingAmbiguity(tl)
                   : null;
-                const ourProduct = hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && !sibAmbAmz;
+                const attrFamAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && !sibAmbAmz && productContext?.checkAttributeFamily)
+                  ? productContext.checkAttributeFamily(tl)
+                  : null;
+                const ourProduct = hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && !sibAmbAmz && !attrFamAmz;
                 if (ourProduct) {
                   if (!ourRank) {
                     ourRank    = r.position;
@@ -3711,6 +3762,11 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                       currentAction: sibAmbAmz.ambiguous
                         ? `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING AMBIGUOUS — listing lacks discriminator(s) ${(sibAmbAmz.dims || []).join(',')}; cannot pin to our SKU`
                         : `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING DIM MISMATCH (${sibAmbAmz.dim}: ours=${sibAmbAmz.ours}, theirs=${sibAmbAmz.theirs})`,
+                    });
+                  } else if (attrFamAmz) {
+                    onProgress?.({
+                      currentProduct: productName, currentSource: 'amazon',
+                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but ATTRIBUTE MISMATCH (${attrFamAmz.family}: ours=${attrFamAmz.ours}, theirs=${attrFamAmz.theirs})`,
                     });
                   } else if (variantConflicts.length > 0) {
                     const c = variantConflicts[0];
