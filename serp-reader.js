@@ -69,6 +69,7 @@
           const paa             = collectPAAQuestions();
           const sellerData      = collectAllSellers();
           const relatedSearches = collectRelatedSearches();
+          const serpBlocked     = detectSerpBlocked(urls);
           // Source breakdown for the engine log — e.g.
           //   { shopping_carousel: 5, knowledge_panel: 4, organic: 2 }
           const sourceBreakdown = {};
@@ -85,6 +86,7 @@
             adsOnSerp: sellerData.adsOnSerp,
             relatedSearches,
             sourceBreakdown,
+            serpBlocked,
           });
         } catch (e) {
           sendResponse({ ok: false, urls: [], paa: [], sellers: [], totalSellers: 0, adsOnSerp: 0, relatedSearches: [], error: e.message });
@@ -104,6 +106,41 @@
       await sleep(intervalMs);
     }
     return false;
+  }
+
+  // Soft-blocked SERP: Google returns a page that LOOKS like a results
+  // page (no /sorry/ redirect, no CAPTCHA) but #rso is empty or absent
+  // and the only images on the page are Google's own (doodle / logo /
+  // gstatic chrome). This happens on bot-flagged queries where Google
+  // shows "Your search did not match any documents" or just an empty
+  // results pane. Without detection, the engine records these as legit
+  // 0-match results, which understates visibility.
+  function detectSerpBlocked(urls) {
+    try {
+      const rso = document.querySelector('#rso');
+      const search = document.querySelector('#search');
+      // Has Google's outer shell (so it's not a network error page) but the
+      // results container is empty or missing.
+      const hasShell = !!search;
+      const resultsEmpty = !rso || rso.querySelectorAll(':scope > div').length === 0;
+      if (!hasShell) return false; // network error or non-Google page — not "blocked"
+      if (!resultsEmpty) return false; // real results present
+
+      // Optional secondary check: all captured img URLs look like
+      // Google-asset URLs (doodle / logo / gstatic chrome).
+      const list = Array.isArray(urls) ? urls : [];
+      if (list.length > 0) {
+        const allGoogleAssets = list.every(u => {
+          const src = String((u && u.url) || u || '').toLowerCase();
+          return /google\.com\/logos\//.test(src) ||
+                 /googlelogo/.test(src) ||
+                 /gstatic\.com\/images/.test(src) ||
+                 /www\.google\.com\/images\/branding/.test(src);
+        });
+        if (!allGoogleAssets) return false;
+      }
+      return true;
+    } catch { return false; }
   }
 
   function detectCaptcha() {
@@ -277,10 +314,15 @@
       const kp        = collectKnowledgePanelImages();
       const imagePack = collectImagePackImages();
       const sponsored = collectSponsoredImages();
-      const organic   = readVisibleImageSources().map(r => ({ ...r, source: r.source || 'organic' }));
-      const bg        = collectBackgroundImages();
-      const fallback  = collectAllVisibleImages();
-      for (const item of [...shopping, ...kp, ...imagePack, ...sponsored, ...organic, ...bg, ...fallback]) {
+      // New explicit organic-result layer — runs BEFORE the loose
+      // readVisibleImageSources walk so its richer per-container context
+      // (h3 title + cite domain + snippet) lands in the merger first.
+      // Subsequent collectors hit the URL-dedupe and don't overwrite.
+      const organicBlocks = collectOrganicResultImages();
+      const organic       = readVisibleImageSources().map(r => ({ ...r, source: r.source || 'organic' }));
+      const bg            = collectBackgroundImages();
+      const fallback      = collectAllVisibleImages();
+      for (const item of [...shopping, ...kp, ...imagePack, ...sponsored, ...organicBlocks, ...organic, ...bg, ...fallback]) {
         mergeInto(map, item);
       }
     };
@@ -347,7 +389,11 @@
   // dedupe by URL with first-occurrence-wins semantics.
 
   function _imgPasses(img) {
-    if (!isElementVisible(img)) return false;
+    // Wrapper-aware: <g-img> + lazy-image patterns common in newer Google
+    // SERPs leave the inner <img> at 0×0 until the IntersectionObserver
+    // hydrates them. Checking only the img drops them. _imgVisibleOrWrapped
+    // is defined below this block.
+    if (!_imgVisibleOrWrapped(img)) return false;
     // imageHasLoaded is OK to skip here — many shopping/KP thumbs use
     // lazy-loading and the real URL lives in data-* before decode finishes.
     return true;
@@ -368,7 +414,18 @@
     if (src.startsWith('data:image/png'))  return true;
     if (src.startsWith('data:image/webp')) return true; // shopping carousel inlines as webp
     if (src.startsWith('data:')) return false;          // any other data:* — reject
-    if (src.startsWith('http')) return src.length <= 5000;
+    if (src.startsWith('http')) {
+      // Google UI assets — doodles, branding, icon sprites, rating stars.
+      // These get captured by the catch-all collector and confuse CLIP
+      // (the doodle's color palette is way off from any real product), so
+      // reject at the URL level before they enter the candidate set.
+      if (/\/google\.com\/logos\//.test(src)) return false;
+      if (/\/(?:www\.)?google\.com\/images\/(?:branding|icons|cleardot|errors)\//.test(src)) return false;
+      if (/\/gstatic\.com\/images\/(?:branding|icons|cleardot)\//.test(src)) return false;
+      if (/\/gstatic\.com\/ui\//.test(src)) return false;
+      if (/googleusercontent\.com\/img\/x\.png/.test(src)) return false; // tracking pixel
+      return src.length <= 5000;
+    }
     return false;
   }
   function _pushImgRecord(out, img, source) {
@@ -606,12 +663,107 @@
     document.querySelectorAll('img').forEach(img => {
       if (img.closest('header, footer, nav, #searchform, .logo, #logo, #hdtb')) return;
       if (img.closest('video, iframe, [data-video-id], [aria-label*="video" i]')) return;
-      if (!isElementVisible(img)) return;
+      if (!_imgVisibleOrWrapped(img)) return;
       if (!imageHasLoaded(img)) return;
       const rect = img.getBoundingClientRect();
-      if (rect.width < 50 || rect.height < 50) return;
+      if (rect.width < 50 || rect.height < 50) {
+        // Tiny rect but might be a lazy-loaded thumbnail in a g-img wrapper —
+        // accept if the wrapper has the right size.
+        const wrap = img.closest('g-img');
+        if (!wrap || !isElementVisible(wrap)) return;
+      }
       _pushImgRecord(out, img, 'fallback');
     });
+    return out;
+  }
+
+  // Wrapper-aware visibility. Google increasingly wraps result images in
+  // <g-img> custom elements that hydrate before the inner <img> gets its
+  // src/decoded dimensions. Checking the <img> alone returns false (0×0)
+  // and we drop it. Falling back to the wrapper's rect catches these.
+  function _imgVisibleOrWrapped(img) {
+    if (isElementVisible(img)) return true;
+    const wrap = img.closest?.('g-img');
+    if (wrap && isElementVisible(wrap)) return true;
+    return false;
+  }
+
+  // Extract organic-result-block context: title (h3), seller domain
+  // (cite or first link's host), price (with our coupon/EMI filter), and
+  // snippet text (the result description). This is richer than the
+  // ancestor-walk extractImageContext uses on a bare <img> — when the img
+  // is inside a known organic result block, we know exactly where to look.
+  function _extractOrganicContext(container) {
+    const title = (container.querySelector('h3')?.innerText || '').trim().slice(0, 200);
+    let seller = '';
+    const cite = container.querySelector('cite');
+    if (cite) {
+      const raw = (cite.innerText || '').trim();
+      if (raw) seller = raw.split(/[›>·•|\s]/)[0].replace(/^https?:\/\//, '').replace(/^www\./, '');
+    }
+    if (!seller) {
+      const a = container.querySelector('a[href]');
+      seller = extractDomainFromHref(a?.href);
+    }
+    const price = extractPrice(container);
+    const snippet =
+      container.querySelector('.VwiC3b, .yXK7lf, .lEBKkf, .lyLwlc')?.innerText ||
+      container.querySelector('div[data-content-feature]')?.innerText || '';
+    const linkText = (snippet || '').trim().slice(0, 300);
+    return { seller, price, title, linkText };
+  }
+
+  // Organic-result image collector — the additional layer for the
+  // "0 thumbnails captured even though #rso has results" case. Iterates
+  // explicit organic-result containers (Google rotates these classes every
+  // few months — selectors are cast wide) and finds images inside each.
+  // The visibility check uses _imgVisibleOrWrapped so <g-img> wrappers
+  // don't drop their child <img>s. Context comes from the result block
+  // itself (h3 title + cite domain + snippet), not from an upward DOM
+  // walk that often hits the wrong ancestor.
+  function collectOrganicResultImages() {
+    const out = [];
+    const containers = document.querySelectorAll(
+      '#search .g, ' +
+      '#rso > div, ' +
+      'div[data-hveid], ' +
+      '.MjjYud, ' +
+      '.yuRUbf, ' +
+      '.tF2Cxc'
+    );
+    for (const container of containers) {
+      if (!isElementVisible(container)) continue;
+      // Skip if this container is the shopping carousel or KP — they have
+      // their own collectors with richer context.
+      if (container.closest('.commercial-unit-desktop-top, .cu-container, .kp-wholepage, #rhs')) continue;
+      const imgs = container.querySelectorAll('g-img img, img[data-src], img[data-deferred-src], img');
+      for (const img of imgs) {
+        if (img.closest('video, iframe')) continue;
+        if (!_imgVisibleOrWrapped(img)) continue;
+        // Promote a lazy data-* URL into src if the visible img has nothing.
+        if (!img.src || img.naturalWidth <= 1) {
+          const lazy = img.getAttribute('data-src') ||
+                       img.getAttribute('data-deferred-src') ||
+                       img.getAttribute('data-iurl') || '';
+          if (lazy && /^https?:/.test(lazy)) {
+            try { img.src = lazy; } catch {}
+          }
+        }
+        const src = getHighResSrc(img);
+        if (!_acceptableImageSrc(src)) continue;
+        const ctx = _extractOrganicContext(container);
+        out.push({
+          url:       src,
+          seller:    ctx.seller    || '',
+          price:     ctx.price     || '',
+          title:     ctx.title     || '',
+          alt:       img.getAttribute?.('alt') || '',
+          titleAttr: img.getAttribute?.('title') || '',
+          linkText:  ctx.linkText  || '',
+          source:    'organic',
+        });
+      }
+    }
     return out;
   }
 
@@ -984,17 +1136,158 @@
     return raw.split(/[›>·•|\s]/)[0].replace(/^https?:\/\//, '').replace(/^www\./, '');
   }
 
+  // Price-line context-rejection: lines like "Rs. 500 OFF on first purchase",
+  // "EMI starting Rs. 199/month", "Rs. 50 cashback", "Rs. 30 / 100g" don't
+  // represent the product's actual price — they're discounts, EMIs, or
+  // per-unit values. Without this filter the parser was reporting 1mg.com
+  // at Rs. 500 for a Rs. 2,000+ bottle (a "₹500 OFF" coupon banner).
+  const _BAD_PRICE_CONTEXT_RE = /\b(off|save|cashback|discount|emi|per\s*month|\/\s*month|per\s*day|\/\s*day|per\s*serving|\/\s*serving|starting|starts\s+at|from\s+rs|coupon|deal|flat\b)\b/i;
+  const _PER_UNIT_RE          = /\/\s*(?:g|gm|kg|ml|l|oz|lb|pack|capsule|tablet|count|piece|each)\b/i;
+
+  // Try to pick the prominent price node within an element — sites
+  // typically wrap the real price in a dedicated element (often visually
+  // larger) while discounts / EMIs / strikethrough originals sit in
+  // smaller siblings. We prefer:
+  //   1. Elements that ALREADY look like price displays (.price, etc.)
+  //   2. The price token with the largest numeric value that survives the
+  //      bad-context filter (real price is almost always > coupon/EMI).
+  function _findPriceNode(el) {
+    const candidates = el.querySelectorAll(
+      '.price, [class*="price" i]:not([class*="strike" i]):not([class*="original" i]):not([class*="mrp" i]):not([class*="discount" i]), ' +
+      '.sh-dgr__price, .a8Pemb, span.a8Pemb, [aria-label*="price" i], [data-attrid*="price" i]'
+    );
+    for (const c of candidates) {
+      if (!isElementVisible(c)) continue;
+      const t = (c.innerText || '').trim();
+      if (!t) continue;
+      // Skip if the matched node text is a coupon/EMI/per-unit context
+      if (_BAD_PRICE_CONTEXT_RE.test(t)) continue;
+      if (_PER_UNIT_RE.test(t)) continue;
+      const m = t.match(PRICE_RE_GLOBAL);
+      if (m) return m[0].replace(/\s+/g, ' ').trim();
+    }
+    return null;
+  }
+
+  function _pricesFromText(text) {
+    // Walk the text line by line — discount banners typically live on
+    // their own line, so we can filter each candidate by its line context
+    // rather than rejecting the whole element.
+    const out = [];
+    const lines = text.split(/[\n••|]/);
+    for (const line of lines) {
+      const ln = line.trim();
+      if (!ln) continue;
+      if (_BAD_PRICE_CONTEXT_RE.test(ln)) continue;
+      if (_PER_UNIT_RE.test(ln)) continue;
+      let m;
+      const re = new RegExp(PRICE_RE_GLOBAL.source, 'gi');
+      while ((m = re.exec(ln)) !== null) {
+        out.push(m[0].replace(/\s+/g, ' ').trim());
+      }
+    }
+    return out;
+  }
+
+  // Parse a price string into a numeric INR value. Returns { value, raw,
+  // currency, converted }. USD prices get converted using USD_TO_INR_RATE
+  // exposed on window for the offscreen/sandbox to consume; here in the
+  // content script we use a hard-coded fallback that matches the config.
+  // Returns null on parse failure.
+  const _USD_TO_INR_FALLBACK = 83; // mirror of config; content script can't import ES modules
+  function _normalizePrice(raw) {
+    if (!raw || typeof raw !== 'string') return null;
+    const s = raw.replace(/\s+/g, '').trim();
+    let currency = 'INR';
+    let converted = false;
+    if (/^\$/.test(s) || /^US\$/i.test(s)) currency = 'USD';
+    else if (/^€/.test(s)) currency = 'EUR';
+    else if (/^£/.test(s)) currency = 'GBP';
+    else if (/^(?:Rs|INR|₹)/i.test(s)) currency = 'INR';
+    const m = s.match(/(\d[\d,]*(?:\.\d{1,2})?)/);
+    if (!m) return null;
+    const numeric = parseFloat(m[1].replace(/,/g, ''));
+    if (!isFinite(numeric)) return null;
+    let valueInr = numeric;
+    if (currency === 'USD') { valueInr = numeric * _USD_TO_INR_FALLBACK; converted = true; }
+    else if (currency === 'EUR') { valueInr = numeric * 90; converted = true; }
+    else if (currency === 'GBP') { valueInr = numeric * 105; converted = true; }
+    return { value: Math.round(valueInr), raw, currency, converted };
+  }
+
   function extractPrice(el) {
+    // Step 1: try a dedicated price-display node — wins over text-scan.
+    const fromNode = _findPriceNode(el);
+    if (fromNode) return fromNode;
+    // Step 2: walk lines, reject discount/EMI/per-unit, return the largest
+    // remaining value (real prices tend to be the largest non-coupon
+    // number in a card). Without this the parser was grabbing "Rs. 500"
+    // from a "Rs. 500 OFF" banner that appeared earlier in the text than
+    // the actual Rs. 2,099 product price.
     const text = (el.innerText || '').slice(0, 1200);
-    const m = text.match(PRICE_RE_GLOBAL);
-    return m ? m[0].replace(/\s+/g, ' ').trim() : '';
+    const candidates = _pricesFromText(text);
+    if (candidates.length === 0) return '';
+    let best = candidates[0];
+    let bestVal = -1;
+    for (const c of candidates) {
+      const n = _normalizePrice(c);
+      if (n && n.value > bestVal) { bestVal = n.value; best = c; }
+    }
+    return best;
+  }
+
+  // Non-retailer / publisher / content-site blocklist. These domains
+  // routinely appear on shopping-adjacent SERPs (medical / nutrition
+  // queries especially) and were being counted as "sellers", inflating
+  // totalSellers and through it the +seller bonus in ad_rating. Anything
+  // here is dropped at the seller-extraction layer so it never reaches
+  // sellers_on_serp / top_match_seller / matched_sellers downstream.
+  //
+  // Also rejects .gov and .edu TLDs (any subdomain).
+  const NON_RETAILER_DOMAINS = new Set([
+    // Medical / health publishers
+    'hopkinsmedicine.org', 'health.harvard.edu', 'healthline.com',
+    'goodrx.com', 'consumerlab.com', 'webmd.com', 'medlineplus.gov',
+    'mayoclinic.org', 'clevelandclinic.org', 'drugs.com', 'rxlist.com',
+    'pubmed.ncbi.nlm.nih.gov', 'nih.gov', 'cdc.gov', 'who.int',
+    // Video / social / forums
+    'youtube.com', 'youtu.be', 'reddit.com', 'quora.com', 'facebook.com',
+    'instagram.com', 'twitter.com', 'x.com', 'tiktok.com', 'pinterest.com',
+    // Editorial / lifestyle / Q&A
+    'vogue.co.uk', 'vogue.com', 'glutenfreesociety.org', 'tuasaude.com',
+    'verywellhealth.com', 'verywellfit.com', 'self.com', 'menshealth.com',
+    'womenshealthmag.com', 'eatthis.com', 'livestrong.com',
+    // General reference
+    'wikipedia.org', 'en.wikipedia.org',
+  ]);
+  function _isNonRetailer(domain) {
+    if (!domain) return true;
+    const d = String(domain).toLowerCase().replace(/^www\./, '');
+    if (NON_RETAILER_DOMAINS.has(d)) return true;
+    // TLD rejects — any subdomain of .gov / .edu / .ac.* (academic)
+    if (/\.gov(\.[a-z]{2,3})?$/.test(d)) return true;
+    if (/\.edu(\.[a-z]{2,3})?$/.test(d)) return true;
+    if (/\.ac\.[a-z]{2,3}$/.test(d)) return true;
+    return false;
   }
 
   function collectAllSellers() {
     const sellersByDomain = new Map();
     const push = (entry) => {
       if (!entry || !entry.domain) return;
+      if (_isNonRetailer(entry.domain)) return; // publisher / content / academic
       if (sellersByDomain.has(entry.domain)) return; // first wins
+      // Attach a normalised INR value so downstream comparisons / top-match
+      // selection don't mix currencies. Original raw string stays in
+      // entry.price so the export can show the original symbol.
+      if (entry.price) {
+        const n = _normalizePrice(entry.price);
+        if (n) {
+          entry.priceValueInr = n.value;
+          entry.priceCurrency = n.currency;
+          entry.priceConverted = n.converted;
+        }
+      }
       sellersByDomain.set(entry.domain, entry);
     };
 

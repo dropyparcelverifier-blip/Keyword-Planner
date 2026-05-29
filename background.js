@@ -22,6 +22,16 @@ import {
   extractProductSpecs,
   hasConflictingSpec,
   checkProductIdentity,
+  checkProductLineModifier,
+  checkCompetitorBrand,
+  buildSiblingExclusions,
+  checkSiblingProduct,
+  checkVariantSlot,
+  checkColorConflict,
+  checkNameSwap,
+  parseQty,
+  baseKey,
+  checkSiblingAmbiguity,
 } from './modules/keyword-filter.js';
 import {
   STORAGE_KEY_LAST_REPORT,
@@ -275,6 +285,13 @@ async function handleStart(msg) {
   state.pausedByCaptcha = false;
   if (!state.batchId) state.batchId = String(Date.now());
   state.lastStatus = 'Running';
+  // Keep the screen on for the duration of the run. A 30+ product run
+  // takes several hours and the user typically walks away; if the display
+  // sleeps the visibility-throttling of the SERP tabs starts dropping
+  // image loads and the CLIP model's offscreen sandbox occasionally times
+  // out. 'display' level keeps both the screen and the system awake.
+  // Released in the finally block of the engine wrapper below.
+  try { chrome.power?.requestKeepAwake?.('display'); } catch {}
   // Set the run-intent flag BEFORE the engine starts. If we crash between
   // here and the first persistReport, the watchdog / onStartup paths will
   // re-enter and resume from the saved doneProducts list.
@@ -319,6 +336,16 @@ async function handleStart(msg) {
           extractProductSpecs,
           hasConflictingSpec,
           checkProductIdentity,
+          checkProductLineModifier,
+          checkCompetitorBrand,
+          buildSiblingExclusions,
+          checkSiblingProduct,
+          checkVariantSlot,
+          checkColorConflict,
+          checkNameSwap,
+          parseQty,
+          baseKey,
+          checkSiblingAmbiguity,
           onRowAdded: async () => {
             state.report = Array.from(reportMap.values());
             await persistReport();
@@ -381,6 +408,7 @@ async function handleStart(msg) {
     } finally {
       state.running = false;
       state.stopRequested = false;
+      try { chrome.power?.releaseKeepAwake?.(); } catch {}
     }
   })();
 

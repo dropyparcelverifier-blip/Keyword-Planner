@@ -12,7 +12,8 @@
     "sidePanel",
     "offscreen",
     "search",
-    "alarms"
+    "alarms",
+    "power"
   ],
   "host_permissions": [
     "https://www.google.com/*",

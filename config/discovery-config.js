@@ -145,6 +145,15 @@ export const ELEMENT_WAIT_TIMEOUT_MS     = 20000;
 export const KP_HYDRATE_TIMEOUT_MS       = 45000;
 export const KP_TABLE_TIMEOUT_MS         = 90000;
 
+// Currency normalisation. Store-locale is gl=in → INR. When the SERP shows
+// a USD price (often on nowfoods.com / iherb.com), we convert at this rate
+// so price aggregation can sort/compare numerically. Marked as "converted"
+// in the row so the user knows the value isn't a live retailer quote.
+//
+// Update periodically. A stale rate by ±10% doesn't change shopping-rank
+// decisions but will show up if the user compares to live prices.
+export const USD_TO_INR_RATE             = 83;
+
 // Status strings persisted to chrome.storage. The popup uses these to render
 // different UI (e.g. show a Resume button when paused-by-captcha).
 export const STATUS_IDLE            = 'Idle';

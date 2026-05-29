@@ -546,14 +546,49 @@ function _digitPrefixRegex(formBase) {
   return new RegExp(`\\d(?:${formBase}|${plural})\\b`, 'i');
 }
 
+// Dosage forms ranked HIGHEST — these are what the product physically IS.
+// Standalone product forms (oil, cream, etc.) are secondary because they
+// often describe an INGREDIENT in a dosage-form product ("fish oil 200
+// softgels" — the product is a softgel, not an oil).
+const _DOSAGE_FORMS = ['softgel', 'capsule', 'tablet', 'caplet', 'lozenge', 'gummy', 'chewable', 'pill'];
+// "oil" needs special handling because it appears as an ingredient name
+// in many supplements. Reject "oil" as the form factor when it follows
+// fish/cod/krill/flax/essential/coconut/olive/castor — those are oil
+// INGREDIENTS in a softgel/capsule, not "oil" the form factor.
+// Oil-as-ingredient context — when "oil" follows one of these words it's
+// describing the ACTIVE INGREDIENT in a dosage-form product (a softgel /
+// capsule of fish oil), not the form factor. Without this guard,
+// "Now Foods Fish Oil 200 Softgels" gets form=oil instead of form=softgel.
+// "Baby Oil" / "Hair Oil" / "Body Oil" are NOT in this list — those are
+// product-form names where oil IS the form.
+const _OIL_INGREDIENT_RE = /\b(?:fish|cod|krill|flax|flaxseed|essential|coconut|olive|castor|jojoba|argan|borage|primrose|hemp|almond|avocado|rosemary|sunflower|sesame|mustard|peanut|soybean|palm|canola|vegetable|mineral|motor|engine|cooking|safflower|grapeseed|walnut|tea\s+tree|black\s+seed|black\s+cumin|moringa|emu|salmon|liver|cbd|hempseed)\s+oil\b/i;
+
 export function extractFormFactor(rawProductName, category) {
   const name = String(rawProductName || '').toLowerCase();
   if (!name) return null;
   const forms = ALL_FORM_FACTORS[category] || ALL_FORM_FACTORS.general;
-  for (const form of forms) {
+
+  // Pass 1: dosage forms with a count prefix ("200 softgels", "60 capsules").
+  // This is the most reliable signal of what the product physically is.
+  for (const form of _DOSAGE_FORMS) {
+    if (!forms.includes(form)) continue;
+    const countPrefixed = new RegExp(`\\b\\d+\\s*(?:${form}|${form}s)\\b`, 'i');
+    if (countPrefixed.test(name)) return form;
+  }
+  // Pass 2: standalone dosage form mention ("Softgels", "Capsules").
+  for (const form of _DOSAGE_FORMS) {
+    if (!forms.includes(form)) continue;
     if (_formRegex(form).test(name)) return form;
   }
-  // Fallback: concatenated digit + form word ("250tablets", "60capsules").
+  // Pass 3: product forms (cream, lotion, oil, etc.) — but guard "oil"
+  // against ingredient-mode usage ("fish oil 200 softgels" should not
+  // be classified as form=oil).
+  for (const form of forms) {
+    if (_DOSAGE_FORMS.includes(form)) continue;
+    if (form === 'oil' && _OIL_INGREDIENT_RE.test(name)) continue;
+    if (_formRegex(form).test(name)) return form;
+  }
+  // Pass 4: digit-prefixed concatenated form ("250tablets", "60capsules").
   for (const form of forms) {
     if (_digitPrefixRegex(form).test(name)) return form;
   }
@@ -834,6 +869,478 @@ const _HOMEOPATHIC_RE = /\b(mother\s+tincture|biochemic|homeopath|homoeopath|\d+
 const _WRONG_AUDIENCE_RE = /\b(for\s+(dogs?|cats?|pets?|horses?|cattle|livestock|puppies|kittens|birds?|fish|rabbits?)|(?:dog|cat|pet|horse|cattle|livestock|puppy|kitten|bird|rabbit)\s+(?:supplement|food|chew|treat|shampoo|conditioner)|veterinary|vet\s+(?:supplement|grade|formula))\b/i;
 const _WRONG_AUDIENCE_CATEGORIES = new Set(['supplement', 'health', 'skincare', 'haircare']);
 
+// Product-line modifiers. When one of these appears in a KEYWORD but is
+// absent from our product's name, it almost always names a SIBLING product
+// from the same brand. Example: our product = "Now Foods Omega 3 Fish Oil";
+// keyword = "now foods ULTRA omega 3" — same brand, same anchor tokens
+// (omega, 3, fish, oil) all present, but "Ultra Omega 3" is a different
+// formulation (different EPA/DHA ratio, different bottle, different price).
+// The identity check at the IMAGE layer catches the wrong-product image,
+// but at the keyword layer this rejects the wasted SERP load too.
+//
+// The "in keyword AND NOT in product name" rule handles the tricky case
+// of products where the modifier IS the product line ("Super Enzymes" —
+// `super` is in productType, so keywords containing "super enzymes" pass).
+const _PRODUCT_LINE_MODIFIERS = [
+  'ultra', 'super', 'mega',
+  'double strength', 'triple strength', 'extra strength', 'high potency',
+  'enteric coated', 'time release', 'sustained release', 'slow release',
+  'sport', 'premium', 'max', 'pro', 'plus', 'advanced',
+  'gold', 'platinum', 'elite', 'prime',
+  'mini', 'junior', 'kids', 'children',
+  'liquid', 'gummies', 'chewable', 'powder',
+];
+const _PRODUCT_LINE_MODIFIER_RES = _PRODUCT_LINE_MODIFIERS.map(m => ({
+  text: m,
+  re:   new RegExp(`\\b${m.replace(/\s+/g, '\\s+')}\\b`, 'i'),
+}));
+
+// Returns { match: true, modifier } when `text` contains a modifier the
+// product itself doesn't use; null otherwise.
+export function checkProductLineModifier(text, productContext) {
+  if (!productContext) return null;
+  const haystack = String(text || '').toLowerCase();
+  if (!haystack) return null;
+  const ourName = `${productContext.productType || ''} ${productContext.fullProductName || ''}`.toLowerCase();
+  for (const { text: modText, re } of _PRODUCT_LINE_MODIFIER_RES) {
+    if (re.test(haystack) && !re.test(ourName)) {
+      return { match: true, modifier: modText };
+    }
+  }
+  return null;
+}
+
+// ============ Shade / model name swap (scoped to cosmetics) ============
+// Catches keywords that swap a SHADE or MODEL name on the same product
+// line — "Maybelline 80 Ruler" product, keyword "maybelline 20 Pioneer".
+// The classic identity / line / sibling layers can't catch this because
+// both shade names ARE legitimate words in the product line; the question
+// is whether the right one is referenced.
+//
+// The rule is dangerous when applied broadly — supplements / generic
+// retail keywords routinely add commerce/intent words ("amazon", "price
+// india", "review", "side effects") that look like "new" name tokens.
+// Two safeguards:
+//   1. Only fire on cosmetics-style products (lipstick / foundation /
+//      mascara / nail polish / etc.). Detected from productType keywords.
+//   2. Strict trigger: ≥2 extra-in-keyword AND ≥2 missing-from-keyword
+//      meaningful tokens, AFTER filtering a protected commerce/intent
+//      vocabulary. A 1+1 trigger over-rejects.
+const _COSMETICS_FORMS = new Set([
+  'lipstick', 'lip', 'gloss', 'foundation', 'mascara', 'eyeliner', 'eye',
+  'blush', 'bronzer', 'highlighter', 'concealer', 'primer', 'powder',
+  'eyeshadow', 'shadow', 'liner', 'pencil', 'tint', 'stain',
+  'nail', 'polish', 'lacquer', 'gel',
+  'palette', 'kit',
+]);
+
+function _isShadeVariantProduct(productContext) {
+  if (!productContext) return false;
+  const text = `${productContext.productType || ''} ${productContext.fullProductName || ''}`.toLowerCase();
+  if (!text) return false;
+  for (const w of text.split(/[\s,/.()&-]+/)) {
+    if (_COSMETICS_FORMS.has(w)) return true;
+  }
+  return false;
+}
+
+// Protected vocabulary: commerce / geo / intent words that legitimately
+// appear in keyword expansions and should NEVER be counted as "extra name
+// tokens" that imply a shade swap. Expandable without code change — add
+// strings here as you discover legitimate keywords falsely rejected.
+const _NAMESWAP_PROTECTED = new Set([
+  // Marketplaces
+  'amazon', 'flipkart', 'iherb', 'nykaa', 'myntra', 'ajio', 'meesho',
+  '1mg', 'pharmeasy', 'apollo', 'tata', 'cliq', 'shopify', 'walmart',
+  'target', 'sephora', 'ulta', 'boots', 'cvs', 'rite',
+  // Geo qualifiers
+  'india', 'usa', 'uk', 'online', 'near', 'me', 'in', 'shop',
+  'delivery', 'shipping', 'available', 'store',
+  // Intent / info words
+  'review', 'reviews', 'rating', 'ratings', 'price', 'cost', 'buy',
+  'best', 'top', 'cheapest', 'discount', 'offer', 'deal', 'coupon',
+  'sale', 'free', 'shipping',
+  'vs', 'versus', 'compared', 'comparison', 'alternative',
+  'side', 'effects', 'effect', 'benefits', 'benefit', 'uses', 'use',
+  'usage', 'dosage', 'dose', 'how', 'when', 'why', 'what',
+  'ingredients', 'composition', 'safety', 'safe',
+  // Common modifiers / fillers that aren't cosmetic identity markers
+  'original', 'authentic', 'genuine', 'new', 'latest',
+  'set', 'combo', 'pack', 'pack of', 'box',
+  // Common audience words
+  'women', 'men', 'girls', 'boys', 'ladies',
+  // Numeric noise (parsed elsewhere; not identity)
+  'pcs', 'qty', 'piece', 'pieces',
+]);
+
+function _meaningfulTokens(text, ourBrand) {
+  if (!text) return [];
+  let t = String(text).toLowerCase();
+  // Strip brand
+  if (ourBrand) {
+    for (const b of ourBrand.toLowerCase().split(/\s+/)) {
+      if (b.length > 1) {
+        t = t.replace(new RegExp(`\\b${b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), ' ');
+      }
+    }
+  }
+  // Strip number+unit specs (parsed at the spec layer, not identity).
+  t = t.replace(/\b\d+\.?\d*\s*(mg|mcg|µg|iu|ui|ml|fl\s*oz|oz|l|g|gm|kg|lb|gb|tb|w|mah|epa|dha|spf|softgel|capsule|tablet|caplet|gummy|count|ct|pcs?|pack)s?\b/gi, ' ');
+  // Strip bare numbers.
+  t = t.replace(/\b\d+\b/g, ' ');
+  // Tokenise.
+  return t.split(/[\s,/.()&-]+/).filter(w => w.length > 1 && !_NAMESWAP_PROTECTED.has(w));
+}
+
+// Returns { match, extras, missing } when keyword/context looks like a
+// shade / model name swap on a cosmetics product. null otherwise.
+//
+// Trigger: ≥2 meaningful tokens in text that aren't in our name AND ≥2
+// meaningful tokens in our name that aren't in the text. Both sides need
+// "real swap" evidence to avoid rejecting legit commerce keywords.
+export function checkNameSwap(text, productContext) {
+  if (!productContext) return null;
+  if (!_isShadeVariantProduct(productContext)) return null;
+  const haystack = String(text || '');
+  if (!haystack) return null;
+  const ourName = `${productContext.productType || ''} ${productContext.fullProductName || ''}`;
+  const ourBrand = productContext.brandName || '';
+  const ourTokens = new Set(_meaningfulTokens(ourName, ourBrand));
+  if (ourTokens.size < 2) return null; // not enough product-identity vocabulary to compare
+  const theirTokens = new Set(_meaningfulTokens(haystack, ourBrand));
+  if (theirTokens.size === 0) return null;
+  const extras = [...theirTokens].filter(w => !ourTokens.has(w));
+  const missing = [...ourTokens].filter(w => !theirTokens.has(w));
+  if (extras.length >= 2 && missing.length >= 2) {
+    return {
+      match: true,
+      extras: extras.slice(0, 4),
+      missing: missing.slice(0, 4),
+    };
+  }
+  return null;
+}
+
+// ============ Color conflict ============
+// For products that exist in multiple colors / shades (cosmetics, apparel,
+// electronics, footwear, hair color, nail polish), a different color name
+// in the keyword/context indicates a different SKU even when brand +
+// identity + form all match.
+//
+// Symmetric rule: only fires when BOTH our product name AND the text
+// contain at least one color, AND none of the text's colors are in our
+// product's color set. A multi-color page that includes our color
+// alongside others doesn't trigger (ours is present).
+const _COLOR_WORDS = new Set([
+  // Primary + secondary
+  'red','blue','green','black','white','pink','purple','violet','orange','yellow',
+  'brown','grey','gray','beige','ivory','tan',
+  // Tints / shades
+  'nude','coral','berry','mauve','burgundy','wine','rose','lilac','lavender',
+  'crimson','scarlet','navy','teal','turquoise','maroon','peach','plum','cherry',
+  'chocolate','caramel','honey','amber','rust','sage','olive','mint','aqua',
+  'indigo','magenta','fuchsia','champagne','taupe','charcoal','onyx','pearl',
+  // Metals
+  'silver','gold','titanium','bronze','copper','platinum',
+  // Hair-color terms
+  'blonde','brunette','auburn',
+]);
+
+// Returns { match, ours, theirs } when text names a color our product
+// doesn't use; null otherwise.
+export function checkColorConflict(text, productContext) {
+  if (!productContext) return null;
+  const haystack = String(text || '').toLowerCase();
+  if (!haystack) return null;
+  const ourText = `${productContext.productType || ''} ${productContext.fullProductName || ''}`.toLowerCase();
+  if (!ourText) return null;
+
+  // Cache our colors on the context — same idea as the slot-words cache.
+  let ourColors = productContext._colorWords;
+  if (!ourColors) {
+    ourColors = new Set();
+    for (const w of ourText.split(/[\s,/.()&-]+/)) {
+      if (_COLOR_WORDS.has(w)) ourColors.add(w);
+    }
+    productContext._colorWords = ourColors;
+  }
+  if (ourColors.size === 0) return null; // not a color-variant product
+
+  const theirColors = new Set();
+  for (const w of haystack.split(/[\s,/.()&-]+/)) {
+    if (_COLOR_WORDS.has(w)) theirColors.add(w);
+  }
+  if (theirColors.size === 0) return null; // text doesn't mention a color
+  // If any of the text's colors matches ours, it's a same-color (or
+  // multi-variant page); not a conflict.
+  for (const c of theirColors) if (ourColors.has(c)) return null;
+  // Otherwise: text named at least one color, none ours.
+  const theirsArr = Array.from(theirColors);
+  return {
+    match: true,
+    ours: Array.from(ourColors).join('/'),
+    theirs: theirsArr[0],
+  };
+}
+
+// ============ Variant slot conflicts ============
+// Many same-brand SKUs differ on a SINGLE qualifier word that names a
+// product-line slot: day vs night, AM vs PM, men vs women, adult vs baby,
+// regular vs sensitive, dry vs oily, wired vs wireless, matte vs glossy,
+// scented vs unscented. Bottles look near-identical (so CLIP can't tell
+// them apart), brand and core anchor match, and the only differentiator
+// is which side of the pair the keyword/context names.
+//
+// These pairs are explicitly catalogued — not auto-detected — because:
+//   • They're universal across categories (skincare, supplements, food,
+//     electronics, personal care all use these splits).
+//   • Auto-detection from product name + filler-list is brittle; explicit
+//     pairs let the engine reason about "if product is A, text saying B is
+//     a wrong-SKU signal".
+// Pairs are symmetric: each pair is checked both directions.
+const _VARIANT_SLOT_PAIRS = [
+  // Time of day / use-cycle
+  ['day', 'night'],
+  ['am', 'pm'],
+  ['morning', 'evening'], ['morning', 'night'],
+  // Demographic
+  ['men', 'women'], ['man', 'woman'], ['male', 'female'],
+  ['boys', 'girls'],
+  ['adult', 'baby'], ['adult', 'kids'], ['adult', 'children'], ['adult', 'infant'],
+  ['adult', 'junior'],
+  // Skin / formulation profile
+  ['regular', 'sensitive'], ['normal', 'sensitive'],
+  ['dry', 'oily'], ['dry', 'combination'], ['dry', 'normal'],
+  ['gentle', 'deep'], ['mild', 'strong'], ['light', 'rich'],
+  ['oil-free', 'moisturizing'], ['matte', 'glossy'], ['matte', 'satin'],
+  ['scented', 'unscented'], ['fragranced', 'unscented'],
+  ['original', 'sensitive'], ['classic', 'sensitive'],
+  // Temperature / season
+  ['hot', 'cold'], ['warm', 'cool'], ['summer', 'winter'],
+  // Use context
+  ['indoor', 'outdoor'],
+  ['travel', 'home'],
+  // Connectivity
+  ['wired', 'wireless'], ['bluetooth', 'wired'],
+  // Cosmetics / nail polish / lipstick formulations
+  ['gel', 'lacquer'], ['gel', 'cream'], ['gel', 'liquid'],
+  ['matte', 'vinyl'], ['matte', 'glossy'], ['matte', 'satin'],
+  ['cream', 'liquid'],
+  // Hair color / type
+  ['permanent', 'semi-permanent'], ['permanent', 'temporary'],
+];
+
+// Build a per-product set of "our qualifier words" so checkVariantSlot can
+// determine, for each pair, which side IS ours. Words come from
+// productType + fullProductName, lowercased, broken on whitespace, with
+// punctuation stripped.
+function _ourSlotWords(productContext) {
+  const text = `${productContext?.productType || ''} ${productContext?.fullProductName || ''}`.toLowerCase();
+  return new Set(text.split(/[\s,/.()&-]+/).filter(Boolean));
+}
+
+// Returns { match, ours, theirs } when text names the OPPOSITE side of a
+// pair our product is on; null otherwise. Word-boundary regex against the
+// candidate text — multi-word entries (none currently, but kept for
+// future) get whitespace-collapsing.
+export function checkVariantSlot(text, productContext) {
+  if (!productContext) return null;
+  const haystack = String(text || '').toLowerCase();
+  if (!haystack) return null;
+  const ourWords = productContext._slotWords || _ourSlotWords(productContext);
+  if (!productContext._slotWords) productContext._slotWords = ourWords;
+  for (const [a, b] of _VARIANT_SLOT_PAIRS) {
+    const ourSideA = ourWords.has(a);
+    const ourSideB = ourWords.has(b);
+    if (ourSideA === ourSideB) continue; // either both or neither — pair doesn't apply
+    const ours    = ourSideA ? a : b;
+    const theirs  = ourSideA ? b : a;
+    const re = new RegExp(`\\b${theirs.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')}\\b`, 'i');
+    if (re.test(haystack)) return { match: true, ours, theirs };
+  }
+  return null;
+}
+
+// ============ Brand-family sibling exclusions ============
+// Big brands (Now Foods, CeraVe, Aveeno, Johnson's, Cetaphil) sell dozens
+// of products that share packaging aesthetics so closely CLIP can't tell
+// them apart (CLIP scores 88-97 on visually-near-identical bottles of
+// completely different SKUs). Text-based veto is the only defense.
+//
+// buildSiblingExclusions analyses the product name and returns a list of
+// terms that, if present in a SERP context or keyword, indicate a SIBLING
+// product (same brand, different SKU). Three families of exclusion:
+//   • form-alternatives — when our product is a softgel, terms like
+//     "tablet" / "capsule" / "gummy" / "cream" / "lotion" mark a sibling
+//   • brand-family patterns — hand-encoded for common product families
+//     ("3-6-9" / "dha-1000" / "mini gel" / "red omega" for Omega 3 line;
+//     "AM" / "PM" / "SA" for CeraVe; etc.)
+//   • product-name antonyms — auto-derived; if our name says "regular",
+//     siblings include "advanced", "ultra", "premium", etc.
+//
+// All terms are filtered against the product name BEFORE inclusion — if
+// the name itself contains the term, it's the product line and we don't
+// exclude. The terms map nicely onto the same word-boundary regex used
+// by checkProductLineModifier.
+
+// Sibling form alternatives: when our form is X, presence of Y in a
+// keyword/context indicates a different SKU from the same brand.
+const _FORM_SIBLINGS = {
+  softgel:  ['tablet', 'capsule', 'gummy', 'gummies', 'chewable', 'chew', 'liquid', 'powder', 'spray', 'drops', 'cream', 'lotion', 'serum'],
+  capsule:  ['tablet', 'softgel', 'gummy', 'gummies', 'chewable', 'chew', 'liquid', 'powder', 'spray', 'drops', 'cream', 'lotion', 'serum'],
+  tablet:   ['softgel', 'capsule', 'gummy', 'gummies', 'chewable', 'chew', 'liquid', 'powder', 'spray', 'drops', 'cream', 'lotion', 'serum'],
+  pill:     ['softgel', 'capsule', 'tablet', 'gummy', 'liquid', 'powder'],
+  gummy:    ['softgel', 'capsule', 'tablet', 'liquid', 'powder'],
+  powder:   ['softgel', 'capsule', 'tablet', 'liquid', 'gummy', 'oil'],
+  liquid:   ['softgel', 'capsule', 'tablet', 'gummy', 'powder'],
+  cream:    ['lotion', 'serum', 'gel', 'ointment', 'oil', 'spray', 'foam', 'cleanser', 'toner', 'wash', 'scrub', 'mask', 'butter'],
+  lotion:   ['cream', 'serum', 'gel', 'ointment', 'oil', 'spray', 'foam', 'cleanser', 'toner', 'wash', 'scrub', 'mask'],
+  serum:    ['cream', 'lotion', 'gel', 'oil', 'cleanser', 'toner', 'wash', 'moisturizer'],
+  cleanser: ['cream', 'lotion', 'serum', 'oil', 'toner', 'moisturizer', 'mask', 'wash'],
+  oil:      ['cream', 'lotion', 'serum', 'gel', 'powder', 'spray', 'shampoo', 'conditioner'],
+  shampoo:  ['conditioner', 'oil', 'cream', 'lotion', 'serum', 'mask', 'spray'],
+};
+
+// Brand-family-specific sibling patterns. Each entry's `when` predicate
+// tests whether the product name belongs to this family; if so, the
+// listed terms (when ABSENT from the product name) are added as siblings.
+const _BRAND_FAMILY_SIBLINGS = [
+  // Now Foods Omega family — many sibling products in this line.
+  {
+    when: (n) => /\bomega\b/.test(n) && /\bfish\s+oil\b/.test(n),
+    terms: [
+      '3-6-9', '369', '3 6 9',     // Omega 3-6-9 blend
+      'red omega',                  // Red Omega (different formulation)
+      'tri-3d', 'tri 3d', 'tri3d',  // Tri-3D Omega
+      'dha-500', 'dha 500', 'dha500',
+      'dha-1000', 'dha 1000', 'dha1000',
+      'mini gel', 'mini gels',      // Mini Gels variant
+      'molecularly distilled gel',  // sibling variant marker
+      'enteric coated',             // enteric variant
+    ],
+  },
+  // Now Foods Enzymes family.
+  {
+    when: (n) => /\benzymes?\b/.test(n) && /\bnow\b/.test(n),
+    terms: [
+      'plant enzymes', 'papaya enzymes', 'pancreatin', 'bromelain only',
+      'digestive enzymes' /* gentle reject — different SKU; user can override */,
+    ],
+  },
+  // CeraVe day/night/SA distinctions.
+  {
+    when: (n) => /\bcerave\b/.test(n),
+    terms: ['am', 'pm', 'sa', 'baby', 'eye repair', 'healing'],
+    matchAsWord: true,  // short tokens — must match \bword\b
+  },
+  // Aveeno product line distinctions.
+  {
+    when: (n) => /\baveeno\b/.test(n),
+    terms: ['eczema', 'calm', 'relief', 'positively radiant', 'baby', 'clear complexion'],
+  },
+  // Johnson's product types — oil vs lotion vs shampoo are all separate SKUs.
+  {
+    when: (n) => /\bjohnsons?\b/.test(n) || /\bjohnson['’]s?\b/.test(n),
+    terms: ['cottontouch', 'milk + rice', 'bedtime'],
+  },
+];
+
+// Build the full sibling-exclusion list for a productContext. Cached on
+// the context object so we don't rebuild per keyword. Returns an array
+// of { term, type, matchAsWord }.
+export function buildSiblingExclusions(productContext) {
+  if (!productContext) return [];
+  const name = `${productContext.productType || ''} ${productContext.fullProductName || ''}`.toLowerCase();
+  if (!name) return [];
+  const exclusions = [];
+  const seen = new Set();
+  const push = (term, type, matchAsWord = false) => {
+    const key = `${term}|${type}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    exclusions.push({ term, type, matchAsWord });
+  };
+
+  // Form-alternative siblings.
+  const form = productContext.formFactor;
+  if (form && _FORM_SIBLINGS[form]) {
+    for (const alt of _FORM_SIBLINGS[form]) {
+      // Skip if our name contains the alt form (multi-form combo product).
+      if (new RegExp(`\\b${alt}\\b`, 'i').test(name)) continue;
+      push(alt, 'wrong_form');
+    }
+  }
+
+  // Brand-family sibling patterns.
+  for (const family of _BRAND_FAMILY_SIBLINGS) {
+    if (!family.when(name)) continue;
+    for (const term of family.terms) {
+      if (name.includes(term)) continue; // we ARE this sibling
+      push(term, 'brand_family_sibling', family.matchAsWord === true);
+    }
+  }
+
+  return exclusions;
+}
+
+// Check a single text against productContext.siblingExclusions. Returns
+// the first hit's descriptor or null. Pre-computed regexes are cached on
+// the exclusion entry on first use.
+export function checkSiblingProduct(text, productContext) {
+  if (!productContext) return null;
+  const exclusions = productContext.siblingExclusions;
+  if (!Array.isArray(exclusions) || exclusions.length === 0) return null;
+  const haystack = String(text || '').toLowerCase();
+  if (!haystack) return null;
+  for (const ex of exclusions) {
+    if (!ex._re) {
+      // Word-boundary regex for everything — even multi-word terms.
+      const escaped = ex.term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+      ex._re = new RegExp(`\\b${escaped}\\b`, 'i');
+    }
+    if (ex._re.test(haystack)) return { term: ex.term, type: ex.type };
+  }
+  return null;
+}
+
+// Known supplement / health brand list for competitor-brand rejection.
+// When a keyword names one of these brands and that brand isn't ours, the
+// query is shopping for a different brand entirely (or a comparison) and
+// shouldn't burn a SERP load. Substring-matched as whole phrases so
+// "now" alone doesn't trigger "now foods" rejection on our own keywords.
+const _KNOWN_COMPETITOR_BRANDS = [
+  'now foods', 'now supplements', 'nature made', 'nature\'s bounty', 'natures bounty',
+  'nordic naturals', 'garden of life', 'vitabiotics', 'solgar', 'gnc', 'kirkland',
+  'swanson', 'life extension', 'doctor\'s best', 'doctors best',
+  'jarrow', 'carlson', 'nutrilite', 'amway', 'himalaya', 'muscleblaze',
+  'optimum nutrition', 'myprotein', 'healthkart', 'oziva', 'wellbeing',
+  'centrum', 'seven seas', 'blackmores', 'puritan\'s pride', 'puritans pride',
+  'pharmeasy', 'apollo pharmacy', 'wellness forever',
+  'cerave', 'cetaphil', 'neutrogena', 'olay', 'l\'oreal', 'loreal',
+  'mamaearth', 'plum', 'wow skin', 'minimalist', 'biotique',
+];
+const _COMPETITOR_BRAND_RES = _KNOWN_COMPETITOR_BRANDS.map(b => ({
+  text: b,
+  re:   new RegExp(`\\b${b.replace(/'/g, "[']?").replace(/\s+/g, '\\s+')}\\b`, 'i'),
+}));
+
+// Returns { match: true, brand } when `text` contains a competitor brand
+// name that's not ours; null otherwise.
+export function checkCompetitorBrand(text, productContext) {
+  if (!productContext) return null;
+  const haystack = String(text || '').toLowerCase();
+  if (!haystack) return null;
+  const ourBrand = String(productContext.brandName || '').toLowerCase();
+  const ourAliases = (productContext.brandAliases || []).map(a => String(a).toLowerCase());
+  for (const { text: brandText, re } of _COMPETITOR_BRAND_RES) {
+    // Skip our own brand — never reject ourselves.
+    if (brandText === ourBrand) continue;
+    if (ourAliases.some(a => a === brandText)) continue;
+    if (re.test(haystack)) return { match: true, brand: brandText };
+  }
+  return null;
+}
+
 // Commercial-intent vocabulary for Tier-4 promotion. Anchor-only queries
 // without any commercial cue are usually educational ("what is alfalfa
 // plant", "alfalfa nutrition value") and aren't worth a SERP load.
@@ -893,6 +1400,53 @@ export function classifyKeyword(keyword, productContext) {
   if (productContext.specs && hasConflictingSpec(kw, productContext.specs).length > 0) {
     return reject('wrong_variant_keyword');
   }
+
+  // Wrong-product-line reject: keyword contains a modifier (ultra / super /
+  // double strength / extra strength / etc.) that our product's name
+  // doesn't carry. Same-brand sibling product — different formulation.
+  // Bigger driver of false positives than wrong_variant on product lines
+  // like "Omega 3 Fish Oil" (where "Ultra Omega 3" passes brand+anchor).
+  const lineMod = checkProductLineModifier(kw, productContext);
+  if (lineMod) return reject(`wrong_product_line:${lineMod.modifier}`);
+
+  // Competitor-brand reject: keyword names a different brand. "vitabiotics
+  // ultra omega 3 amazon" for our Now Foods product is shopping for the
+  // wrong brand. Comparison queries ("now foods vs solgar") also get
+  // rejected; the spec accepts that trade-off.
+  const compBrand = checkCompetitorBrand(kw, productContext);
+  if (compBrand) return reject(`competitor_brand:${compBrand.brand}`);
+
+  // Sibling-product reject: same brand, but the keyword names a sibling
+  // SKU — different form (tablet vs softgel), different family member
+  // (3-6-9 vs 3, DHA-1000 vs general fish oil, mini gel vs regular).
+  // Brand-family patterns are hardcoded for common families (Omega line,
+  // CeraVe, Aveeno, Johnson's); form-alternatives are derived from
+  // productContext.formFactor.
+  const sibling = checkSiblingProduct(kw, productContext);
+  if (sibling) return reject(`sibling_product:${sibling.term}`);
+
+  // Variant-slot reject: keyword names the opposite side of a paired
+  // product-line slot. Product is "day cream" but keyword names "night";
+  // product is "men's shampoo" but keyword names "women's". Catches the
+  // last common category of sibling-SKU mismatches that survives the
+  // other filters.
+  const slot = checkVariantSlot(kw, productContext);
+  if (slot) return reject(`variant_slot:${slot.ours}!=${slot.theirs}`);
+
+  // Color conflict reject: product name has color X, keyword has color Y
+  // with no overlap. Fires only when our product is a colored SKU
+  // ("Maybelline Matte Ink 80 Ruler RED") and the keyword names a
+  // different shade ("maybelline matte ink black"). Multi-shade queries
+  // that include our color pass through.
+  const colorConflict = checkColorConflict(kw, productContext);
+  if (colorConflict) return reject(`color_conflict:${colorConflict.ours}!=${colorConflict.theirs}`);
+
+  // Name-swap reject (cosmetics only): keyword has ≥2 unaccounted-for
+  // shade/model tokens AND drops ≥2 of ours. Strict trigger + protected
+  // commerce/intent vocab keeps the false-positive rate low. Only
+  // checked when product is a cosmetics-style SKU.
+  const swap = checkNameSwap(kw, productContext);
+  if (swap) return reject(`name_swap:+${swap.extras.join(',')}/-${swap.missing.join(',')}`);
 
   let hasBrand     = _hasBrandSubstr(kw, productContext.brandAliases);
   const hasAnchor   = _hasAnchor(kw, productContext.handleWords);
@@ -974,6 +1528,118 @@ export function checkProductIdentity(contextText, productContext) {
   return { match: missing.length === 0, missingWords: missing };
 }
 
+// ============ Sibling SKU ambiguity (universal quantity gate) ============
+// When the input batch contains multiple SKUs that share the same baseKey
+// (name with all quantity dimensions stripped) and differ ONLY on a
+// quantity dimension (count / dose / volume / mass), the SERP image is
+// visually identical across siblings. CLIP / color / brand / identity
+// cannot tell them apart. The discriminating dimension is the only valid
+// signal — and ONLY when the SERP context names a value for it.
+//
+// Three cases per match:
+//   1. ctx names the discriminator AND value matches ours → match ✓
+//   2. ctx names the discriminator AND value differs       → VETO (existing
+//                                                            checkVariantConflict
+//                                                            already handles this
+//                                                            for known dimensions)
+//   3. ctx does NOT name the discriminator                 → AMBIGUOUS — we
+//                                                            cannot claim this
+//                                                            sibling-specific
+//                                                            SKU. Reject.
+// Without case 3, every unnumbered keyword's SERP image gets accepted onto
+// every sibling SKU, inflating each SKU's match count and pinning the
+// keyword to whichever SKU was processed first.
+
+// Universal quantity parser. Returns an object keyed by canonical dimension
+// (volume → ml, mass → g, dose → mg, count → ct) with normalized numeric
+// values. "Last match wins" within a dimension — for context strings like
+// "30 caps from 200 caps pack" we'd return 200, but the upstream rule
+// "ours present → no conflict" handles multi-quantity strings cleanly.
+export function parseQty(text) {
+  if (!text) return {};
+  const t = String(text).toLowerCase().replace(/[(),]/g, ' ');
+  const out = {};
+  const grab = (re, dim, mul = 1) => {
+    let m;
+    let v = null;
+    while ((m = re.exec(t))) v = parseFloat(m[1]) * mul;
+    if (v != null && out[dim] == null) out[dim] = v;
+  };
+  // VOLUME first so "fl oz" isn't eaten by mass-oz; canonical = ml
+  grab(/(\d+(?:\.\d+)?)\s*fl\.?\s*oz\b/g,           'volume', 29.5735);
+  grab(/(\d+(?:\.\d+)?)\s*ml\b/g,                   'volume', 1);
+  grab(/(\d+(?:\.\d+)?)\s*(?:l|liter|litre)\b/g,    'volume', 1000);
+  // MASS; canonical = g (mg/mcg handled as dose, not mass)
+  grab(/(\d+(?:\.\d+)?)\s*kg\b/g,                   'mass',   1000);
+  grab(/(\d+(?:\.\d+)?)\s*(?:g|gm|gram)\b/g,        'mass',   1);
+  grab(/(\d+(?:\.\d+)?)\s*oz\b/g,                   'mass',   28.35);
+  grab(/(\d+(?:\.\d+)?)\s*lb\b/g,                   'mass',   453.592);
+  // DOSE / strength; canonical = mg (IU kept separate via "iu" tag)
+  grab(/(\d+(?:\.\d+)?)\s*mcg\b/g,                  'dose',   0.001);
+  grab(/(\d+(?:\.\d+)?)\s*mg\b/g,                   'dose',   1);
+  grab(/(\d+(?:\.\d+)?)\s*iu\b/g,                   'doseIU', 1);
+  // COUNT; canonical = ct (count units normalised)
+  grab(/(?:pack\s*of\s*)(\d{1,4})\b/g,              'count',  1);
+  grab(/(\d{1,4})\s*(?:'s|x)?\s*(?:soft\s*gels?|s[\s\/]?gels?|sgels?|capsules?|caps?|tablets?|tabs?|gummies|gummy|chewables?|lozenges?|sachets?|strips?|pieces?|pcs?|count|ct|nos?|no\.)\b/g, 'count', 1);
+  grab(/(\d{1,4})\s*'s\b/g,                         'count',  1);
+  return out;
+}
+
+// Collapse a product name to its identity tokens — strip every numeric
+// quantity-bearing token so two SKUs that differ ONLY on quantity end up
+// with the same baseKey. Universal — same regex pattern set as parseQty.
+export function baseKey(title) {
+  if (!title) return '';
+  return String(title).toLowerCase()
+    .replace(/\d+(?:\.\d+)?\s*(?:soft\s*gels?|sgels?|caps?|capsules?|tablets?|tabs?|gummies?|chewables?|lozenges?|sachets?|strips?|pieces?|pcs?|count|ct|fl\.?\s*oz|ml|l|liter|litre|kg|gm|gram|g|oz|lb|mcg|mg|iu)\b/g, ' ')
+    .replace(/pack\s*of\s*\d+/g, ' ')
+    .replace(/\b\d+\s*'s\b/g, ' ')
+    .replace(/[^a-z ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Numeric-tolerance check for "same value". 1% tolerance handles unit
+// rounding (28.35 oz ↔ 28 oz, 29.5735 ml ↔ 30 ml) without admitting
+// genuine product differences. count is exact (discrete SKU choices).
+function _qtyEqual(dim, a, b) {
+  if (a == null || b == null) return false;
+  if (dim === 'count') return Math.round(a) === Math.round(b);
+  if (a === 0 || b === 0) return a === b;
+  const ratio = a / b;
+  return ratio >= 0.99 && ratio <= 1.01;
+}
+
+// Returns one of:
+//   null                                — gate doesn't apply (no siblings,
+//                                          or ctx confirms the right value)
+//   { ambiguous: true, dims }           — ctx lacks every discriminator
+//                                          value → cannot pin this SKU
+//   { mismatch: true, dim, ours, theirs} — ctx names a discriminator value
+//                                          that doesn't match ours
+//
+// Caller treats both `ambiguous` and `mismatch` as a hard veto on the
+// candidate match. The breakdown log surfaces each reason separately so
+// the user can tell why a thumb was rejected.
+export function checkSiblingAmbiguity(text, productContext) {
+  if (!productContext) return null;
+  const discriminators = productContext.siblingDiscriminators;
+  if (!Array.isArray(discriminators) || discriminators.length === 0) return null;
+  const ourQty = productContext.siblingQty || {};
+  const ctxQty = parseQty(text);
+  let sawAny = false;
+  for (const dim of discriminators) {
+    if (ctxQty[dim] != null) {
+      sawAny = true;
+      if (!_qtyEqual(dim, ctxQty[dim], ourQty[dim])) {
+        return { mismatch: true, dim, ours: ourQty[dim], theirs: ctxQty[dim] };
+      }
+    }
+  }
+  if (!sawAny) return { ambiguous: true, dims: discriminators.slice() };
+  return null;
+}
+
 // ============ Variant matching ============
 // Same brand + same product line + visually identical bottle ≠ same SKU.
 // "Now Foods Super Enzymes 90 Capsules" and "…180 Capsules" share brand,
@@ -990,6 +1656,17 @@ export function extractProductSpecs(productName) {
     volume: null,      volumeUnit: null,
     weight: null,      weightUnit: null,
     packSize: null,
+    // Extended numeric dimensions — universal across categories. These give
+    // the spec-conflict layer additional axes to detect wrong SKUs that
+    // share the basic count/dosage but differ on a named dimension.
+    epa: null,         // omega-3 EPA mg per serving
+    dha: null,         // omega-3 DHA mg per serving
+    spf: null,         // skincare sun protection factor
+    storage: null,     // electronics storage in GB
+    storageUnit: null, // 'gb' | 'tb'
+    wattage: null,     // wattage (electronics)
+    battery: null,     // mAh
+    screen: null,      // inches
   };
 
   const countMatch = name.match(/\b(\d+)\s*(capsules?|caps?|tablets?|tabs?|softgels?|vcaps?|veg\s*caps?|caplets?|gummies?|lozenges?|chewables?|packets?|sachets?|servings?|count)\b/i);
@@ -1030,102 +1707,205 @@ export function extractProductSpecs(productName) {
     else specs.packSize = '2';
   }
 
+  // Extended specs — each tries multiple phrasings; first hit wins.
+  const tryPatterns = (patterns) => {
+    for (const p of patterns) {
+      const m = name.match(p);
+      if (m) return m[1];
+    }
+    return null;
+  };
+  specs.epa     = tryPatterns([/(\d+)\s*(?:mg\s+)?epa\b/i, /\bepa\s*[:=]?\s*(\d+)/i]);
+  specs.dha     = tryPatterns([/(\d+)\s*(?:mg\s+)?dha\b/i, /\bdha\s*[:=]?\s*(\d+)/i]);
+  specs.spf     = tryPatterns([/\bspf\s*(\d+)/i, /(\d+)\s*spf\b/i]);
+  const storageMatch = name.match(/\b(\d+)\s*(gb|tb)\b/i);
+  if (storageMatch) {
+    specs.storage = storageMatch[1];
+    specs.storageUnit = storageMatch[2].toLowerCase();
+  }
+  specs.wattage = tryPatterns([/\b(\d+)\s*(?:w|watt|watts)\b/i]);
+  specs.battery = tryPatterns([/\b(\d+)\s*mah\b/i]);
+  specs.screen  = tryPatterns([/\b(\d+(?:\.\d+)?)\s*(?:inch|"|inches)\b/i]);
+
   return specs;
 }
 
 // Returns an array of conflict descriptors (one per spec type) when the
 // context text mentions a CLEARLY DIFFERENT value for a spec our product
-// defines. Tolerances:
-//   count   — > 1.5× or < 0.67× (90 vs 180 ❌, 90 vs 100 ✅)
+// defines.
+//
+// Rule of thumb: if OUR value appears anywhere in the context, no conflict
+// fires for that spec — the page is a multi-variant listing, a comparison
+// article, or a category page that includes us alongside other SKUs. The
+// engine should treat that as "our product is one of the items here", not
+// "this is the wrong SKU". Conflicts fire ONLY when (a) context names a
+// value of the right kind, (b) ours isn't among them, and (c) the named
+// value is far enough from ours to be a different SKU (per the ratio
+// tolerances below).
+//
+// Tolerances when our value is absent:
+//   count   — > 1.5× or < 0.67× (90 vs 180 ❌, 90 vs 100 ✅ borderline)
 //   dosage  — > 1.3× or < 0.77× same-unit only (650 vs 1000 ❌, 650 vs 700 ✅)
 //   volume  — any difference (volume IS the variant on liquids)
 //   weight  — any difference (weight IS the variant on bulk products)
 //   pack    — any difference
-// When the context simply doesn't mention a spec, we don't flag it — the
-// page may just be silent on that detail.
+// When the context simply doesn't mention a spec, no conflict.
 export function hasConflictingSpec(contextText, ourSpecs) {
   if (!ourSpecs) return [];
   const ctx = String(contextText || '').toLowerCase();
   if (!ctx) return [];
   const conflicts = [];
 
-  if (ourSpecs.count) {
-    const re = /\b(\d+)\s*(capsules?|caps?|tablets?|tabs?|softgels?|vcaps?|veg\s*caps?|caplets?|count)\b/gi;
+  // Collect all numeric values found in `ctx` matching `re`. Each match's
+  // captured value is at `valueIdx`. Unit filter is optional — when set,
+  // only matches whose unit-capture (`unitIdx`) equals `requireUnit` count.
+  const collect = (re, valueIdx, unitIdx, requireUnit) => {
+    const out = [];
     let m;
     while ((m = re.exec(ctx)) !== null) {
-      const theirs = m[1];
-      if (theirs === ourSpecs.count) continue;
-      const ratio = parseInt(theirs, 10) / parseInt(ourSpecs.count, 10);
-      if (ratio >= 1.5 || ratio <= 0.67) {
-        conflicts.push({
-          type: 'count',
-          ours: `${ourSpecs.count} ${ourSpecs.countUnit || ''}`.trim(),
-          theirs: `${theirs} ${m[2]}`,
-        });
-        break;
+      if (requireUnit && unitIdx != null) {
+        const u = (m[unitIdx] || '').toLowerCase();
+        if (u !== requireUnit) continue;
       }
+      out.push({ value: m[valueIdx], unit: unitIdx != null ? m[unitIdx] : null });
+    }
+    return out;
+  };
+
+  // Apply the "ours is also present → not a conflict" rule + ratio check
+  // for the genuine-different-SKU case.
+  const checkConflict = (found, ourValue, ratioHi, ratioLo) => {
+    if (found.length === 0) return null;
+    if (found.some(f => f.value === ourValue)) return null; // we're in the list
+    if (ratioHi == null) return found[0]; // any-difference rule (volume/weight/pack)
+    for (const f of found) {
+      const ratio = parseFloat(f.value) / parseFloat(ourValue);
+      if (ratio >= ratioHi || ratio <= ratioLo) return f;
+    }
+    return null;
+  };
+
+  if (ourSpecs.count) {
+    const found = collect(
+      /\b(\d+)\s*(capsules?|caps?|tablets?|tabs?|softgels?|vcaps?|veg\s*caps?|caplets?|count)\b/gi,
+      1, 2, null
+    );
+    // Tightened tolerance: 5% (was 50%). Supplement counts are discrete
+    // (30, 60, 90, 100, 200, 250) so any meaningful difference is a
+    // different SKU. The previous 0.67-1.5 range let "200 vs 180 softgels"
+    // pass — a clearly-different bottle.
+    const hit = checkConflict(found, ourSpecs.count, 1.05, 0.95);
+    if (hit) {
+      conflicts.push({
+        type: 'count',
+        ours: `${ourSpecs.count} ${ourSpecs.countUnit || ''}`.trim(),
+        theirs: `${hit.value} ${hit.unit}`,
+      });
     }
   }
 
   if (ourSpecs.dosage) {
-    const re = /\b(\d+(?:\.\d+)?)\s*(mg|mcg|µg|iu|ui)\b/gi;
-    const ourUnit = (ourSpecs.dosageUnit || '').toLowerCase();
-    let m;
-    while ((m = re.exec(ctx)) !== null) {
-      if (m[2].toLowerCase() !== ourUnit) continue;
-      if (m[1] === ourSpecs.dosage) continue;
-      const ratio = parseFloat(m[1]) / parseFloat(ourSpecs.dosage);
-      if (ratio >= 1.3 || ratio <= 0.77) {
-        conflicts.push({
-          type: 'dosage',
-          ours: `${ourSpecs.dosage}${ourSpecs.dosageUnit}`,
-          theirs: `${m[1]}${m[2]}`,
-        });
-        break;
-      }
+    const found = collect(
+      /\b(\d+(?:\.\d+)?)\s*(mg|mcg|µg|iu|ui)\b/gi,
+      1, 2, (ourSpecs.dosageUnit || '').toLowerCase()
+    );
+    // Tightened tolerance: 15% (was 30%). Dosages step in product-design
+    // increments — 500 vs 600 mg is a different SKU, not a borderline
+    // labeling difference.
+    const hit = checkConflict(found, ourSpecs.dosage, 1.15, 0.85);
+    if (hit) {
+      conflicts.push({
+        type: 'dosage',
+        ours: `${ourSpecs.dosage}${ourSpecs.dosageUnit}`,
+        theirs: `${hit.value}${hit.unit}`,
+      });
     }
   }
 
   if (ourSpecs.volume) {
-    const re = /\b(\d+(?:\.\d+)?)\s*(ml|l|liter|litre|fl\s*oz|fluid\s*oz)\b/gi;
-    let m;
-    while ((m = re.exec(ctx)) !== null) {
-      if (m[1] === ourSpecs.volume) continue;
+    const found = collect(
+      /\b(\d+(?:\.\d+)?)\s*(ml|l|liter|litre|fl\s*oz|fluid\s*oz)\b/gi,
+      1, 2, null
+    );
+    const hit = checkConflict(found, ourSpecs.volume, null, null);
+    if (hit) {
       conflicts.push({
         type: 'volume',
         ours: `${ourSpecs.volume}${ourSpecs.volumeUnit}`,
-        theirs: `${m[1]}${m[2]}`,
+        theirs: `${hit.value}${hit.unit}`,
       });
-      break;
     }
   }
 
   if (ourSpecs.weight) {
-    const re = /\b(\d+(?:\.\d+)?)\s*(g(?!m)|gm|gram|kg|oz|lb|pound)\b/gi;
-    let m;
-    while ((m = re.exec(ctx)) !== null) {
-      if (m[1] === ourSpecs.weight) continue;
+    const found = collect(
+      /\b(\d+(?:\.\d+)?)\s*(g(?!m)|gm|gram|kg|oz|lb|pound)\b/gi,
+      1, 2, null
+    );
+    const hit = checkConflict(found, ourSpecs.weight, null, null);
+    if (hit) {
       conflicts.push({
         type: 'weight',
         ours: `${ourSpecs.weight}${ourSpecs.weightUnit}`,
-        theirs: `${m[1]}${m[2]}`,
+        theirs: `${hit.value}${hit.unit}`,
       });
-      break;
     }
   }
 
   if (ourSpecs.packSize) {
-    const re = /(?:pack\s*of\s*(\d+)|(\d+)\s*-?\s*pack|(twin)\s+pack|(multi)\s*-?\s*pack)/gi;
+    // Pack regex has multiple alternatives — normalise to {value, unit}.
+    const packRe = /(?:pack\s*of\s*(\d+)|(\d+)\s*-?\s*pack|(twin)\s+pack|(multi)\s*-?\s*pack)/gi;
+    const found = [];
     let m;
-    while ((m = re.exec(ctx)) !== null) {
-      const theirs = m[1] || m[2] || (m[3] ? '2' : '2');
-      if (theirs === ourSpecs.packSize) continue;
+    while ((m = packRe.exec(ctx)) !== null) {
+      const v = m[1] || m[2] || (m[3] ? '2' : '2');
+      found.push({ value: v, unit: 'pack' });
+    }
+    const hit = checkConflict(found, ourSpecs.packSize, null, null);
+    if (hit) {
       conflicts.push({
         type: 'pack_size',
         ours: `pack of ${ourSpecs.packSize}`,
-        theirs: `pack of ${theirs}`,
+        theirs: `pack of ${hit.value}`,
       });
-      break;
+    }
+  }
+
+  // Extended numeric specs. Same "ours present → no conflict" rule. Per-
+  // spec tolerances: EPA/DHA 10% (formulation-level differences),
+  // SPF / storage exact (discrete consumer choices), wattage/battery 10%,
+  // screen size 5% (1.0 vs 1.1 inch is borderline; 6.1 vs 6.7 is real).
+  const extendedSpecs = [
+    ['epa',     /(\d+)\s*(?:mg\s+)?epa\b/gi,                                  1.10, 0.90],
+    ['dha',     /(\d+)\s*(?:mg\s+)?dha\b/gi,                                  1.10, 0.90],
+    ['spf',     /\bspf\s*(\d+)/gi,                                            null, null],
+    ['wattage', /\b(\d+)\s*(?:w|watt|watts)\b/gi,                             1.10, 0.90],
+    ['battery', /\b(\d+)\s*mah\b/gi,                                          1.10, 0.90],
+    ['screen',  /\b(\d+(?:\.\d+)?)\s*(?:inch|"|inches)\b/gi,                  1.05, 0.95],
+  ];
+  for (const [name, re, hi, lo] of extendedSpecs) {
+    if (!ourSpecs[name]) continue;
+    const found = collect(re, 1, null, null);
+    const hit = checkConflict(found, ourSpecs[name], hi, lo);
+    if (hit) {
+      conflicts.push({
+        type: name,
+        ours: `${ourSpecs[name]}${name === 'spf' ? ' SPF' : ''}`,
+        theirs: `${hit.value}${name === 'spf' ? ' SPF' : ''}`,
+      });
+    }
+  }
+
+  // Storage (separate because it carries a unit).
+  if (ourSpecs.storage) {
+    const found = collect(/\b(\d+)\s*(gb|tb)\b/gi, 1, 2, (ourSpecs.storageUnit || '').toLowerCase());
+    const hit = checkConflict(found, ourSpecs.storage, null, null);
+    if (hit) {
+      conflicts.push({
+        type: 'storage',
+        ours: `${ourSpecs.storage}${(ourSpecs.storageUnit || '').toUpperCase()}`,
+        theirs: `${hit.value}${(hit.unit || '').toUpperCase()}`,
+      });
     }
   }
 

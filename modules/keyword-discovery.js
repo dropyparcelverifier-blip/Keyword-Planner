@@ -355,6 +355,7 @@ export async function getProductImages(cleanUrl, log) {
     return out;
   }
 
+  log('fallback step: scanning JSON-LD Product schema');
   const ldBlocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
   for (const m of ldBlocks) {
     try {
@@ -374,14 +375,17 @@ export async function getProductImages(cleanUrl, log) {
   }
   if (out.length > 0) return out;
 
+  log('fallback step: og:image');
   const og = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
   if (og && og[1] && !BANNER_HINTS.test(og[1])) push(og[1], 'og:image');
   if (out.length > 0) return out;
 
+  log('fallback step: twitter:image');
   const tw = html.match(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i);
   if (tw && tw[1] && !BANNER_HINTS.test(tw[1])) push(tw[1], 'twitter:image');
   if (out.length > 0) return out;
 
+  log('fallback step: <img> scan (product-path)');
   const imgs = [...html.matchAll(/<img[^>]+src=["']([^"']+)["']/gi)].map(m => m[1]);
   for (const src of imgs) {
     if (out.length >= MAX_REF_IMAGES) break;
@@ -390,13 +394,14 @@ export async function getProductImages(cleanUrl, log) {
   }
   if (out.length > 0) return out;
 
+  log('fallback step: generic <img> tags (last-ditch)');
   for (const src of imgs) {
     if (out.length >= MAX_REF_IMAGES) break;
     if (BANNER_HINTS.test(src)) continue;
     push(src, '<img> generic fallback');
   }
 
-  if (out.length === 0) log('no usable product image found');
+  if (out.length === 0) log('all fallbacks exhausted — no usable product image found');
   return out;
 }
 
@@ -1135,18 +1140,108 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
     }
   }
 
+  // Product-line modifier (Layer 2.5) — same brand + identity tokens
+  // present, but the SERP context names a sibling-product LINE the
+  // product itself doesn't carry ("Ultra Omega 3" when we sell "Omega 3").
+  // Hard veto, same justification as identity: this isn't a different
+  // size of the same product, it's a different formulation entirely.
+  let productLineModifier = null;
+  if (identityMatch && typeof productContext?.checkProductLineModifier === 'function') {
+    productLineModifier = productContext.checkProductLineModifier(originalText);
+    if (productLineModifier) {
+      isMatch = false;
+    }
+  }
+
   // Variant conflict (Layer 3) — same brand + same identity + same
   // packaging but a DIFFERENT size/dosage/volume/weight/pack size. The
   // image is "this product line, wrong SKU"; a customer searching for our
-  // SKU and seeing that ad is a mismatch. Flat -25 demotion (large enough
-  // to drop a borderline match below the 55 threshold while leaving a
-  // visually + textually overwhelming match still accepted).
+  // SKU and seeing that ad is a mismatch.
+  //
+  // Hard veto, not a penalty: any conflict drops `isMatch` to false. The
+  // detection in hasConflictingSpec is conservative — it only fires when
+  // ours is NOT present in context AND the named value clears a ratio
+  // tolerance, so multi-variant pages ("available in 90 or 180 caps") and
+  // comparison articles ("90 vs 180 which is better") don't trigger.
+  // When the check DOES fire, the image is unambiguously the wrong SKU
+  // and no amount of CLIP / color / brand signal should rescue it.
+  //
+  // Only runs when identity AND product-line both passed.
   let variantConflicts = [];
-  if (typeof productContext?.checkVariantConflict === 'function') {
+  if (identityMatch && !productLineModifier && typeof productContext?.checkVariantConflict === 'function') {
     variantConflicts = productContext.checkVariantConflict(originalText) || [];
     if (variantConflicts.length > 0) {
-      total = Math.max(0, total - 25);
-      isMatch = total >= 55;
+      isMatch = false;
+    }
+  }
+
+  // Sibling-product veto (Layer 4) — catches same-brand siblings the
+  // identity/line/variant layers don't: form-alternative SERP listings
+  // ("now foods omega 3 GUMMY chews" when our form is softgel), brand-
+  // family siblings ("dha-1000", "mini gel", "3-6-9"), category-specific
+  // sub-lines ("cerave AM" vs "cerave PM"). CLIP can't tell these apart
+  // because the bottles look identical; text is the only defence.
+  let siblingMatch = null;
+  if (identityMatch && !productLineModifier && variantConflicts.length === 0 &&
+      typeof productContext?.checkSiblingProduct === 'function') {
+    siblingMatch = productContext.checkSiblingProduct(originalText);
+    if (siblingMatch) {
+      isMatch = false;
+    }
+  }
+
+  // Variant-slot veto (Layer 5) — final text-based defence: same brand,
+  // identity tokens present, no modifier/sibling/variant conflict, but
+  // the SERP context names the OPPOSITE side of a product-line pair our
+  // product is on (day vs night, men vs women, AM vs PM, etc.).
+  let variantSlotMatch = null;
+  if (identityMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch &&
+      typeof productContext?.checkVariantSlot === 'function') {
+    variantSlotMatch = productContext.checkVariantSlot(originalText);
+    if (variantSlotMatch) {
+      isMatch = false;
+    }
+  }
+
+  // Color veto (Layer 6) — universal across categories. Same brand, same
+  // identity, no other conflict, but the context names a different color
+  // than ours ("titanium black" product, context says "titanium violet").
+  // Cosmetics, apparel, electronics, footwear, hair color, nail polish.
+  let colorConflictMatch = null;
+  if (identityMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch &&
+      typeof productContext?.checkColorConflict === 'function') {
+    colorConflictMatch = productContext.checkColorConflict(originalText);
+    if (colorConflictMatch) {
+      isMatch = false;
+    }
+  }
+
+  // Name-swap veto (Layer 7) — cosmetics-only shade/model swap. Only
+  // fires when our product is a cosmetics-style SKU; the gate is inside
+  // checkNameSwap (returns null for non-cosmetics products).
+  let nameSwapMatch = null;
+  if (identityMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch && !colorConflictMatch &&
+      typeof productContext?.checkNameSwap === 'function') {
+    nameSwapMatch = productContext.checkNameSwap(originalText);
+    if (nameSwapMatch) {
+      isMatch = false;
+    }
+  }
+
+  // Sibling ambiguity veto (Layer 8) — the only layer that depends on
+  // OTHER products in the same batch. Fires when this SKU has siblings
+  // that differ only on a quantity dimension AND the ctx either (a)
+  // names a value that doesn't match ours (would be caught by Layer 3
+  // variant check too, but kept here for completeness with the right
+  // dimension named) or (b) doesn't name the discriminator at all — in
+  // which case the image could equally be any sibling, so we can't claim
+  // it for this specific SKU.
+  let siblingAmbiguity = null;
+  if (identityMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch && !colorConflictMatch && !nameSwapMatch &&
+      typeof productContext?.checkSiblingAmbiguity === 'function') {
+    siblingAmbiguity = productContext.checkSiblingAmbiguity(originalText);
+    if (siblingAmbiguity) {
+      isMatch = false;
     }
   }
 
@@ -1166,7 +1261,13 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
     contextSample: strippedText.slice(0, 80).trim(),
     identityMatch,
     identityMissing,
+    productLineModifier,
     variantConflicts,
+    siblingMatch,
+    variantSlotMatch,
+    colorConflictMatch,
+    nameSwapMatch,
+    siblingAmbiguity,
     isMatch,
   };
 }
@@ -1275,6 +1376,7 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
   const adsOnSerp       = typeof resp?.adsOnSerp    === 'number' ? resp.adsOnSerp    : 0;
   const relatedSearches = Array.isArray(resp?.relatedSearches) ? resp.relatedSearches : [];
   const sourceBreakdown = (resp && typeof resp.sourceBreakdown === 'object' && resp.sourceBreakdown) || {};
+  const serpBlocked     = resp?.serpBlocked === true;
 
   let matchedThumbnails  = [];
   let matchedConfidences = [];
@@ -1364,14 +1466,45 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
               vetoReason = `variant (${c.type}:${c.ours}/${c.theirs})`;
             }
           }
+          if (!vetoReason && typeof productContext?.checkSiblingProduct === 'function') {
+            const sib = productContext.checkSiblingProduct(dText);
+            if (sib) vetoReason = `sibling (${sib.term}:${sib.type})`;
+          }
+          if (!vetoReason && typeof productContext?.checkVariantSlot === 'function') {
+            const slt = productContext.checkVariantSlot(dText);
+            if (slt) vetoReason = `slot (${slt.ours}!=${slt.theirs})`;
+          }
+          if (!vetoReason && typeof productContext?.checkColorConflict === 'function') {
+            const clr = productContext.checkColorConflict(dText);
+            if (clr) vetoReason = `color (${clr.ours}!=${clr.theirs})`;
+          }
+          if (!vetoReason && typeof productContext?.checkNameSwap === 'function') {
+            const sw = productContext.checkNameSwap(dText);
+            if (sw) vetoReason = `swap (+${sw.extras.join(',')}/-${sw.missing.join(',')})`;
+          }
+          if (!vetoReason && typeof productContext?.checkSiblingAmbiguity === 'function') {
+            const sa = productContext.checkSiblingAmbiguity(dText);
+            if (sa) {
+              vetoReason = sa.ambiguous
+                ? `ambig (no_discriminator: ${(sa.dims || []).join(',')})`
+                : `ambig (mismatch ${sa.dim}: ${sa.ours}/${sa.theirs})`;
+            }
+          }
           if (vetoReason) {
             matchBreakdownLog.push({
-              conf:  confPct,
-              clip:  confPct,
-              via:   'dhash',
-              ctx:   dText.slice(0, 80),
-              kept:  false,
-              veto:  vetoReason,
+              conf:    confPct,
+              clip:    confPct,
+              color:   '—',     // secondary scores aren't computed on dHash veto
+              text:    '—',
+              matched: [],
+              brand:   false,
+              anchor:  false,
+              product: null,
+              variant: null,
+              via:     'dhash',
+              ctx:     dText.slice(0, 80),
+              kept:    false,
+              veto:    vetoReason,
             });
             continue;
           }
@@ -1406,6 +1539,16 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
             product: ms.identityMatch === false
               ? `missing:${(ms.identityMissing || []).join(',')}`
               : (ms.identityMatch === true ? 'ok' : null),
+            line:    ms.productLineModifier ? ms.productLineModifier.modifier : null,
+            sibling: ms.siblingMatch ? `${ms.siblingMatch.term}(${ms.siblingMatch.type})` : null,
+            slot:    ms.variantSlotMatch ? `${ms.variantSlotMatch.ours}!=${ms.variantSlotMatch.theirs}` : null,
+            colorVeto: ms.colorConflictMatch ? `${ms.colorConflictMatch.ours}!=${ms.colorConflictMatch.theirs}` : null,
+            swap:    ms.nameSwapMatch ? `+${ms.nameSwapMatch.extras.join(',')}/-${ms.nameSwapMatch.missing.join(',')}` : null,
+            ambig:   ms.siblingAmbiguity
+                       ? (ms.siblingAmbiguity.ambiguous
+                          ? `no_discriminator(${(ms.siblingAmbiguity.dims || []).join(',')})`
+                          : `mismatch(${ms.siblingAmbiguity.dim}:${ms.siblingAmbiguity.ours}/${ms.siblingAmbiguity.theirs})`)
+                       : null,
             ctx:     ms.contextSample,
             kept:    ms.isMatch,
             variant: ms.variantConflicts && ms.variantConflicts.length > 0
@@ -1479,6 +1622,10 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
     // Which SERP regions the thumbnails came from
     // (shopping_carousel, knowledge_panel, sponsored, organic, background_image).
     sourceBreakdown,
+    // Soft-blocked SERP: results pane empty + only Google asset images
+    // captured. Engine should NOT record 0-image rows on such SERPs as
+    // real "0 visibility" — they're Google bot-flagging us.
+    serpBlocked,
     // Same shape as sourceBreakdown but counts ONLY matched thumbnails.
     matchSourceBreakdown,
     // Two-step verification: CLIP candidates that passed the threshold but
@@ -1627,6 +1774,58 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
 
   const sorted = [...products].sort((a, b) => a.priority - b.priority);
 
+  // Pre-pass: group products by baseKey (name with all quantity tokens
+  // stripped) so we can identify SKU groups that differ ONLY on a
+  // quantity dimension. For such groups, an unnumbered SERP image
+  // can't be pinned to a specific sibling — the ambiguity gate later
+  // rejects the match.
+  //
+  // We compute siblingInfo[productIdx] = { discriminators, qty } where
+  // discriminators is the list of dimensions ('count', 'volume', 'mass',
+  // 'dose') whose values differ across the group's members. Single
+  // members (no siblings) get no annotation — the gate doesn't fire.
+  const siblingInfoByIdx = new Map();
+  if (typeof opts.baseKey === 'function' && typeof opts.parseQty === 'function') {
+    const groups = new Map(); // baseKey → [{idx, qty}]
+    for (let i = 0; i < sorted.length; i++) {
+      const p = sorted[i];
+      const name = deriveName(cleanProductUrl(p.url));
+      const k = opts.baseKey(name);
+      if (!k) continue;
+      const qty = opts.parseQty(name);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push({ idx: i, qty, name });
+    }
+    for (const [k, members] of groups) {
+      if (members.length < 2) continue;
+      // Determine which dimensions differ across the group's members.
+      const allDims = new Set();
+      members.forEach(m => Object.keys(m.qty).forEach(d => allDims.add(d)));
+      const discriminators = [];
+      for (const dim of allDims) {
+        const uniques = new Set();
+        for (const m of members) {
+          if (m.qty[dim] != null) uniques.add(Math.round(m.qty[dim] * 1000));
+        }
+        if (uniques.size > 1) discriminators.push(dim);
+      }
+      if (discriminators.length === 0) continue;
+      // Attach per-member info.
+      for (const m of members) {
+        siblingInfoByIdx.set(m.idx, {
+          baseKey: k,
+          discriminators,
+          qty: m.qty,
+          siblingCount: members.length,
+        });
+      }
+      onProgress?.({
+        currentAction: `Sibling group "${k}" — ${members.length} SKU(s), discriminator(s): ${discriminators.join(', ')}`,
+        logKind: 'ok',
+      });
+    }
+  }
+
   const productsTotal = sorted.length;
   let productsAlreadyDone = 0;
   for (const p of sorted) if (excludeUrls.has(cleanProductUrl(p.url))) productsAlreadyDone++;
@@ -1696,11 +1895,21 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       });
 
       if (productImages.length === 0) {
+        // Explicit abort: every fallback (Shopify .json → JSON-LD → og:image
+        // → twitter:image → <img> scan) returned nothing. Without a product
+        // image, CLIP can't match anything, the product palette is empty,
+        // and the SERP image-counting layer is meaningless. Skip this
+        // product cleanly rather than running the full discovery pipeline
+        // for no-signal-output. The for-product loop catches and
+        // continues to the next product.
         onProgress?.({
           currentProduct: productName,
-          currentAction: `No product image found at ${cleanUrl} — image_count will be 0`,
+          currentAction: `Aborting product: no product image after Shopify .json + JSON-LD + og:image + twitter:image + <img> fallbacks at ${cleanUrl}`,
           logKind: 'err',
         });
+        productsDone++;
+        await onProductDone(cleanUrl);
+        continue;
       }
 
       // Build CLIP reference embeddings for the product. One embedding per
@@ -1840,6 +2049,87 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
               logKind: 'ok',
             });
           }
+        }
+        // Bound product-line modifier check. Returns { match, modifier } when
+        // text contains an ultra/super/extra/etc. modifier our product
+        // doesn't carry. Used by image matching to demote sibling-product
+        // SERP thumbs (Ultra Omega 3 alongside our Omega 3, etc.).
+        if (typeof opts.checkProductLineModifier === 'function') {
+          productContext.checkProductLineModifier = (text) =>
+            opts.checkProductLineModifier(text, productContext);
+        }
+        // Brand-family sibling exclusions — build once per product based on
+        // productType + form + brand. Returns terms like "tablet"/"capsule"
+        // (when our form is softgel), "3-6-9"/"dha-1000"/"mini gel" (when
+        // we're an Omega 3 Fish Oil product), "AM"/"PM" (when we're CeraVe).
+        // Same-brand visually-identical-bottle products are CLIP's blind
+        // spot; this list is the text-based defense.
+        if (typeof opts.buildSiblingExclusions === 'function') {
+          productContext.siblingExclusions = opts.buildSiblingExclusions(productContext);
+          if (productContext.siblingExclusions.length > 0) {
+            const preview = productContext.siblingExclusions
+              .slice(0, 12)
+              .map(e => `"${e.term}"(${e.type.replace('brand_family_sibling', 'fam').replace('wrong_form', 'form')})`)
+              .join(', ');
+            onProgress?.({
+              currentProduct: productName,
+              currentSource: 'context',
+              currentAction: `Sibling exclusions (${productContext.siblingExclusions.length} terms): ${preview}${productContext.siblingExclusions.length > 12 ? ', ...' : ''}`,
+              logKind: 'ok',
+            });
+          }
+        }
+        if (typeof opts.checkSiblingProduct === 'function') {
+          productContext.checkSiblingProduct = (text) =>
+            opts.checkSiblingProduct(text, productContext);
+        }
+        // Variant-slot pair check (day/night, men/women, AM/PM, scented/
+        // unscented, wired/wireless, etc.). Universal across categories —
+        // catches sibling-SKU lookalikes the form/modifier/sibling layers
+        // don't pick up.
+        if (typeof opts.checkVariantSlot === 'function') {
+          productContext.checkVariantSlot = (text) =>
+            opts.checkVariantSlot(text, productContext);
+        }
+        // Color conflict check — for color-variant products (cosmetics,
+        // apparel, electronics, footwear, hair color, nail polish). Only
+        // fires when our product name contains a color name.
+        if (typeof opts.checkColorConflict === 'function') {
+          productContext.checkColorConflict = (text) =>
+            opts.checkColorConflict(text, productContext);
+        }
+        // Shade / model name-swap check — cosmetics-scoped only. Detects
+        // keywords that swap a shade name on the same product line
+        // (Maybelline 80 Ruler → 20 Pioneer). Strictly gated by
+        // _isShadeVariantProduct so supplement / generic keywords aren't
+        // touched. See keyword-filter.js _NAMESWAP_PROTECTED for the
+        // commerce/intent allowlist.
+        if (typeof opts.checkNameSwap === 'function') {
+          productContext.checkNameSwap = (text) =>
+            opts.checkNameSwap(text, productContext);
+        }
+        // Sibling SKU ambiguity — when this product shares a baseKey with
+        // other products in the batch and differs ONLY on a quantity
+        // dimension (count / volume / mass / dose), an unnumbered SERP
+        // context can't be pinned to this specific sibling. Pre-pass
+        // populated siblingInfoByIdx for products that have siblings; we
+        // attach `siblingDiscriminators` + `siblingQty` to productContext
+        // so checkSiblingAmbiguity can fire from the match layer.
+        const siblingInfo = siblingInfoByIdx.get(pi);
+        if (siblingInfo) {
+          productContext.siblingDiscriminators = siblingInfo.discriminators;
+          productContext.siblingQty = siblingInfo.qty;
+          productContext.siblingBaseKey = siblingInfo.baseKey;
+          if (typeof opts.checkSiblingAmbiguity === 'function') {
+            productContext.checkSiblingAmbiguity = (text) =>
+              opts.checkSiblingAmbiguity(text, productContext);
+          }
+          onProgress?.({
+            currentProduct: productName,
+            currentSource: 'context',
+            currentAction: `Sibling SKU group "${siblingInfo.baseKey}" — ${siblingInfo.siblingCount} variant(s); our qty: ${siblingInfo.discriminators.map(d => `${d}=${siblingInfo.qty[d] ?? '—'}`).join(', ')}`,
+            logKind: 'ok',
+          });
         }
       }
       // Combined gate: India/English/noise filter AND product-relevance.
@@ -2074,27 +2364,54 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         return null;
       };
 
+      // Bump frequency + union the source field on an existing row. Used by
+      // both the exact-dup and word-order-dup branches below. Re-discovering
+      // a keyword from a different source is meaningful signal — the
+      // frequencyBonus in computeAdRating tops out at +20 ((freq-1)*5), and
+      // the source column should show every route the keyword surfaced via
+      // ("kp_idea, autosuggest, related_search"). Without this merge, the
+      // existing keyword-filter.js mergeKeywordIntoReport function never
+      // got called from the engine — exports showed frequency=1 and
+      // source="kp_idea" alone even when the same keyword had been
+      // re-surfaced by PAA, autosuggest, and related-search.
+      const _mergeIntoExisting = (existing, newSource) => {
+        if (!existing) return;
+        existing.frequency = (existing.frequency || 1) + 1;
+        if (newSource && newSource !== existing.source) {
+          const tokens = new Set(
+            String(existing.source || '').split(/\s*,\s*/).map(s => s.trim()).filter(Boolean)
+          );
+          tokens.add(String(newSource).trim());
+          existing.source = Array.from(tokens).join(', ');
+        }
+        if (typeof opts.computeAdRating === 'function') {
+          try { existing.adRating = opts.computeAdRating(existing); } catch {}
+        }
+      };
+
       const addRow = (keyword, source, parentKeyword, kpMeta) => {
         const key = (keyword || '').toLowerCase().trim();
         if (!key) return null;
-        if (productKeywordSet.has(key)) return null;
-        const sortedKey = _sortedKey(keyword);
-        if (sortedKey && productKeywordSortedMap.has(sortedKey)) {
-          // Same tokens, different order — bump the canonical row's
-          // frequency so the duplicate's "this keyword came up again from
-          // another source" signal feeds adRating (frequencyBonus =
-          // min(20, (frequency-1)*5)). Then skip the SERP load.
-          const canonicalKey = productKeywordSortedMap.get(sortedKey);
-          const canonical = report.get(canonicalKey);
-          if (canonical) {
-            canonical.frequency = (canonical.frequency || 1) + 1;
-            if (typeof opts.computeAdRating === 'function') {
-              try { canonical.adRating = opts.computeAdRating(canonical); } catch {}
-            }
-          }
+        // Exact duplicate of a keyword we've already added for this product.
+        // Don't re-SERP it, but DO merge: bump frequency + union source.
+        if (productKeywordSet.has(key)) {
+          _mergeIntoExisting(report.get(key), source);
           return null;
         }
-        if (report.has(key)) return null;
+        const sortedKey = _sortedKey(keyword);
+        if (sortedKey && productKeywordSortedMap.has(sortedKey)) {
+          // Same tokens, different order — merge into the canonical row.
+          const canonicalKey = productKeywordSortedMap.get(sortedKey);
+          _mergeIntoExisting(report.get(canonicalKey), source);
+          return null;
+        }
+        if (report.has(key)) {
+          // Cross-product duplicate (key already in report from a previous
+          // product). Still merge the source so the existing row shows this
+          // additional discovery route.
+          _mergeIntoExisting(report.get(key), source);
+          return null;
+        }
         if (report.size >= productCap) return null;
         if (isJunkKeyword(keyword)) return null;
         // External quality filter (geo/platform/UI-literal/etc.) if provided
@@ -2412,8 +2729,26 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                 if (cur > prev) productMatchedConfidences.set(u, cur);
               }
             }
-            // Rich per-keyword SERP context (sellers + ads on the page)
-            row.sellers      = serpData.allSellers    || [];
+            // Rich per-keyword SERP context (sellers + ads on the page).
+            // Variant filter: drop seller entries whose title carries a
+            // CONFLICTING spec value (e.g. "180 capsules" for our 90-cap
+            // product). The CLIP layer already rejects the matching
+            // thumbnail; without this, the listing's title/price still
+            // leaked into seller_* / top_match_* / amazon_* fields.
+            const rawSellers = serpData.allSellers || [];
+            row.sellers = (typeof productContext?.checkVariantConflict === 'function')
+              ? rawSellers.filter(s => {
+                  const txt = `${s?.title || ''} ${s?.price || ''}`.toLowerCase();
+                  return !txt || (productContext.checkVariantConflict(txt) || []).length === 0;
+                })
+              : rawSellers;
+            if (rawSellers.length !== row.sellers.length) {
+              onProgress?.({
+                currentProduct: productName,
+                currentSource: 'serp',
+                currentAction: `${label} variant-filtered sellers: ${rawSellers.length} → ${row.sellers.length} (${rawSellers.length - row.sellers.length} dropped for wrong SKU)`,
+              });
+            }
             // Merge sellers from matched thumbnails into the seller set —
             // these merchants are demonstrably selling our product on this
             // SERP, so they should count toward total_sellers even when the
@@ -2442,6 +2777,18 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             }
             row.totalSellers = Array.isArray(row.sellers) ? row.sellers.length : (serpData.totalSellers || 0);
             row.adsOnSerp    = serpData.adsOnSerp     || 0;
+            // SERP-blocked tag: Google soft-blocked this query (empty #rso
+            // + only Google asset images). Surface in the row + log so the
+            // 0-match isn't mistaken for real "no visibility".
+            if (serpData.serpBlocked) {
+              row.serp_status = 'blocked';
+              onProgress?.({
+                currentProduct: productName,
+                currentSource: 'serp',
+                currentAction: `${label} ⚠ SERP_BLOCKED: empty #rso + only Google asset images — recording as blocked, not 0-match`,
+                logKind: 'err',
+              });
+            }
 
             // Per-keyword audit aids (exported to CSV / Supabase). serp_url is
             // a clickable Google link the user can open to manually compare
@@ -2548,10 +2895,25 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             if (Array.isArray(serpData.matchBreakdownLog) && serpData.matchBreakdownLog.length > 0) {
               for (const m of serpData.matchBreakdownLog) {
                 const matchedStr = (m.matched && m.matched.length) ? m.matched.join(',') : '—';
+                // Surface the three-layer match outcome so a kept-but-
+                // penalised thumb (variant fired, identity demoted) doesn't
+                // look identical to a clean match in the log. Without these
+                // fields it's impossible to tell whether checkVariantConflict
+                // fired at all; with them, "variant=✗" makes the penalty
+                // visible even when the total still clears the threshold.
+                const identityStr = m.product && m.product !== 'ok' ? ` product=✗(${m.product})` : '';
+                const lineStr     = m.line ? ` line=✗(${m.line})` : '';
+                const siblingStr  = m.sibling ? ` sibling=✗(${m.sibling})` : '';
+                const slotStr     = m.slot ? ` slot=✗(${m.slot})` : '';
+                const colorVStr   = m.colorVeto ? ` color=✗(${m.colorVeto})` : '';
+                const swapStr     = m.swap ? ` swap=✗(${m.swap})` : '';
+                const ambigStr    = m.ambig ? ` AMBIG=${m.ambig}` : '';
+                const variantStr  = m.variant ? ` variant=✗(${m.variant})` : '';
+                const vetoStr     = m.veto ? ` VETO=${m.veto}` : '';
                 onProgress?.({
                   currentProduct: productName,
                   currentSource: 'serp',
-                  currentAction: `${label}   ${m.kept ? '✓' : '✗'} total=${m.conf} clip=${m.clip} color=${m.color} text=${m.text}% brand=${m.brand ? '✓' : '✗'} anchor=${m.anchor ? '✓' : '✗'} matched=[${matchedStr}] ctx="${m.ctx}"`,
+                  currentAction: `${label}   ${m.kept ? '✓' : '✗'} total=${m.conf} clip=${m.clip} color=${m.color ?? '—'} text=${m.text ?? '—'}${typeof m.text === 'number' ? '%' : ''} brand=${m.brand ? '✓' : '✗'} anchor=${m.anchor ? '✓' : '✗'}${identityStr}${lineStr}${siblingStr}${slotStr}${colorVStr}${swapStr}${ambigStr}${variantStr}${vetoStr} matched=[${matchedStr}] ctx="${m.ctx}"`,
                 });
               }
             }
@@ -2895,6 +3257,10 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       }
       let kp1Idx = 0;
       let kp2RowCount = 0;
+      // R2 degradation tracking. Each seed that exhausts retries increments
+      // this; the per-product completion summary surfaces the count so a
+      // silently-degraded run is visible without grepping the log.
+      let r2DegradedSeeds = 0;
       for (const seedRow of kp1ForR2) {
         kp1Idx++;
         if (shouldStop() || report.size >= productCap) break;
@@ -2908,15 +3274,43 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           currentSource: 'kp expand',
           currentAction: `Round 2 (${kp1Idx}/${totalKp1}): re-expanding KP for "${expandSeed}" — ~${etaMin} min KP work remaining`,
           keywordCount: report.size,
+          productKeywordCount: productRows.length,
         });
-        const expansion = await getKeywordPlannerIdeas(expandSeed, kpUrl, kpMaxPerProduct,
-          (m) => onProgress?.({ currentProduct: productName, currentAction: m }),
-          { productUrl: cleanUrl, allowWebsiteFallback: false });
+        // R2 KP with up to 2 retries. The KP UI is brittle after R1's long
+        // idle (Discover-card click hangs, results table times out, content
+        // script disconnects). Without retry, a transient failure on the
+        // first attempt makes us skip the entire R2 branch — which is
+        // exactly the high-value re-expansion stage. We back off between
+        // attempts so the KP tab has time to settle / hydrate.
+        const R2_KP_MAX_ATTEMPTS = 3; // 1 initial + 2 retries
+        let expansion = null;
+        let r2SeedAttempts = 0;
+        let r2SeedDegraded = false;
+        for (let attempt = 1; attempt <= R2_KP_MAX_ATTEMPTS; attempt++) {
+          r2SeedAttempts = attempt;
+          if (attempt > 1) {
+            const backoff = randInt(8000, 15000) * (attempt - 1); // 8-15s, then 16-30s
+            onProgress?.({
+              currentProduct: productName,
+              currentSource: 'kp expand',
+              currentAction: `Round 2 (${kp1Idx}/${totalKp1}): KP attempt ${attempt}/${R2_KP_MAX_ATTEMPTS} for "${expandSeed}" — backing off ${Math.round(backoff/1000)}s before retry`,
+            });
+            const ok = await sleepInterruptible(backoff, shouldStop);
+            if (!ok) break;
+          }
+          expansion = await getKeywordPlannerIdeas(expandSeed, kpUrl, kpMaxPerProduct,
+            (m) => onProgress?.({ currentProduct: productName, currentAction: m }),
+            { productUrl: cleanUrl, allowWebsiteFallback: false });
+          if (expansion?.ok) break;
+        }
 
         if (!expansion?.ok) {
+          r2SeedDegraded = true;
+          r2DegradedSeeds++;
           onProgress?.({
             currentProduct: productName,
-            currentAction: `Round 2 (${kp1Idx}/${totalKp1}): "${seedRow.keyword}" KP failed: ${expansion?.error || 'unknown'} — skipping this branch, continuing`,
+            currentAction: `Round 2 (${kp1Idx}/${totalKp1}): "${seedRow.keyword}" KP failed after ${r2SeedAttempts} attempt(s): ${expansion?.error || 'unknown'} — flagging R2 as degraded for this product`,
+            logKind: 'err',
           });
         } else {
           // Filter R2 KP output against the product-relevance gate BEFORE
@@ -3250,10 +3644,28 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                 if (hasBrand && hasAnchor && productContext?.checkProductIdentity) {
                   identity = productContext.checkProductIdentity(tl);
                 }
-                const variantConflicts = (hasBrand && hasAnchor && identity.match && productContext?.checkVariantConflict)
+                const lineMod = (hasBrand && hasAnchor && identity.match && productContext?.checkProductLineModifier)
+                  ? productContext.checkProductLineModifier(tl)
+                  : null;
+                const variantConflicts = (hasBrand && hasAnchor && identity.match && !lineMod && productContext?.checkVariantConflict)
                   ? productContext.checkVariantConflict(tl)
                   : [];
-                const ourProduct = hasBrand && hasAnchor && identity.match && variantConflicts.length === 0;
+                const siblingMatchAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && productContext?.checkSiblingProduct)
+                  ? productContext.checkSiblingProduct(tl)
+                  : null;
+                const slotMatchAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && productContext?.checkVariantSlot)
+                  ? productContext.checkVariantSlot(tl)
+                  : null;
+                const colorMatchAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && productContext?.checkColorConflict)
+                  ? productContext.checkColorConflict(tl)
+                  : null;
+                const swapMatchAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && productContext?.checkNameSwap)
+                  ? productContext.checkNameSwap(tl)
+                  : null;
+                const sibAmbAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && productContext?.checkSiblingAmbiguity)
+                  ? productContext.checkSiblingAmbiguity(tl)
+                  : null;
+                const ourProduct = hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && !sibAmbAmz;
                 if (ourProduct) {
                   if (!ourRank) {
                     ourRank    = r.position;
@@ -3267,6 +3679,38 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                     onProgress?.({
                       currentProduct: productName, currentSource: 'amazon',
                       currentAction: `  ⚠ Amazon #${r.position}: brand match but WRONG PRODUCT (missing: ${identity.missingWords.join(', ')} from identity [${(productContext.coreTypeWords || []).join(' ')}])`,
+                    });
+                  } else if (hasBrand && hasAnchor && lineMod) {
+                    onProgress?.({
+                      currentProduct: productName, currentSource: 'amazon',
+                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but WRONG PRODUCT LINE (modifier "${lineMod.modifier}" not in our product name)`,
+                    });
+                  } else if (siblingMatchAmz) {
+                    onProgress?.({
+                      currentProduct: productName, currentSource: 'amazon',
+                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING PRODUCT ("${siblingMatchAmz.term}", ${siblingMatchAmz.type})`,
+                    });
+                  } else if (slotMatchAmz) {
+                    onProgress?.({
+                      currentProduct: productName, currentSource: 'amazon',
+                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but VARIANT SLOT MISMATCH (ours="${slotMatchAmz.ours}", theirs="${slotMatchAmz.theirs}")`,
+                    });
+                  } else if (colorMatchAmz) {
+                    onProgress?.({
+                      currentProduct: productName, currentSource: 'amazon',
+                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but COLOR MISMATCH (ours="${colorMatchAmz.ours}", theirs="${colorMatchAmz.theirs}")`,
+                    });
+                  } else if (swapMatchAmz) {
+                    onProgress?.({
+                      currentProduct: productName, currentSource: 'amazon',
+                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but SHADE/MODEL SWAP (+${swapMatchAmz.extras.join(',')} / -${swapMatchAmz.missing.join(',')})`,
+                    });
+                  } else if (sibAmbAmz) {
+                    onProgress?.({
+                      currentProduct: productName, currentSource: 'amazon',
+                      currentAction: sibAmbAmz.ambiguous
+                        ? `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING AMBIGUOUS — listing lacks discriminator(s) ${(sibAmbAmz.dims || []).join(',')}; cannot pin to our SKU`
+                        : `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING DIM MISMATCH (${sibAmbAmz.dim}: ours=${sibAmbAmz.ours}, theirs=${sibAmbAmz.theirs})`,
                     });
                   } else if (variantConflicts.length > 0) {
                     const c = variantConflicts[0];
@@ -3353,14 +3797,37 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           kwWithMatches++;
         }
       }
+      // R2_DEGRADED suffix: when one or more R2 KP seeds exhausted retries
+      // for this product, surface the fact in the completion line so the
+      // run isn't silently degraded. Without this the only evidence was
+      // the per-seed "KP failed" log line buried thousands of lines back.
+      const r2DegradedNote = r2DegradedSeeds > 0
+        ? ` ⚠ R2_DEGRADED (${r2DegradedSeeds} KP seed(s) failed after retries)`
+        : '';
+      // Completion line distinguishes session-new (productRows.length —
+      // keywords ADDED for this product during this session) from the
+      // running total (report.size — every keyword in the report Map,
+      // including ones merged from earlier sessions / earlier products).
+      // The exported CSV size always matches report.size; the previous
+      // line only mentioned productRows.length, which made users think
+      // the export was wrong when in fact the log was incomplete.
       onProgress?.({
         currentProduct: productName,
         currentSource: 'done',
-        currentAction: `Product complete (${productsDone}/${productsTotal}) — ${productRows.length} keywords, ${kwWithMatches} with image matches (${totalMatchedThumbs} total matched thumbs)`,
+        currentAction: `Product complete (${productsDone}/${productsTotal}) — ${productRows.length} new keywords this product (${kwWithMatches} with image matches, ${totalMatchedThumbs} total matched thumbs); report total = ${report.size}${r2DegradedNote}`,
         keywordCount: report.size,
+        productKeywordCount: productRows.length,
+        productMatchCount: kwWithMatches,
         productsDone, productsTotal,
-        logKind: 'ok',
+        logKind: r2DegradedSeeds > 0 ? 'err' : 'ok',
       });
+      // Tag every row from this product with the run status so the export
+      // can surface degraded products at the row level.
+      if (r2DegradedSeeds > 0) {
+        for (const row of productRows) {
+          row.run_status = `R2_DEGRADED (${r2DegradedSeeds} seed${r2DegradedSeeds === 1 ? '' : 's'} failed)`;
+        }
+      }
 
       chunkProductCount++;
 

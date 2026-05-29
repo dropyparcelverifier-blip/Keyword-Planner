@@ -49,13 +49,33 @@ $('fileInput').addEventListener('change', async (e) => {
 
     parsedProducts = [];
     let invalidUrl = 0, missingUrl = 0;
+    // Track whether we found a SKU column anywhere in the input — used to
+    // warn the user when SKU is missing (per-product CSV export falls back
+    // to product-name slug, which collapses identically-named products
+    // into one file).
+    let sawSkuColumn = false;
     for (const row of rows) {
       let urlVal = '', priVal = '', skuVal = '', handlesVal = '';
       for (const k of Object.keys(row)) {
         const kl = k.toLowerCase().trim();
         if (kl === 'product url' || kl === 'producturl' || kl === 'url') urlVal = String(row[k]).trim();
         if (kl === 'priority' || kl === 'pri') priVal = String(row[k]).trim();
-        if (kl === 'sku' || kl === 'product sku' || kl === 'productsku' || kl === 'item sku') skuVal = String(row[k]).trim();
+        // SKU column — accept anything containing "sku" or recognised as a
+        // product identifier. Previously only exact-match "sku" / "product
+        // sku" / "productsku" / "item sku" worked, which silently dropped
+        // columns like "SKU Code", "Item Number", "Product Code".
+        if (!skuVal) {
+          const isSkuCol =
+            kl === 'sku' || kl === 'product sku' || kl === 'productsku' || kl === 'item sku' ||
+            kl === 'item number' || kl === 'itemnumber' || kl === 'item id' || kl === 'itemid' ||
+            kl === 'product code' || kl === 'productcode' || kl === 'product id' || kl === 'productid' ||
+            kl === 'product number' || kl === 'productnumber' || kl === 'item code' || kl === 'itemcode' ||
+            /\bsku\b/.test(kl) || kl.endsWith('_sku') || kl.endsWith('-sku');
+          if (isSkuCol) {
+            skuVal = String(row[k]).trim();
+            if (skuVal) sawSkuColumn = true;
+          }
+        }
         if (kl === 'handles' || kl === 'handle' || kl === 'extra seeds' || kl === 'seeds' || kl === 'extra keywords' || kl === 'keywords') handlesVal = String(row[k]).trim();
       }
       if (!urlVal) { missingUrl++; continue; }
@@ -77,8 +97,12 @@ $('fileInput').addEventListener('change', async (e) => {
     const parts = [`${parsedProducts.length} valid URL(s) loaded`];
     if (invalidUrl) parts.push(`${invalidUrl} rejected (not a URL — check the "Product URL" column has actual https:// links, not page titles)`);
     if (missingUrl) parts.push(`${missingUrl} row(s) had no URL`);
+    if (!sawSkuColumn && parsedProducts.length > 0) {
+      parts.push(`⚠ no SKU column detected — export will use product-name slugs (rename your column to "SKU" or one of: Item Number, Product Code, Item ID)`);
+    }
     $('fileInfo').textContent = parts.join(' • ');
-    $('fileInfo').style.color = parsedProducts.length === 0 ? 'var(--danger)' : (invalidUrl ? 'var(--warn)' : 'var(--success)');
+    const warnColor = (!sawSkuColumn || invalidUrl) ? 'var(--warn)' : 'var(--success)';
+    $('fileInfo').style.color = parsedProducts.length === 0 ? 'var(--danger)' : warnColor;
   } catch (err) {
     $('fileInfo').textContent = `Parse error: ${err.message}`;
     $('fileInfo').style.color = 'var(--danger)';
@@ -379,6 +403,15 @@ const pcState = {
   totalSellers: 0,             // sellers seen across current product
   filteredCount: 0,            // keywords rejected by relevance/noise filters
   lastProductKey: '',          // detect product transitions
+  // Per-product keyword counter — derived as (cumulative now) - (cumulative
+  // at last product transition). The engine emits `keywordCount` as the
+  // total across all products; subtracting the baseline gives the count
+  // FOR THIS PRODUCT. Slightly under-counts when many keywords are
+  // re-discovered cross-product (dedupe means the cumulative doesn't grow)
+  // but that's acceptable — the alternative was emitting per-product
+  // counts on every progress message.
+  productKwBaseline: 0,
+  productKwCount: 0,
 };
 
 function pcResetCountersForNewProduct() {
@@ -387,6 +420,7 @@ function pcResetCountersForNewProduct() {
   pcState.totalMatches = 0;
   pcState.totalSellers = 0;
   pcState.filteredCount = 0;
+  pcState.productKwCount = 0;
   ['init','kp','r1','r2','rs','export'].forEach(s => {
     const el = document.getElementById(`pcStage-${s}`);
     if (!el) return;
@@ -464,11 +498,15 @@ function pcUpdate(p) {
   if (!card) return;
   card.style.display = 'block';
 
-  // Product transition — reset per-product counters.
+  // Product transition — reset per-product counters and rebase the
+  // keyword baseline so the per-product count starts at 0.
   const productKey = String(p.currentProduct || '').trim();
   if (productKey && productKey !== pcState.lastProductKey) {
     pcState.lastProductKey = productKey;
     pcResetCountersForNewProduct();
+    if (typeof p.keywordCount === 'number') {
+      pcState.productKwBaseline = p.keywordCount;
+    }
     pcSetStage('init');
     $('pcProductName').textContent = productKey;
     $('pcProductUrl').textContent = '';
@@ -505,8 +543,22 @@ function pcUpdate(p) {
     if (m) $('pcStageDetail-r2').textContent = `${m[1]} seeds`;
   }
 
-  // Counters.
-  if (p.keywordCount !== undefined) $('pcKeywords').textContent = p.keywordCount;
+  // Counters. Prefer engine-provided per-product count when available
+  // (set on completion / R2 progress messages); otherwise derive from
+  // cumulative-keyword delta against the baseline saved at product
+  // transition above.
+  if (typeof p.productKeywordCount === 'number') {
+    pcState.productKwCount = p.productKeywordCount;
+  } else if (typeof p.keywordCount === 'number') {
+    pcState.productKwCount = Math.max(0, p.keywordCount - pcState.productKwBaseline);
+  }
+  $('pcKeywords').textContent = pcState.productKwCount;
+  // Show running cumulative total alongside the per-product count so the
+  // user can reconcile against the report-total exported by CSV.
+  if (typeof p.keywordCount === 'number') {
+    const totalEl = document.getElementById('pcKeywordsTotal');
+    if (totalEl) totalEl.textContent = `Total ${p.keywordCount}`;
+  }
   $('pcSerps').textContent    = pcState.serpCount;
   $('pcMatches').textContent  = pcState.totalMatches;
   $('pcSellers').textContent  = pcState.totalSellers;
@@ -685,7 +737,12 @@ chrome.runtime.sendMessage({ action: 'getState' }, (state) => {
   }
 
   if (state.unpushedCount !== undefined && state.unpushedCount > 0) {
-    logLine(`${state.unpushedCount} row(s) in report not yet pushed to AdBrain. Click "Push to AdBrain" to send.`, 'ok');
+    // CUMULATIVE across all products in the persistent report buffer, not
+    // per-batch. The batch CSV export shows the rows added in this run;
+    // the "unpushed" counter includes earlier sessions whose rows haven't
+    // been sent to AdBrain yet. Label the scope so 124 unpushed vs 46 in
+    // the latest export doesn't look like a discrepancy.
+    logLine(`${state.unpushedCount} row(s) accumulated in report (across all products) not yet pushed to AdBrain. Click "Push to AdBrain" to send.`, 'ok');
   }
 });
 
