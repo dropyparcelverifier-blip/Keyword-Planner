@@ -240,6 +240,14 @@ export function simplifyForKP(name) {
     while (cutoff > 3 && STOP.has(words[cutoff - 1].toLowerCase())) cutoff--;
     s = words.slice(0, cutoff).join(' ');
   }
+  // Re-strip trailing orphan numbers AFTER truncation — the 5-word cap can
+  // land on the leading "3" of "3 In 1 Diaper Rash Cream", leaving a
+  // dangling variant indicator that KP interprets literally and zeroes
+  // out the keyword volume. ("Aquaphor Baby Healing Cream 3" → 3 ideas;
+  // "Aquaphor Baby Healing Cream" → many more.) Drop trailing 1-3 digit
+  // tokens and the "3-in-1" phrase head if it survives.
+  s = s.replace(/\s+\d{1,3}(?:\s+in\s+\d{1,3})?\s*$/gi, ' ').trim();
+  s = s.replace(/\s+/g, ' ').trim();
   return s || name;
 }
 
@@ -4217,8 +4225,25 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // (Kept the `applyNoiseFilter` function definition for now in case we
       // want to bring it back behind a profile flag later.)
 
-      productsDone++;
-      await onProductDone(cleanUrl);
+      // Only mark the product as DONE if the user did NOT press Stop
+      // mid-product. If they did, the in-flight product still has
+      // unprocessed work (more PAA / R1 / RS keywords), and persisting it
+      // to doneProducts would cause the next Resume to skip it and start
+      // at the FOLLOWING product instead. Leaving it unmarked means
+      // resume re-enters the same product cleanly; any rows already added
+      // to `report` dedupe by keyword on the re-run.
+      const stoppedMidProduct = shouldStop();
+      if (!stoppedMidProduct) {
+        productsDone++;
+        await onProductDone(cleanUrl);
+      } else {
+        onProgress?.({
+          currentProduct: productName,
+          currentSource: 'done',
+          currentAction: `Stop pressed mid-product — leaving "${productName}" UNMARKED so the next Resume restarts it from the beginning`,
+          logKind: 'ok',
+        });
+      }
       // Summarise matches across every keyword's per-keyword SERP, not just
       // the one product-discovery SERP — those numbers were nearly always 0
       // even when individual R1 / RS keywords found 1-3 matches each.
@@ -4248,7 +4273,9 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       onProgress?.({
         currentProduct: productName,
         currentSource: 'done',
-        currentAction: `Product complete (${productsDone}/${productsTotal}) — ${productRows.length} new keywords this product (${kwWithMatches} with image matches, ${totalMatchedThumbs} total matched thumbs); report total = ${report.size}${r2DegradedNote}`,
+        currentAction: stoppedMidProduct
+          ? `Product PARTIAL (${productsDone}/${productsTotal}) — ${productRows.length} new keywords this product (${kwWithMatches} with image matches, ${totalMatchedThumbs} total matched thumbs); will re-process on Resume; report total = ${report.size}${r2DegradedNote}`
+          : `Product complete (${productsDone}/${productsTotal}) — ${productRows.length} new keywords this product (${kwWithMatches} with image matches, ${totalMatchedThumbs} total matched thumbs); report total = ${report.size}${r2DegradedNote}`,
         keywordCount: report.size,
         productKeywordCount: productRows.length,
         productMatchCount: kwWithMatches,
