@@ -55,11 +55,24 @@ $('fileInput').addEventListener('change', async (e) => {
     // into one file).
     let sawSkuColumn = false;
     for (const row of rows) {
-      let urlVal = '', priVal = '', skuVal = '', handlesVal = '';
+      let urlVal = '', priVal = '', skuVal = '', handlesVal = '', brandVal = '';
       for (const k of Object.keys(row)) {
         const kl = k.toLowerCase().trim();
         if (kl === 'product url' || kl === 'producturl' || kl === 'url') urlVal = String(row[k]).trim();
-        if (kl === 'priority' || kl === 'pri') priVal = String(row[k]).trim();
+        // Priority — accept the common "priroty" typo (and other obvious
+        // misspellings) so a sheet authored with the wrong header still
+        // ranks correctly instead of silently defaulting every row to 3.
+        if (
+          kl === 'priority' || kl === 'pri' ||
+          kl === 'priroty' || kl === 'prioty' || kl === 'priorty' || kl === 'priorit' ||
+          kl === 'rank' || kl === 'order'
+        ) priVal = String(row[k]).trim();
+        // Brand column — explicit brand beats heuristic auto-detection from
+        // the URL slug. Critical for multi-word brands ("La Roche-Posay",
+        // "The Ordinary") and brand-mate grouping across the batch.
+        if (!brandVal && (kl === 'brand' || kl === 'brands' || kl === 'brand name' || kl === 'brandname' || kl === 'manufacturer' || kl === 'maker')) {
+          brandVal = String(row[k]).trim();
+        }
         // SKU column — accept anything containing "sku" or recognised as a
         // product identifier. Previously only exact-match "sku" / "product
         // sku" / "productsku" / "item sku" worked, which silently dropped
@@ -91,6 +104,7 @@ $('fileInput').addEventListener('change', async (e) => {
         priority: (priority === 1 || priority === 2 || priority === 3) ? priority : 3,
         sku: skuVal,
         handles: handlesVal,
+        brand: brandVal,
       });
     }
 
