@@ -218,6 +218,15 @@ export function simplifyForKP(name) {
   s = s.replace(/\b\d+\s*(softgels?|capsules?|caps?|tablets?|tabs?|vegcaps?|vcaps?|count|ct|pack|servings?|gels?|gummies|chewables?|pieces?|bottles?|sachets?|sheets?|wipes?|units?|pcs?)\b/gi, ' ');
   // Mass / volume / energy units (e.g. "200ml", "1.7 oz", "100 g", "650mg")
   s = s.replace(/\b\d+(?:\.\d+)?\s*(mg|mcg|g|gm|gms|ml|oz|ounces?|lb|lbs|kg|kgs|l|liters?|litres?|iu|kcal)\b/gi, ' ');
+  // Percentages — "15 Percent", "15%", "0.5%" — strip the leading number
+  // and the percent word, keeping the substance name intact ("15 Percent
+  // Zinc Oxide" → "Zinc Oxide"). SPF is a strength indicator, not a unit
+  // KP optimises for; strip "SPF 60" / "SPF60" too. No trailing \b on
+  // "%" — JS \b only fires between word/non-word, and "%" is non-word,
+  // so "0.2% " gets no boundary. Use \b on the word variants instead.
+  s = s.replace(/\b\d+(?:\.\d+)?\s*%/g, ' ');
+  s = s.replace(/\b\d+(?:\.\d+)?\s*(?:percent|per\s*cent)\b/gi, ' ');
+  s = s.replace(/\bspf\s*\d+\s*(?:\+|plus)?\b/gi, ' ');
   // "Pack of 3", "Set of 2", "3-Pack", "Twin/Value/Combo/Multi/Family Pack"
   s = s.replace(/\b(?:pack|set|box|case)\s+of\s+\d+\b/gi, ' ');
   s = s.replace(/\b\d+\s*-\s*pack\b/gi, ' ');
@@ -231,22 +240,29 @@ export function simplifyForKP(name) {
   // Trailing punctuation left over from removed segments
   s = s.replace(/[,|–-]+\s*$/g, ' ');
   s = s.replace(/\s+/g, ' ').trim();
-  // If still longer than 6 meaningful words, truncate to the first 5 (skip
-  // trailing stop-words). KP gives broader results on shorter seeds.
+  // Cap at 10 meaningful words — long enough to preserve the full handle
+  // (e.g. "Aquaphor Baby Healing Cream 3 In 1 Diaper Rash Cream" is 10
+  // words and stays intact), short enough that KP's "Get results" button
+  // hydrates reliably (anything >12 words tends to time out the UI).
+  // Step back off trailing stop-words so we don't end the seed on "for",
+  // "with", "and", etc., and off trailing orphan numbers that became the
+  // last token only because the cap landed on them.
   const STOP = new Set(['for','with','and','the','a','an','of','in','on','by','to']);
   const words = s.split(/\s+/).filter(Boolean);
-  if (words.length > 6) {
-    let cutoff = 5;
-    while (cutoff > 3 && STOP.has(words[cutoff - 1].toLowerCase())) cutoff--;
+  if (words.length > 10) {
+    let cutoff = 10;
+    while (cutoff > 4 && (STOP.has(words[cutoff - 1].toLowerCase()) || /^\d{1,3}$/.test(words[cutoff - 1]))) cutoff--;
     s = words.slice(0, cutoff).join(' ');
   }
-  // Re-strip trailing orphan numbers AFTER truncation — the 5-word cap can
-  // land on the leading "3" of "3 In 1 Diaper Rash Cream", leaving a
-  // dangling variant indicator that KP interprets literally and zeroes
-  // out the keyword volume. ("Aquaphor Baby Healing Cream 3" → 3 ideas;
-  // "Aquaphor Baby Healing Cream" → many more.) Drop trailing 1-3 digit
-  // tokens and the "3-in-1" phrase head if it survives.
-  s = s.replace(/\s+\d{1,3}(?:\s+in\s+\d{1,3})?\s*$/gi, ' ').trim();
+  // Post-truncation cleanup: trailing strips have to run AGAIN because the
+  // cap may have created new trailing tokens that weren't there originally
+  // (e.g. cap lands on "For Face", "For Dry", "Of Three", "3 In 1").
+  // Order matters — strip stop-word + body-part runs first, then orphan
+  // numbers, then a final whitespace collapse.
+  s = s.replace(/\s+(?:for\s+)?(?:face|body|hair|skin|hands|feet|lips|dry|oily|chapped|cracked|sensitive)(?:\s+(?:face|body|hair|skin|hands|feet|lips|dry|oily|chapped|cracked|sensitive))*\s*$/gi, ' ');
+  s = s.replace(/\s+(?:for|with|and|the|of|in|on|by|to)\s*$/gi, ' ');
+  s = s.replace(/\s+\d{1,3}(?:\s+in\s+\d{1,3})?\s*$/gi, ' ');
+  s = s.replace(/[,|–-]+\s*$/g, ' ');
   s = s.replace(/\s+/g, ' ').trim();
   return s || name;
 }
@@ -2548,12 +2564,24 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // Ounce") return narrow KP idea sets, so a shorter handle like
       // "cerave moisturizing cream" should replace them, not be skipped.
       const MAX_KP_SEEDS = 3;
+      // Seed candidate order:
+      //   [0] = simplified kpSeed (cleaned + capped to 10 words)
+      //   [1+] = file-provided handles, each ALSO passed through
+      //          simplifyForKP so any size/dosage/percentage tokens
+      //          ("99g", "15 Percent", "180 EPA") get stripped before
+      //          they reach KP. Without this, the file handle
+      //          "Aquaphor Baby Healing Cream 3 In 1 Diaper Rash Cream
+      //          With 15 Percent Zinc Oxide And Panthenol 99g" is 16
+      //          words and reliably times out KP's Get results button.
+      //          After cleaning + cap it collapses to a usable seed
+      //          that preserves the identity vocabulary and yields
+      //          many more keywords for a famous brand.
       const candidates = [kpSeed];
       if (typeof opts.handlesToSeeds === 'function' && p.handles) {
         const extra = opts.handlesToSeeds(cleanUrl, p.handles) || [];
         for (const s of extra) {
-          const sTrim = String(s).trim();
-          if (sTrim) candidates.push(sTrim);
+          const cleaned = simplifyForKP(String(s).trim());
+          if (cleaned) candidates.push(cleaned);
         }
       }
       let kpSeeds, skippedSeeds = [];
