@@ -1507,21 +1507,23 @@ export function classifyKeyword(keyword, productContext) {
     // Tier 2 — sibling brand product. Store as competitive intel, skip SERP.
     return { relevant: true, tier: 'brand_other', loadSERP: false, expand: false, reason: null };
   }
+  // Strict-brand mode: anything below this point has NO brand mention.
+  // Previously Tier 3 (anchor+category) and Tier 4 (anchor+commercial) were
+  // kept as "exploratory" queries — they'd load a SERP and hope our image
+  // surfaced. In practice they bloated the row count with low-confidence
+  // matches that mostly attributed to competitors (Aquaphor seed yielded
+  // 331 SERP-eligible of 1203 ideas — too many for "only relevant to our
+  // product"). Reject them at the filter so the CSV stays clean.
   if (hasAnchor && hasCategory) {
-    // Tier 3 — generic product query. SERP decides via image match.
-    return { relevant: true, tier: 'generic_product', loadSERP: true, expand: 'match_decides', reason: null };
+    return reject('generic_no_brand');
   }
   if (hasAnchor) {
-    // Tier 4 — anchor only. Promote to SERP ONLY when there's a commercial
-    // signal in the query. Pure educational queries ("what is alfalfa
-    // plant", "alfalfa nutrition value") burn a SERP for nothing.
     if (_hasCommercialIntent(kw)) {
-      return { relevant: true, tier: 'anchor_only', loadSERP: true, expand: 'match_decides', reason: null };
+      return reject('anchor_commercial_no_brand');
     }
     return reject('anchor_only_no_commercial');
   }
   if (hasCategory) {
-    // Category-only is too generic — would just surface competitors.
     return reject('category_only_no_anchor');
   }
   return reject('no_signals');
