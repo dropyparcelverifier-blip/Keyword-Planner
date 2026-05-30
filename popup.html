@@ -5,16 +5,26 @@
   <title>AdBrain Discovery</title>
   <style>
     :root {
-      --bg: #0f1419;
-      --panel: #1a1f29;
+      --bg: #0d1118;
+      --bg-elev: #131822;
+      --panel: #1a1f2b;
+      --panel-2: #20283a;
       --border: #2a3240;
-      --text: #e6e9ef;
+      --border-strong: #3a4358;
+      --text: #e8ebf2;
       --muted: #8b94a7;
+      --muted-strong: #a8b1c4;
       --accent: #4f8cff;
       --accent-hover: #6ba1ff;
+      --accent-soft: rgba(79,140,255,0.12);
       --success: #34d399;
+      --success-soft: rgba(52,211,153,0.12);
       --warn: #fbbf24;
+      --warn-soft: rgba(251,191,36,0.12);
       --danger: #f87171;
+      --danger-soft: rgba(248,113,113,0.12);
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+      --shadow-md: 0 4px 12px rgba(0,0,0,0.35);
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; }
@@ -31,32 +41,95 @@
       min-height: 100vh;
     }
     header {
-      padding: 14px 16px;
+      padding: 12px 16px;
       border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 12px;
+      background: linear-gradient(180deg, var(--bg-elev), var(--bg));
     }
-    header h1 { font-size: 15px; margin: 0; letter-spacing: 0.3px; }
+    header h1 {
+      font-size: 15px;
+      margin: 0;
+      letter-spacing: 0.3px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    header h1::before {
+      content: '';
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      display: inline-block;
+    }
+    body[data-state="running"] header h1::before {
+      background: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+      animation: pulse-dot 1.6s infinite;
+    }
+    body[data-state="paused"] header h1::before {
+      background: var(--warn);
+      box-shadow: 0 0 0 3px var(--warn-soft);
+    }
+    body[data-state="done"] header h1::before {
+      background: var(--success);
+      box-shadow: 0 0 0 3px var(--success-soft);
+    }
+    @keyframes pulse-dot {
+      0%, 100% { box-shadow: 0 0 0 3px var(--accent-soft); }
+      50%      { box-shadow: 0 0 0 6px var(--accent-soft); }
+    }
     header .sub { font-size: 11px; color: var(--muted); }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .header-status {
+      font-size: 10px;
+      color: var(--muted-strong);
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    body[data-state="running"] .header-status {
+      color: var(--accent-hover); border-color: var(--accent); background: var(--accent-soft);
+    }
+    body[data-state="paused"] .header-status {
+      color: var(--warn); border-color: var(--warn); background: var(--warn-soft);
+    }
+    body[data-state="done"] .header-status {
+      color: var(--success); border-color: var(--success); background: var(--success-soft);
+    }
     .tabs {
       display: flex;
       border-bottom: 1px solid var(--border);
-      background: var(--panel);
+      background: var(--bg-elev);
+      padding: 0 8px;
     }
     .tab {
       flex: 1;
-      padding: 10px;
+      padding: 11px 8px;
       text-align: center;
       cursor: pointer;
       font-size: 12px;
+      font-weight: 500;
       color: var(--muted);
       border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
     }
+    .tab:hover { color: var(--muted-strong); }
     .tab.active {
       color: var(--text);
       border-bottom-color: var(--accent);
-      background: var(--bg);
     }
     .panel { padding: 14px 16px; display: none; }
     .panel.active { display: block; }
@@ -71,13 +144,19 @@
     }
     input[type="file"], input[type="text"], input[type="password"], input[type="number"] {
       width: 100%;
-      padding: 8px 10px;
-      background: var(--panel);
+      padding: 9px 11px;
+      background: var(--bg-elev);
       border: 1px solid var(--border);
       border-radius: 6px;
       color: var(--text);
       font-size: 12px;
       font-family: inherit;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
     }
     button {
       padding: 9px 14px;
@@ -89,15 +168,96 @@
       font-weight: 500;
       font-size: 12px;
       font-family: inherit;
+      transition: background 0.15s, transform 0.05s, box-shadow 0.15s;
+      box-shadow: var(--shadow-sm);
     }
     button:hover:not(:disabled) { background: var(--accent-hover); }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button:active:not(:disabled) { transform: translateY(1px); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
     button.secondary { background: var(--panel); border: 1px solid var(--border); color: var(--text); }
-    button.secondary:hover:not(:disabled) { background: #232b38; }
+    button.secondary:hover:not(:disabled) { background: var(--panel-2); border-color: var(--border-strong); }
     button.danger { background: var(--danger); color: #1a0d0d; }
     button.danger:hover:not(:disabled) { background: #fca5a5; }
+
+    /* Reusable banner classes (replaces inline style="..."). Each banner
+       has the same layout but a different colour family. */
+    .banner {
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+    }
+    .banner-title {
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .banner-body {
+      font-size: 11px;
+      line-height: 1.5;
+      color: var(--muted-strong);
+    }
+    .banner-body strong { color: var(--text); }
+    .banner-info  { border-color: var(--accent);  background: var(--accent-soft); }
+    .banner-info  .banner-title { color: var(--accent-hover); }
+    .banner-warn  { border-color: var(--warn);    background: var(--warn-soft); }
+    .banner-warn  .banner-title { color: var(--warn); }
+    .banner-error { border-color: var(--danger);  background: var(--danger-soft); }
+    .banner-error .banner-title { color: var(--danger); }
+    .banner-title::before {
+      content: '●';
+      font-size: 8px;
+      margin-right: 4px;
+    }
+    /* Collapsible <details> sections — used for pace note + old-style progress.
+       Default styling for the disclosure triangle is replaced by a chevron. */
+    details.collapsible {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 0;
+      overflow: hidden;
+      margin-bottom: 12px;
+    }
+    details.collapsible > summary {
+      padding: 10px 12px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--muted-strong);
+      font-weight: 500;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      user-select: none;
+    }
+    details.collapsible > summary::-webkit-details-marker { display: none; }
+    details.collapsible > summary::before {
+      content: '▸';
+      transition: transform 0.15s;
+      font-size: 10px;
+      color: var(--muted);
+    }
+    details.collapsible[open] > summary::before { transform: rotate(90deg); }
+    details.collapsible > summary:hover { color: var(--text); background: var(--panel-2); }
+    details.collapsible .collapsible-body { padding: 0 12px 12px; }
     .button-row { display: flex; gap: 8px; }
     .button-row button { flex: 1; }
+    /* Sticky export bar at bottom of Run tab — pinned for quick access
+       even when log is long. Becomes prominent when a run finishes. */
+    .export-row {
+      display: flex;
+      gap: 8px;
+      padding: 10px 16px;
+      background: var(--bg-elev);
+      border-top: 1px solid var(--border);
+      position: sticky;
+      bottom: 0;
+      z-index: 5;
+    }
+    .export-row button { flex: 1; }
     .progress {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -110,19 +270,26 @@
     .progress .stat span:first-child { color: var(--muted); }
     .progress .stat span:last-child { color: var(--text); font-weight: 500; }
     .log {
-      margin-top: 8px;
-      padding-top: 8px;
-      border-top: 1px solid var(--border);
+      margin-top: 10px;
+      padding: 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
       font-size: 11px;
-      color: var(--muted);
+      color: var(--muted-strong);
       max-height: 320px;
       overflow-y: auto;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      line-height: 1.55;
     }
-    .log-line { margin-bottom: 2px; }
+    .log::-webkit-scrollbar { width: 8px; }
+    .log::-webkit-scrollbar-track { background: var(--bg); }
+    .log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .log::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+    .log-line { margin-bottom: 2px; word-break: break-word; }
     .log-line.err { color: var(--danger); }
-    .log-line.ok { color: var(--success); }
-    .hint { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
+    .log-line.ok  { color: var(--success); }
+    .hint { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
     .file-info { margin-top: 6px; font-size: 11px; color: var(--success); }
     .source-pill {
       display: inline-block; padding: 1px 6px; border-radius: 9px;
@@ -174,11 +341,16 @@
 
     /* ============ Progress card ============ */
     .progress-card {
-      background: var(--panel);
+      background: linear-gradient(180deg, var(--panel-2), var(--panel));
       border: 1px solid var(--border);
       border-radius: 10px;
       padding: 14px;
       margin-bottom: 10px;
+      box-shadow: var(--shadow-md);
+    }
+    body[data-state="running"] .progress-card {
+      border-color: var(--accent);
+      box-shadow: var(--shadow-md), 0 0 0 1px var(--accent-soft);
     }
     .pc-header {
       display: flex;
@@ -264,19 +436,24 @@
       white-space: nowrap;
     }
     .pc-counters {
-      display: flex;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 6px;
       margin-bottom: 10px;
     }
+    @media (max-width: 380px) {
+      .pc-counters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
     .pc-counter {
-      flex: 1;
       text-align: center;
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 6px;
-      padding: 6px 4px;
+      padding: 8px 4px 7px;
       min-width: 0;
+      transition: border-color 0.15s, background 0.15s;
     }
+    .pc-counter:hover { border-color: var(--border-strong); background: var(--bg-elev); }
     .pc-counter-value {
       font-size: 16px;
       font-weight: 600;
@@ -550,7 +727,10 @@
       <h1>AdBrain Discovery</h1>
       <div class="sub">Autosuggest · PAA · Lens</div>
     </div>
-    <div class="sub">v1.0.0</div>
+    <div class="header-right">
+      <span class="header-status" id="headerStatus" title="Current run state">Idle</span>
+      <span class="sub">v1.0.0</span>
+    </div>
   </header>
 
   <div class="tabs">
@@ -591,30 +771,31 @@
       </button>
     </div>
 
-    <div class="section" id="paceNote" style="background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px;">
-      <div class="hint" style="margin:0;line-height:1.5;">
-        <strong style="color:var(--text);">This tool runs slowly on purpose.</strong>
-        A full run may take several hours. SERP loads are paced with long, randomised
-        pauses and grouped into small batches with rest periods. This keeps the tool
-        within normal browsing behaviour — there is no CAPTCHA-solving and no bypass.
-        If Google serves a verification check the run pauses and you can solve it
-        manually in your browser, then resume.
+    <details class="collapsible" id="paceNote">
+      <summary>Why this tool runs slowly</summary>
+      <div class="collapsible-body">
+        <div class="banner-body" style="line-height:1.5;">
+          <strong>This tool runs slowly on purpose.</strong>
+          A full run may take several hours. SERP loads are paced with long, randomised
+          pauses and grouped into small batches with rest periods. This keeps the tool
+          within normal browsing behaviour — there is no CAPTCHA-solving and no bypass.
+          If Google serves a verification check the run pauses and you can solve it
+          manually in your browser, then resume.
+        </div>
+      </div>
+    </details>
+
+    <div class="banner banner-warn" id="restBanner" style="display:none;">
+      <div class="banner-title">Resting between chunks</div>
+      <div class="banner-body">
+        Next chunk starts at <strong id="restUntilText">—</strong>
+        (<strong id="restCountdown">—</strong> remaining)
       </div>
     </div>
 
-    <div class="section" id="restBanner" style="display:none;background:#2a3240;border:1px solid var(--warn);border-radius:6px;padding:10px;">
-      <div style="font-size:12px;color:var(--warn);font-weight:600;margin-bottom:4px;">Resting between chunks</div>
-      <div style="font-size:12px;color:var(--text);">
-        Next chunk starts at <span id="restUntilText">—</span>
-        (<span id="restCountdown">—</span> remaining)
-      </div>
-    </div>
-
-    <div class="section" id="autoResumeBanner" style="display:none;background:#1c2c3a;border:1px solid #4a90d9;border-radius:6px;padding:10px;">
-      <div style="font-size:12px;color:#9cc8f0;font-weight:600;margin-bottom:4px;">
-        Auto-resume armed
-      </div>
-      <div class="hint" style="margin:0;line-height:1.5;color:var(--text);">
+    <div class="banner banner-info" id="autoResumeBanner" style="display:none;">
+      <div class="banner-title">Auto-resume armed</div>
+      <div class="banner-body">
         This run will resume automatically if Chrome restarts, the PC loses power,
         or the service worker is killed. A watchdog alarm fires every minute and
         re-launches the run from the last saved checkpoint. Click <strong>Resume</strong>
@@ -623,14 +804,13 @@
       </div>
     </div>
 
-    <div class="section" id="captchaBanner" style="display:none;background:#3a1c1c;border:1px solid var(--danger);border-radius:6px;padding:10px;">
-      <div style="font-size:12px;color:var(--danger);font-weight:600;margin-bottom:4px;">
-        Google served a verification check
-      </div>
-      <div class="hint" style="margin:0;line-height:1.5;color:var(--text);">
+    <div class="banner banner-error" id="captchaBanner" style="display:none;">
+      <div class="banner-title">Google served a verification check</div>
+      <div class="banner-body">
         The run has been paused and your progress is saved. Solve the check manually in
-        your browser if you wish, then click Resume to continue from where you stopped,
-        or try again later with slower settings (longer delays / smaller chunks).
+        your browser if you wish, then click <strong>Resume</strong> to continue from
+        where you stopped, or try again later with slower settings (longer delays /
+        smaller chunks).
       </div>
     </div>
 
@@ -697,31 +877,38 @@
         </div>
       </div>
 
-      <div class="progress">
-        <div class="stat"><span>Status</span><span id="statusText">Idle</span></div>
-        <div class="stat"><span>Current product</span><span id="currentProduct">—</span></div>
-        <div class="stat"><span>Current source</span><span><span class="source-pill" id="currentSource">—</span></span></div>
-        <div class="stat"><span>Current action</span><span id="currentAction">—</span></div>
+      <details class="collapsible" id="legacyProgressDetails">
+        <summary>Detailed stats &amp; activity log</summary>
+        <div class="collapsible-body">
+          <div class="progress">
+            <div class="stat"><span>Status</span><span id="statusText">Idle</span></div>
+            <div class="stat"><span>Current product</span><span id="currentProduct">—</span></div>
+            <div class="stat"><span>Current source</span><span><span class="source-pill" id="currentSource">—</span></span></div>
+            <div class="stat"><span>Current action</span><span id="currentAction">—</span></div>
 
-        <div class="bar-label">
-          <span>Products done</span>
-          <span><span id="productsDone">0</span> / <span id="productsTotal">0</span></span>
+            <div class="bar-label">
+              <span>Products done</span>
+              <span><span id="productsDone">0</span> / <span id="productsTotal">0</span></span>
+            </div>
+            <div class="bar-track"><div class="bar-fill" id="productsBar"></div></div>
+
+            <div class="bar-label">
+              <span>Current product queue</span>
+              <span><span id="queueProcessed">0</span> / <span id="queueTotal">0</span></span>
+            </div>
+            <div class="bar-track"><div class="bar-fill" id="queueBar"></div></div>
+
+            <div class="stat" style="margin-top: 10px;"><span>Keywords in report</span><span id="keywordCount">0</span></div>
+            <div class="stat"><span>Queue remaining</span><span id="queueRemaining">0</span></div>
+            <div class="log" id="log"></div>
+          </div>
         </div>
-        <div class="bar-track"><div class="bar-fill" id="productsBar"></div></div>
-
-        <div class="bar-label">
-          <span>Current product queue</span>
-          <span><span id="queueProcessed">0</span> / <span id="queueTotal">0</span></span>
-        </div>
-        <div class="bar-track"><div class="bar-fill" id="queueBar"></div></div>
-
-        <div class="stat" style="margin-top: 10px;"><span>Keywords in report</span><span id="keywordCount">0</span></div>
-        <div class="stat"><span>Queue remaining</span><span id="queueRemaining">0</span></div>
-        <div class="log" id="log"></div>
-      </div>
+      </details>
     </div>
 
-    <div class="section button-row">
+    <!-- Sticky export bar at the bottom of the Run tab — visible during/after
+         the run so the user doesn't have to scroll past the log to export. -->
+    <div class="export-row">
       <button class="secondary" id="exportCsvBtn" disabled>Export CSV</button>
       <button class="secondary" id="exportXlsxBtn" disabled>Export Excel</button>
       <button id="pushBtn" disabled>Push to AdBrain</button>

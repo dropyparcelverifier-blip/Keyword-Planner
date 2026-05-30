@@ -136,6 +136,43 @@ function setRunningUI(running) {
   // would corrupt the report write the engine is in the middle of.
   const rrb = $('runResetBtn');
   if (rrb) rrb.disabled = running;
+  // Drive the header status pill + body data-state for CSS-driven visual
+  // feedback (header dot pulse, progress-card highlight, etc).
+  syncHeaderState(running);
+}
+
+// Sync header status pill text + body data-state attribute. CSS reads
+// body[data-state] to colour the header dot, status pill, and progress
+// card border. Called from setRunningUI and from the progress message
+// handler.
+function syncHeaderState(running) {
+  const body = document.body;
+  let state;
+  let label;
+  if (running) {
+    state = 'running';
+    label = 'Running';
+  } else if (pausedByCaptcha) {
+    state = 'paused';
+    label = 'Paused — verify check';
+  } else {
+    // Read from #statusText (engine's authoritative text) for done / idle
+    // distinction. If lastStatus is "Done …" or "Stopped …", treat as done.
+    const txt = ($('statusText')?.textContent || 'Idle').trim();
+    if (/^Done\b|^Stopped\b/i.test(txt)) {
+      state = 'done';
+      label = txt.length > 40 ? txt.slice(0, 40) + '…' : txt;
+    } else if (/^(?:Starting|Resuming)/i.test(txt)) {
+      state = 'running';
+      label = txt;
+    } else {
+      state = 'idle';
+      label = 'Idle';
+    }
+  }
+  if (body.dataset.state !== state) body.dataset.state = state;
+  const pill = document.getElementById('headerStatus');
+  if (pill && pill.textContent !== label) pill.textContent = label;
 }
 
 function readRunOpts() {
@@ -181,6 +218,7 @@ $('startBtn').addEventListener('click', () => {
   pausedByCaptcha = false;
   setRunningUI(true);
   $('statusText').textContent = 'Starting…';
+  syncHeaderState(true);
   $('log').innerHTML = '';
   $('keywordCount').textContent = '0';
 
@@ -202,6 +240,7 @@ $('resumeBtn').addEventListener('click', () => {
   pausedByCaptcha = false;
   setRunningUI(true);
   $('statusText').textContent = 'Resuming…';
+  syncHeaderState(true);
   $('captchaBanner').style.display = 'none';
   chrome.runtime.sendMessage({ action: 'resumeDiscovery' }, (resp) => {
     if (chrome.runtime.lastError) {
@@ -638,6 +677,7 @@ chrome.runtime.onMessage.addListener((msg) => {
       label = `Done — ${msg.totalKeywords} keywords, ${msg.doneProducts || 0} products marked done`;
     }
     $('statusText').textContent = label;
+    syncHeaderState(false);
     $('exportCsvBtn').disabled = msg.totalKeywords === 0;
     $('exportXlsxBtn').disabled = msg.totalKeywords === 0;
     $('pushBtn').disabled = msg.totalKeywords === 0;
@@ -679,6 +719,7 @@ function doResetProgress(onLog) {
       $('exportXlsxBtn').disabled = true;
       $('pushBtn').disabled = true;
       $('statusText').textContent = 'Idle';
+      syncHeaderState(false);
       onLog?.('Reset complete.', 'ok');
     } else {
       onLog?.(`Reset failed: ${resp?.error || 'unknown'}`, 'err');
@@ -717,6 +758,7 @@ chrome.runtime.sendMessage({ action: 'getState' }, (state) => {
     $('keywordCount').textContent = state.reportSize;
   }
   if (state.lastStatus) $('statusText').textContent = state.lastStatus;
+  syncHeaderState(!!state.running);
   if (state.doneProducts !== undefined) $('doneProductsStat').textContent = state.doneProducts;
   if (typeof state.restUntil === 'number' && state.restUntil > Date.now()) {
     startRestCountdown(state.restUntil);
