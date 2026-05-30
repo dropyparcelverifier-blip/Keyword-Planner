@@ -1785,6 +1785,10 @@ const _DISCRIMINATOR_FILLERS = new Set([
   'unit', 'units', 'count', 'natural', 'pure', 'best', 'premium',
   'organic', 'non', 'gmo', 'free', 'gluten', 'vegan', 'vegetarian',
   'halal', 'kosher', 'certified', 'tested', 'verified',
+  // Slug numeric artefacts: "1point75-ounce" → tokenises to "point",
+  // "0point35" → "point", "x-large" → "large". Strip the fragments
+  // that aren't meaningful discriminators.
+  'point', 'plus', 'percent', 'per', 'cent',
 ]);
 export function extractDiscriminatorTokens(name) {
   const out = new Set();

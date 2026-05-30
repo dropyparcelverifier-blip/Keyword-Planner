@@ -2093,7 +2093,14 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         const ot = tokensByIdx.get(otherIdx) || new Set();
         for (const t of ot) groupTokenFreq.set(t, (groupTokenFreq.get(t) || 0) + 1);
       }
-      const broadCutoff = Math.ceil(indices.length / 2); // strict majority → broad
+      // Strict majority — a token must appear in MORE THAN HALF the group
+      // (not exactly half) to count as "brand-broad". This keeps tokens
+      // like "baby" — which appears in 3 of 6 Aquaphor SKUs — as valid
+      // sibling discriminators rather than treating them as generic
+      // brand vocabulary. For 2-SKU groups, the cutoff becomes 2, which
+      // effectively disables the broad filter (correct — with two SKUs
+      // every cross-token is by definition a discriminator).
+      const broadCutoff = Math.floor(indices.length / 2) + 1;
       for (const idx of indices) {
         const ourTokens = tokensByIdx.get(idx) || new Set();
         const exclusions = new Set();
