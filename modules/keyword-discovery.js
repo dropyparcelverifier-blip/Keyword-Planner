@@ -1047,6 +1047,24 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   // with similar packaging.
   if (clipScorePct >= 70 && textSim.score < 30 && !brandMentioned) total -= 15;
 
+  // Brand-absence hard cap — addresses the user-reported case where the
+  // text matches on GENERIC category terms (omega / fish / oil are in
+  // every fish-oil supplement listing) but no brand is mentioned. CLIP
+  // 65-78 between similar-archetype bottles (Muscleblaze, MuscleNectar,
+  // Centrum fish-oil softgels all look like our reference). Without
+  // brand confirmation we cannot tell which bottle the listing is for.
+  //
+  // Rule: !brandMentioned AND CLIP < 80 → cap score at 35 (below the
+  // 55 match threshold). Visually-unmistakable matches (CLIP >= 80)
+  // skip this cap because the image alone is conclusive. The rescue
+  // path below still recovers cache-trusted URLs (already verified on
+  // a brand SERP), so legitimate cross-SERP attribution survives.
+  let brandAbsenceCapped = false;
+  if (!brandMentioned && clipScorePct < 80) {
+    total = Math.min(total, 35);
+    brandAbsenceCapped = true;
+  }
+
   // Same brand, different product (brand in text but our product's anchor
   // word — the actual product identifier — is missing). E.g. "NOW Foods
   // Vitamin C" when we sell "NOW Foods Alfalfa".
@@ -1141,6 +1159,10 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   let identityMissing = [];
   let identityTier = 'full';
   let matchQuality = 'clean';
+  // If the brand-absence cap fired earlier, tag the match quality so
+  // the breakdown log shows it. The cap pushes total to 35; the
+  // threshold check below decides whether rescue brings it back.
+  if (brandAbsenceCapped) matchQuality = 'no_brand_lowclip';
   if (typeof productContext?.checkProductIdentity === 'function') {
     const ident = productContext.checkProductIdentity(originalText) || { tier: 'full', match: true, missingWords: [] };
     identityTier = ident.tier || (ident.match ? 'full' : 'fail');
