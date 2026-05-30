@@ -1523,16 +1523,105 @@ export function isBrandOnlyMatch(keyword, productContext) {
 // appear in the context. If any are missing, we're looking at a sibling
 // product, not ours.
 //
-// Returns `{ match, missingWords }`. Caller decides the penalty (image
-// matching uses -30; Amazon matching skips the row entirely).
+// Returns `{ tier, match, missingWords, matchedCount, totalCount }` where
+// `tier` is:
+//   'full'    — every coreTypeWord present in ctx
+//   'partial' — at least ⌈N/2⌉ of N coreTypeWords present (caller decides
+//               whether to accept based on brand + spec confirmation)
+//   'fail'    — fewer than ⌈N/2⌉ matched (clearly wrong product)
+//
+// Backwards-compat: `match` mirrors the old boolean (true iff tier === 'full').
+// Callers that want the new behavior check `tier` directly.
+//
+// The partial tier exists because retailers sometimes drop a coreTypeWord
+// from the title (e.g. "Now Foods Omega-3 200 Softgels" — "fish" is on
+// the bottle / in the product description but not in the SERP text).
+// Strict all-or-nothing rejection over-killed legitimate matches; the
+// partial path lets the caller validate via brand + spec confirmation.
 export function checkProductIdentity(contextText, productContext) {
-  if (!productContext) return { match: true, missingWords: [] };
+  if (!productContext) return { tier: 'full', match: true, missingWords: [], matchedCount: 0, totalCount: 0 };
   const coreWords = (productContext.coreTypeWords || []).map(w => String(w || '').toLowerCase()).filter(Boolean);
-  if (coreWords.length === 0) return { match: true, missingWords: [] };
+  if (coreWords.length === 0) {
+    return { tier: 'full', match: true, missingWords: [], matchedCount: 0, totalCount: 0 };
+  }
   const ctx = String(contextText || '').toLowerCase();
-  if (!ctx) return { match: false, missingWords: coreWords };
+  if (!ctx) return { tier: 'fail', match: false, missingWords: coreWords.slice(), matchedCount: 0, totalCount: coreWords.length };
+  const matched = coreWords.filter(w => ctx.includes(w));
   const missing = coreWords.filter(w => !ctx.includes(w));
-  return { match: missing.length === 0, missingWords: missing };
+  const matchedCount = matched.length;
+  const totalCount = coreWords.length;
+  const partialThreshold = Math.ceil(totalCount / 2);
+  let tier;
+  if (matchedCount === totalCount) tier = 'full';
+  else if (matchedCount >= partialThreshold) tier = 'partial';
+  else tier = 'fail';
+  return { tier, match: tier === 'full', missingWords: missing, matchedCount, totalCount };
+}
+
+// Spec-confirmation helper: does the context positively confirm at least
+// one of our product's specs (count / dose / volume / mass / extended)?
+// Used by the identity-tier handler to rescue partial-text matches that
+// otherwise look ambiguous.
+//
+// "Confirmation" = ctx value present AND matches ours within the same
+// tolerances hasConflictingSpec uses (count exact, dose ±15%, etc.).
+//
+// Returns { confirmed: bool, dim?: string, ours?: string, theirs?: string }
+// so the caller can log WHICH spec confirmed.
+export function hasSpecConfirmation(contextText, ourSpecs) {
+  if (!ourSpecs) return { confirmed: false };
+  const ctx = String(contextText || '').toLowerCase();
+  if (!ctx) return { confirmed: false };
+  const ctxQty = parseQty(ctx);
+
+  // Count: exact match
+  if (ourSpecs.count != null) {
+    const ourCount = parseInt(ourSpecs.count, 10);
+    if (ctxQty.count != null && Math.round(ctxQty.count) === ourCount) {
+      return { confirmed: true, dim: 'count', ours: ourSpecs.count, theirs: String(ctxQty.count) };
+    }
+  }
+  // Dose / dosage: ±15% (matches hasConflictingSpec tolerance)
+  if (ourSpecs.dosage != null) {
+    const ours = parseFloat(ourSpecs.dosage);
+    if (ctxQty.dose != null) {
+      const r = ctxQty.dose / ours;
+      if (r >= 0.85 && r <= 1.15) {
+        return { confirmed: true, dim: 'dosage', ours: ourSpecs.dosage, theirs: String(ctxQty.dose) };
+      }
+    }
+    // also IU
+    if (ctxQty.doseIU != null) {
+      const r = ctxQty.doseIU / ours;
+      if (r >= 0.85 && r <= 1.15 && (ourSpecs.dosageUnit || '').toLowerCase() === 'iu') {
+        return { confirmed: true, dim: 'dosage', ours: ourSpecs.dosage + 'iu', theirs: ctxQty.doseIU + 'iu' };
+      }
+    }
+  }
+  // Volume / weight: exact within rounding
+  if (ourSpecs.volume != null && ctxQty.volume != null) {
+    const ours = parseFloat(ourSpecs.volume);
+    if (Math.abs(ctxQty.volume - ours) / Math.max(ours, 1) < 0.05) {
+      return { confirmed: true, dim: 'volume', ours: ourSpecs.volume, theirs: String(ctxQty.volume) };
+    }
+  }
+  if (ourSpecs.weight != null && ctxQty.mass != null) {
+    const ours = parseFloat(ourSpecs.weight);
+    if (Math.abs(ctxQty.mass - ours) / Math.max(ours, 1) < 0.05) {
+      return { confirmed: true, dim: 'weight', ours: ourSpecs.weight, theirs: String(ctxQty.mass) };
+    }
+  }
+  // Extended specs (epa, dha, spf, etc.) — exact-or-tight match
+  for (const k of ['epa', 'dha', 'spf', 'storage', 'wattage', 'battery', 'screen']) {
+    if (ourSpecs[k] != null && ctxQty[k] != null) {
+      const ours = parseFloat(ourSpecs[k]);
+      const theirs = parseFloat(ctxQty[k]);
+      if (Math.abs(theirs - ours) / Math.max(ours, 1) < 0.05) {
+        return { confirmed: true, dim: k, ours: ourSpecs[k], theirs: String(theirs) };
+      }
+    }
+  }
+  return { confirmed: false };
 }
 
 // ============ Sibling SKU ambiguity (universal quantity gate) ============

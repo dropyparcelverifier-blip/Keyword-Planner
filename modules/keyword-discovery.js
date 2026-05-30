@@ -1121,20 +1121,53 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
     }
   }
 
-  // Product identity (Layer 2) — every word of coreTypeWords must appear
-  // in the context. The legacy single-word _hasAnchor check accepts
-  // "now foods PLANT enzymes" as our "Super Enzymes" product because
-  // "enzymes" alone matches; the identity check rejects it because
-  // "super" is missing. Apply a flat -30 demotion when identity fails —
-  // larger than the variant penalty because a different product is a
-  // worse mismatch than a different size of the same product.
+  // Product identity (Layer 2) — tiered:
+  //   full    — every coreTypeWord present → pass clean
+  //   partial — ≥⌈N/2⌉ present → check brand + spec confirmation:
+  //               brand ✓ + spec ✓ → -10 (accepted with small penalty)
+  //               brand ✓ + spec ✗ → -25 + tag matchQuality='ambiguous'
+  //                                  (may still pass threshold if other
+  //                                   signals are strong; the matchQuality
+  //                                   tag surfaces in the CSV)
+  //               brand ✗ → -30 (treated as fail)
+  //   fail    — <⌈N/2⌉ present → -30 (clearly wrong product)
+  //
+  // The "fish oil on bottle / count in alt text" case (kiwla.com,
+  // amazon.com 180 EPA) lands in partial+brand+spec → accepted.
+  // Generic brand-only pages (nowfoods.com overview) without specs
+  // land in partial+brand-only → tagged ambiguous, may slip below
+  // threshold via the penalty.
   let identityMatch = true;
   let identityMissing = [];
+  let identityTier = 'full';
+  let matchQuality = 'clean';
   if (typeof productContext?.checkProductIdentity === 'function') {
-    const ident = productContext.checkProductIdentity(originalText) || { match: true, missingWords: [] };
-    identityMatch = !!ident.match;
+    const ident = productContext.checkProductIdentity(originalText) || { tier: 'full', match: true, missingWords: [] };
+    identityTier = ident.tier || (ident.match ? 'full' : 'fail');
+    identityMatch = identityTier === 'full';
     identityMissing = ident.missingWords || [];
-    if (!identityMatch) {
+    if (identityTier === 'partial') {
+      // Check brand + spec confirmation.
+      const specConf = (typeof productContext.hasSpecConfirmation === 'function')
+        ? productContext.hasSpecConfirmation(originalText)
+        : { confirmed: false };
+      if (brandMentioned && specConf.confirmed) {
+        // Strong rescue: text uses alt naming (fish oil on bottle) but
+        // brand + at least one spec confirms it's our SKU.
+        total = Math.max(0, total - 10);
+        isMatch = total >= 55;
+      } else if (brandMentioned) {
+        // Weak partial: brand present but no spec marker — could be us,
+        // could be a sibling. Tag ambiguous; the breakdown log shows
+        // the case so the user can audit.
+        total = Math.max(0, total - 25);
+        isMatch = total >= 55;
+        matchQuality = 'ambiguous_brand_match';
+      } else {
+        total = Math.max(0, total - 30);
+        isMatch = total >= 55;
+      }
+    } else if (identityTier === 'fail') {
       total = Math.max(0, total - 30);
       isMatch = total >= 55;
     }
@@ -1275,6 +1308,8 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
     contextSample: strippedText.slice(0, 80).trim(),
     identityMatch,
     identityMissing,
+    identityTier,
+    matchQuality,
     productLineModifier,
     variantConflicts,
     siblingMatch,
@@ -1402,13 +1437,28 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
   let scored = 0;
   const tierBreakdown = { cache: 0, dhash: 0, clip: 0 };
 
-  const pushMatch = (url, conf, emb) => {
+  // matchedQualities[i] aligns with matchedThumbnails[i]:
+  //   'clean'                    — full identity match
+  //   'partial_spec_confirmed'   — partial identity + brand + spec confirmation
+  //   'ambiguous_brand_match'    — partial identity + brand only (audit needed)
+  //   'dhash'                    — dHash near-identical hit, identity skipped
+  //   'url_match'                — URL identity match, identity skipped
+  // Surfaces in CSV as a `match_qualities` column so the user can filter
+  // ambiguous-brand-only matches out (or audit them) without losing
+  // count signal.
+  const matchedQualities = [];
+  const pushMatch = (url, conf, emb, quality = 'clean') => {
     const ctx = ctxByUrl.get(url) || { seller: '', price: '' };
     matchedThumbnails.push(url);
     matchedConfidences.push(conf);
     matchedEmbeddings.push(emb);
     matchedSellers.push(ctx.seller);
     matchedPrices.push(ctx.price);
+    // dHash veto path stashes a tier on the ctx so we pick it up here.
+    if (quality === 'clean' && ctx._matchQuality) {
+      quality = ctx._matchQuality;
+    }
+    matchedQualities.push(quality);
   };
 
   // Tier 1 (URL identity match) — always runs.
@@ -1417,7 +1467,7 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
     const urlMatchKeys = buildUrlMatchKeys(productImageUrls);
     for (const u of urls) {
       if (urlMatches(u, urlMatchKeys)) {
-        pushMatch(u, 100, null);
+        pushMatch(u, 100, null, 'url_match');
         urlMatchedSet.add(u);
         urlMatchCount++;
       }
@@ -1470,8 +1520,31 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
           let vetoReason = null;
           if (typeof productContext?.checkProductIdentity === 'function') {
             const ident = productContext.checkProductIdentity(dText);
-            if (ident && ident.match === false) {
-              vetoReason = `identity (missing:${(ident.missingWords || []).join(',')})`;
+            if (ident && ident.tier === 'fail') {
+              vetoReason = `identity fail (missing:${(ident.missingWords || []).join(',')})`;
+            } else if (ident && ident.tier === 'partial') {
+              // Partial — same rescue logic as multi-signal path: require
+              // brand + spec confirmation. Without spec confirmation a
+              // dHash hit on a generic brand-overview page would otherwise
+              // wrongly claim our SKU.
+              const brand = (productContext.brandAliases || []).some(a => a && dText.includes(a));
+              const specConf = typeof productContext.hasSpecConfirmation === 'function'
+                ? productContext.hasSpecConfirmation(dText)
+                : { confirmed: false };
+              if (!brand) {
+                vetoReason = `identity partial+no_brand (missing:${(ident.missingWords || []).join(',')})`;
+              } else if (!specConf.confirmed) {
+                // Brand match but no spec — mark ambiguous; let it through
+                // with attribution so the row is visible but flagged.
+                // (No veto reason set; falls to pushMatch with ambiguous
+                // matchQuality tag below.)
+              }
+              // Stash the tier on the dCtx so the breakdown log + row
+              // pickup the matchQuality.
+              if (!vetoReason) {
+                dCtx._identityTier = 'partial';
+                dCtx._matchQuality = specConf.confirmed ? 'partial_spec_confirmed' : 'ambiguous_brand_match';
+              }
             }
           }
           if (!vetoReason && typeof productContext?.checkVariantConflict === 'function') {
@@ -1531,7 +1604,9 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
             });
             continue;
           }
-          pushMatch(r.url, confPct, r.embedding || null);
+          // dHash kept — pickup any matchQuality tag the partial-identity
+          // rescue stashed on dCtx.
+          pushMatch(r.url, confPct, r.embedding || null, dCtx._matchQuality || 'dhash');
           continue;
         }
         // Multi-signal path: ALL CLIP-scored thumbs are evaluated, regardless
@@ -1559,9 +1634,12 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
             matched: ms.matchedWords.slice(0, 6),
             brand:   ms.brandMentioned,
             anchor:  ms.anchorFound,
-            product: ms.identityMatch === false
-              ? `missing:${(ms.identityMissing || []).join(',')}`
-              : (ms.identityMatch === true ? 'ok' : null),
+            product: ms.identityTier === 'fail'
+              ? `fail(missing:${(ms.identityMissing || []).join(',')})`
+              : ms.identityTier === 'partial'
+                ? `partial(missing:${(ms.identityMissing || []).join(',')},quality:${ms.matchQuality})`
+                : 'ok',
+            matchQuality: ms.matchQuality || null,
             line:    ms.productLineModifier ? ms.productLineModifier.modifier : null,
             sibling: ms.siblingMatch ? `${ms.siblingMatch.term}(${ms.siblingMatch.type})` : null,
             slot:    ms.variantSlotMatch ? `${ms.variantSlotMatch.ours}!=${ms.variantSlotMatch.theirs}` : null,
@@ -1587,7 +1665,7 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
           });
         }
         if (ms.isMatch) {
-          pushMatch(r.url, ms.total, r.embedding || null);
+          pushMatch(r.url, ms.total, r.embedding || null, ms.matchQuality || 'clean');
         } else if (confPct >= Math.round(threshold * 100)) {
           // Was a raw CLIP match but multi-signal flipped it to "no" — that
           // means CLIP was confident but context didn't agree. Worth
@@ -1633,6 +1711,7 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
     matchedEmbeddings,
     matchedSellers,
     matchedPrices,
+    matchedQualities,
     urlMatchCount,
     paa,
     // Rich SERP context — every keyword carries its own seller landscape +
@@ -2121,6 +2200,10 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         }
         // Bound product-identity check (Layer 2 of the match chain — brand,
         // identity, variant). Returns { match, missingWords }.
+        if (typeof opts.hasSpecConfirmation === 'function') {
+          productContext.hasSpecConfirmation = (text) =>
+            opts.hasSpecConfirmation(text, productContext.specs);
+        }
         if (typeof opts.checkProductIdentity === 'function') {
           productContext.checkProductIdentity = (text) =>
             opts.checkProductIdentity(text, productContext);
@@ -2862,7 +2945,12 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             row.matchedConfidences   = serpData.matchedConfidences;
             row.matchedSellers       = serpData.matchedSellers || [];
             row.matchedPrices        = serpData.matchedPrices  || [];
+            row.matchedQualities     = serpData.matchedQualities || [];
             row._matchedEmbeddings   = serpData.matchedEmbeddings || [];
+            // Summary: how many matches were ambiguous (brand-only, no
+            // spec confirmation)? Surfaces in CSV so the user can audit.
+            row.ambiguousMatchCount = (row.matchedQualities || [])
+              .filter(q => q === 'ambiguous_brand_match').length;
             // Feed the per-product matched-URL cache with this keyword's
             // matches. Subsequent generic-query SERPs reuse these via the
             // rescue path's cache-trust check.
@@ -3789,9 +3877,22 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                 //                              are NOW Foods + "enzymes")
                 //   • brand ✓ identity ✓ variant ✗ → competitor (wrong SKU)
                 //   • brand ✓ identity ✓ variant ✓ → OURS
-                let identity = { match: true, missingWords: [] };
+                let identity = { tier: 'full', match: true, missingWords: [] };
                 if (hasBrand && hasAnchor && productContext?.checkProductIdentity) {
                   identity = productContext.checkProductIdentity(tl);
+                }
+                // Tiered identity for Amazon: partial-tier requires spec
+                // confirmation to claim, otherwise treat as competitor.
+                if (identity.tier === 'partial') {
+                  const specConf = typeof productContext.hasSpecConfirmation === 'function'
+                    ? productContext.hasSpecConfirmation(tl)
+                    : { confirmed: false };
+                  // Promote partial-tier to "match" only if spec confirms.
+                  // Without spec confirmation, treat as identity miss
+                  // (downstream logic uses identity.match).
+                  if (specConf.confirmed) {
+                    identity = { ...identity, match: true, specConfirmation: specConf };
+                  }
                 }
                 const lineMod = (hasBrand && hasAnchor && identity.match && productContext?.checkProductLineModifier)
                   ? productContext.checkProductLineModifier(tl)

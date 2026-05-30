@@ -198,6 +198,11 @@ function rowsForExport(report) {
       matched_thumbnails: safeCell(matchedList),
       matched_sellers:    safeCell(sellersList),
       matched_prices:     safeCell(pricesList),
+      // Per-match quality tag (clean / partial_spec_confirmed /
+      // ambiguous_brand_match / dhash / url_match). Lets the user filter
+      // out ambiguous matches or audit them in Excel.
+      matched_qualities:  safeCell((r.matchedQualities || []).join(' | ')),
+      ambiguous_match_count: r.ambiguousMatchCount || 0,
       product_url:   r.productUrl,
       product_image: r.productImage,
     };
@@ -366,6 +371,8 @@ export async function pushToAdBrain(report) {
         matched_thumbnails:  paired.map(p => `${p.url} [${p.conf}]`).join(' | '),
         matched_sellers:     paired.map(p => p.seller).filter(Boolean).join(' | ') || null,
         matched_prices:      paired.map(p => p.price ).filter(Boolean).join(' | ') || null,
+        matched_qualities:   (r.matchedQualities || []).join(' | ') || null,
+        ambiguous_match_count: r.ambiguousMatchCount || 0,
         autosuggest_count: r.autosuggestCount,
         autosuggestions: (r.autosuggestions || []).join(' | '),
         amazon_suggest_count: r.amazon_suggest_count || 0,
