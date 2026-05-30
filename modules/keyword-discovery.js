@@ -2200,9 +2200,13 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         if (typeof opts.familiesFor === 'function' && typeof opts.computeProductFamilyValues === 'function') {
           productContext.attrFamilies = opts.familiesFor(productContext);
           productContext.attrFamilyValues = opts.computeProductFamilyValues(productContext);
+          // Family values are Sets (Fix 1 — multi-value support). Filter
+          // for non-empty Sets and serialise each Set's contents joined
+          // by "|" so the log shows e.g. "process=molecularly distilled
+          // |enteric coated" instead of "[object Set]".
           const declared = Object.entries(productContext.attrFamilyValues)
-            .filter(([, v]) => v)
-            .map(([k, v]) => `${k}=${v}`);
+            .filter(([, v]) => v && typeof v.size === 'number' && v.size > 0)
+            .map(([k, v]) => `${k}=${Array.from(v).join('|')}`);
           if (declared.length > 0) {
             onProgress?.({
               currentProduct: productName,
