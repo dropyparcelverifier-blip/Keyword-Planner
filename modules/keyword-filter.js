@@ -646,7 +646,12 @@ export function detectCategory(productType, productName) {
   // killed extractFormFactor (ALL_FORM_FACTORS.general = []) and the
   // wrong-audience filter (gated on supplement/health/skincare).
   if (/\b(tablets?|capsules?|softgels?|supplements?|vitamins?|enzymes?|probiotics?|extracts?|herbals?|\d+\s*mg|\d+\s*mcg|\d+\s*iu|dosage|digestive|immune|antioxidant)\b/.test(text)) return 'supplement';
-  if (/\b(creams?|lotions?|serums?|moisturiz|cleansers?|face wash|sunscreens?|toners?|spf|retinol)\b/.test(text)) return 'skincare';
+  // Skincare: includes ointment/balm/petroleum-jelly family (Aquaphor,
+  // Vaseline, A+D Ointment) — these were falling to 'general' because
+  // the previous regex only listed cream/lotion/serum. Also include
+  // "skin protectant", "diaper rash" (Aquaphor Baby, Desitin, Boudreaux's),
+  // "healing ointment", "skin care".
+  if (/\b(creams?|lotions?|serums?|moisturiz|cleansers?|face wash|sunscreens?|toners?|spf|retinol|ointments?|balms?|salves?|petroleum jelly|skin protectants?|diaper rash|healing|skin care)\b/.test(text)) return 'skincare';
   if (/\b(shampoos?|conditioners?|hair oils?|hair masks?|hair serums?|anti.?dandruff)\b/.test(text)) return 'haircare';
   if (/\b(body wash|body lotions?|shower gel|deodorants?|body oils?)\b/.test(text)) return 'bodycare';
   if (/\b(proteins?|whey|granolas?|muesli|peanut butter|energy bars?)\b/.test(text)) return 'food';
@@ -663,7 +668,7 @@ const BRAND_SUFFIXES = [
   'cosmetics','company','co','inc','beauty','organics','pharma',
 ];
 
-export function buildProductContext(productName, handles, detectedCategory) {
+export function buildProductContext(productName, handles, detectedCategory, explicitBrand) {
   // Source preference: handle (cleanest, slug-style) → product name → empty.
   const primaryHandle = (handles ? String(handles).split(/[,|;]/)[0] : '')
     .trim()
@@ -678,9 +683,29 @@ export function buildProductContext(productName, handles, detectedCategory) {
   const first1 = words[0] || '';
   const second = words[1] || '';
 
-  // 2-word brand iff second word is a known brand-suffix construction
-  // ("Now Foods", "Forest Essentials", "Garden Naturals").
-  if (BRAND_SUFFIXES.includes(second)) {
+  // Explicit brand from the input file wins over heuristic detection. Handles
+  // multi-word brands the suffix list doesn't cover ("La Roche-Posay", "The
+  // Ordinary", "Mary Kay") and prevents the first-word-of-slug fallback from
+  // mis-classifying. Normalise to lowercase + collapse whitespace + drop
+  // punctuation that won't appear in token-matched SERP text.
+  const normalisedExplicit = String(explicitBrand || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (normalisedExplicit) {
+    brandName = normalisedExplicit;
+    // Strip every brand token (handles "la roche-posay" → strip la, roche,
+    // posay, roche-posay) from the words list to derive the product type.
+    const brandTokenSet = new Set([
+      ...normalisedExplicit.split(/[\s-]+/).filter(Boolean),
+      normalisedExplicit.replace(/[\s-]+/g, ''),
+      normalisedExplicit.replace(/\s+/g, '-'),
+    ]);
+    productType = words.filter(w => !brandTokenSet.has(w) && !brandTokenSet.has(w.replace(/-/g, ''))).join(' ');
+  } else if (BRAND_SUFFIXES.includes(second)) {
+    // 2-word brand iff second word is a known brand-suffix construction
+    // ("Now Foods", "Forest Essentials", "Garden Naturals").
     brandName = `${first1} ${second}`;
     productType = words.slice(2).join(' ');
   } else {
@@ -1455,6 +1480,14 @@ export function classifyKeyword(keyword, productContext) {
   const attrFam = checkAttributeFamily(kw, productContext);
   if (attrFam) return reject(`attribute:${attrFam.family}:${attrFam.ours}!=${attrFam.theirs}`);
 
+  // Brand-mate reject: keyword contains a token that belongs to a sibling
+  // SKU in this batch ("aquaphor baby healing ointment" when our product
+  // is the adult Healing Ointment). Same logic as the image-side veto —
+  // protects against KP / autosuggest seeding our pipeline with brand-mate
+  // traffic that we'd then misattribute to OUR SKU.
+  const bm = checkBrandMate(kw, productContext);
+  if (bm) return reject(`brand_mate:${bm.token}`);
+
   let hasBrand     = _hasBrandSubstr(kw, productContext.brandAliases);
   const hasAnchor   = _hasAnchor(kw, productContext.handleWords);
   const hasCategory = _hasCategoryTerm(kw, productContext.categoryTerms);
@@ -1668,8 +1701,8 @@ export function parseQty(text) {
   // MASS; canonical = g (mg/mcg handled as dose, not mass)
   grab(/(\d+(?:\.\d+)?)\s*kg\b/g,                   'mass',   1000);
   grab(/(\d+(?:\.\d+)?)\s*(?:g|gm|gram)\b/g,        'mass',   1);
-  grab(/(\d+(?:\.\d+)?)\s*oz\b/g,                   'mass',   28.35);
-  grab(/(\d+(?:\.\d+)?)\s*lb\b/g,                   'mass',   453.592);
+  grab(/(\d+(?:\.\d+)?)\s*(?:oz|ounces?)\b/g,       'mass',   28.35);
+  grab(/(\d+(?:\.\d+)?)\s*(?:lb|lbs|pound)\b/g,     'mass',   453.592);
   // DOSE / strength; canonical = mg (IU kept separate via "iu" tag)
   grab(/(\d+(?:\.\d+)?)\s*mcg\b/g,                  'dose',   0.001);
   grab(/(\d+(?:\.\d+)?)\s*mg\b/g,                   'dose',   1);
@@ -1687,7 +1720,7 @@ export function parseQty(text) {
 export function baseKey(title) {
   if (!title) return '';
   return String(title).toLowerCase()
-    .replace(/\d+(?:\.\d+)?\s*(?:soft\s*gels?|sgels?|caps?|capsules?|tablets?|tabs?|gummies?|chewables?|lozenges?|sachets?|strips?|pieces?|pcs?|count|ct|fl\.?\s*oz|ml|l|liter|litre|kg|gm|gram|g|oz|lb|mcg|mg|iu)\b/g, ' ')
+    .replace(/\d+(?:\.\d+)?\s*(?:soft\s*gels?|sgels?|caps?|capsules?|tablets?|tabs?|gummies?|chewables?|lozenges?|sachets?|strips?|pieces?|pcs?|count|ct|fl\.?\s*oz|ml|l|liter|litre|kg|gm|gram|g|oz|ounces?|lb|lbs|pound|mcg|mg|iu)\b/g, ' ')
     .replace(/pack\s*of\s*\d+/g, ' ')
     .replace(/\b\d+\s*'s\b/g, ' ')
     .replace(/[^a-z ]/g, ' ')
@@ -1704,6 +1737,35 @@ function _qtyEqual(dim, a, b) {
   if (a === 0 || b === 0) return a === b;
   const ratio = a / b;
   return ratio >= 0.99 && ratio <= 1.01;
+}
+
+// Brand-mate conflict check. The sibling-ambiguity gate (Layer 8) only
+// fires when two products share a baseKey (name with quantities stripped).
+// But many same-brand siblings have different baseKeys — Aquaphor sells
+// "Baby Healing Ointment" and "Healing Ointment" (no "baby") as separate
+// SKUs, and these don't share a baseKey because "baby" is in the name
+// of one but not the other.
+//
+// This layer catches them: if a SERP context contains a token that
+// belongs to ANOTHER product in our batch from the same brand, but NOT
+// to ours, the context is for that other product. Veto.
+//
+// Returns { match, token, ourSibling } when text asserts a brand-mate's
+// exclusive token; null otherwise.
+export function checkBrandMate(text, productContext) {
+  if (!productContext) return null;
+  const brandMateTokens = productContext.brandMateExclusionTokens;
+  if (!(brandMateTokens instanceof Set) || brandMateTokens.size === 0) return null;
+  const haystack = String(text || '').toLowerCase();
+  if (!haystack) return null;
+  // Tokenise context the same way the pre-pass tokenised product names.
+  const ctxTokens = extractDiscriminatorTokens(haystack);
+  for (const tok of brandMateTokens) {
+    if (ctxTokens.has(tok)) {
+      return { match: true, token: tok };
+    }
+  }
+  return null;
 }
 
 // Raw-token discriminator extraction. Universal across categories — we

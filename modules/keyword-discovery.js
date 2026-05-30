@@ -1314,6 +1314,22 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
     }
   }
 
+  // Brand-mate veto (Layer 10) — cross-product discrimination that doesn't
+  // require a shared baseKey. The pre-pass builds per-product exclusion
+  // sets from OTHER same-brand SKUs in the batch; if the SERP text asserts
+  // any of those tokens, it's a brand-mate's product, not ours. Catches
+  // "Aquaphor Healing Ointment" (adult) falsely claiming a SERP image
+  // captioned "Aquaphor Baby Healing Ointment" — "baby" is in our
+  // brand-mate exclusion set.
+  let brandMateMatch = null;
+  if (identityMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch && !colorConflictMatch && !nameSwapMatch && !siblingAmbiguity && !attrFamilyMatch &&
+      typeof productContext?.checkBrandMate === 'function') {
+    brandMateMatch = productContext.checkBrandMate(originalText);
+    if (brandMateMatch) {
+      isMatch = false;
+    }
+  }
+
   return {
     total,
     clipScore: clipScorePct,
@@ -1340,6 +1356,7 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
     nameSwapMatch,
     siblingAmbiguity,
     attrFamilyMatch,
+    brandMateMatch,
     isMatch,
   };
 }
@@ -1608,6 +1625,10 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
             const af = productContext.checkAttributeFamily(dText);
             if (af) vetoReason = `attr (${af.family}: ${af.ours}/${af.theirs})`;
           }
+          if (!vetoReason && typeof productContext?.checkBrandMate === 'function') {
+            const bm = productContext.checkBrandMate(dText);
+            if (bm) vetoReason = `brand_mate (${bm.token})`;
+          }
           if (vetoReason) {
             matchBreakdownLog.push({
               conf:    confPct,
@@ -1679,6 +1700,7 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
             attr:    ms.attrFamilyMatch
                        ? `${ms.attrFamilyMatch.family}:${ms.attrFamilyMatch.ours}/${ms.attrFamilyMatch.theirs}`
                        : null,
+            brandMate: ms.brandMateMatch ? ms.brandMateMatch.token : null,
             ctx:     ms.contextSample,
             kept:    ms.isMatch,
             variant: ms.variantConflicts && ms.variantConflicts.length > 0
@@ -2010,6 +2032,95 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
     finalizeAttrFamilyDiscriminatorsForBaseKey.set(info.baseKey, list);
   }
 
+  // Brand-mate pre-pass — broader than baseKey grouping. Groups products
+  // by brand (explicit `p.brand` from the input file when present, else
+  // first word of derived name). For each group of size >= 2, computes
+  // the union of tokens present in OTHER members but NOT in this member —
+  // these become the product's "brand-mate exclusion tokens" (tokens that,
+  // if present in a SERP listing, indicate a different sibling).
+  //
+  // Catches the Aquaphor case: "Aquaphor Healing Ointment" (adult) gains
+  // exclusion tokens [baby, cream, panthenol, zinc, ...] from its
+  // brand-mates in the batch. Any listing whose text contains those tokens
+  // is vetoed as a brand-mate's product, not ours.
+  //
+  // The explicit-brand key fixes multi-word / hyphenated brands the
+  // first-word fallback couldn't group ("la roche-posay", "the ordinary").
+  // False negatives are OK (no exclusions added), and false positives are
+  // bounded (only exclude tokens present in another product in THIS batch).
+  const brandMateExclusionByIdx = new Map();
+  if (typeof opts.extractDiscriminatorTokens === 'function') {
+    const brandGroups = new Map();
+    const tokensByIdx = new Map();
+    const namesByIdx = new Map();
+    for (let i = 0; i < sorted.length; i++) {
+      const p = sorted[i];
+      const derived = deriveName(cleanProductUrl(p.url));
+      // Include the handle (if provided) as additional name source so
+      // tokens like "panthenol" / "zinc oxide" that are only in handles
+      // get picked up.
+      const fullName = `${derived} ${p.handles || ''}`.trim();
+      const tokens = opts.extractDiscriminatorTokens(fullName);
+      // Strip brand tokens from the discriminator set — if every product
+      // in the group shares the brand word, including it adds nothing,
+      // and if one product accidentally lacks it, the brand becomes an
+      // exclusion token for that product (false veto on legit listings).
+      const brandRaw = String(p.brand || '').toLowerCase().trim();
+      if (brandRaw) {
+        for (const bt of brandRaw.split(/[\s\-]+/).filter(Boolean)) tokens.delete(bt);
+        tokens.delete(brandRaw.replace(/[\s-]+/g, ''));
+      }
+      tokensByIdx.set(i, tokens);
+      namesByIdx.set(i, fullName);
+      // Group key: normalized explicit brand if available, else first word
+      // of the derived slug.
+      const groupKey = brandRaw
+        ? brandRaw.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+        : (derived.split(/\s+/)[0] || '').toLowerCase();
+      if (!groupKey) continue;
+      if (!brandGroups.has(groupKey)) brandGroups.set(groupKey, []);
+      brandGroups.get(groupKey).push(i);
+    }
+    for (const [groupKey, indices] of brandGroups) {
+      if (indices.length < 2) continue;
+      // Frequency map across the group — tokens present in more than half
+      // of the SKUs are brand-broad descriptors (e.g. "moisturizer" appears
+      // in 5/8 La Roche-Posay items), not sibling discriminators. Excluding
+      // them from the exclusion-set keeps false vetoes off legit listings
+      // that use category vocabulary.
+      const groupTokenFreq = new Map();
+      for (const otherIdx of indices) {
+        const ot = tokensByIdx.get(otherIdx) || new Set();
+        for (const t of ot) groupTokenFreq.set(t, (groupTokenFreq.get(t) || 0) + 1);
+      }
+      const broadCutoff = Math.ceil(indices.length / 2); // strict majority → broad
+      for (const idx of indices) {
+        const ourTokens = tokensByIdx.get(idx) || new Set();
+        const exclusions = new Set();
+        for (const otherIdx of indices) {
+          if (otherIdx === idx) continue;
+          const otherTokens = tokensByIdx.get(otherIdx) || new Set();
+          for (const t of otherTokens) {
+            if (ourTokens.has(t)) continue;
+            if ((groupTokenFreq.get(t) || 0) >= broadCutoff) continue;
+            exclusions.add(t);
+          }
+        }
+        if (exclusions.size > 0) {
+          brandMateExclusionByIdx.set(idx, {
+            brandGroupKey: groupKey,
+            groupSize: indices.length,
+            tokens: exclusions,
+          });
+        }
+      }
+      onProgress?.({
+        currentAction: `Brand-mate group "${groupKey}" — ${indices.length} SKU(s) (broad-token cutoff ≥${broadCutoff}/${indices.length})`,
+        logKind: 'ok',
+      });
+    }
+  }
+
   const productsTotal = sorted.length;
   let productsAlreadyDone = 0;
   for (const p of sorted) if (excludeUrls.has(cleanProductUrl(p.url))) productsAlreadyDone++;
@@ -2147,7 +2258,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         ? opts.detectCategory(productName, productName)
         : null;
       const productContext = (typeof opts.buildProductContext === 'function')
-        ? opts.buildProductContext(kpSeed || productName, p.handles, detectedCategory)
+        ? opts.buildProductContext(kpSeed || productName, p.handles, detectedCategory, p.brand)
         : null;
       if (productContext) {
         // The RAW product name carries the most signal for text-match scoring
@@ -2324,6 +2435,29 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             productContext.checkAttributeFamily = (text) =>
               opts.checkAttributeFamily(text, productContext);
           }
+        }
+        // Brand-mate exclusions — cross-product check that doesn't require
+        // shared baseKey. The pre-pass built per-product exclusion sets
+        // (tokens present in other batch siblings' names but not in ours);
+        // attaching them here lets checkBrandMate fire from the match
+        // layer. For the Aquaphor example, product 4 ("Healing Ointment"
+        // adult) gains exclusions [baby, panthenol, zinc, multi-purpose, ...]
+        // from its baby-line siblings.
+        const brandMateInfo = brandMateExclusionByIdx.get(pi);
+        if (brandMateInfo && brandMateInfo.tokens.size > 0) {
+          productContext.brandMateExclusionTokens = brandMateInfo.tokens;
+          productContext.brandMateGroupKey = brandMateInfo.brandGroupKey;
+          if (typeof opts.checkBrandMate === 'function') {
+            productContext.checkBrandMate = (text) =>
+              opts.checkBrandMate(text, productContext);
+          }
+          const preview = Array.from(brandMateInfo.tokens).slice(0, 10).join(', ');
+          onProgress?.({
+            currentProduct: productName,
+            currentSource: 'context',
+            currentAction: `Brand-mate exclusions (group "${brandMateInfo.brandGroupKey}", ${brandMateInfo.groupSize - 1} other SKU(s)): [${preview}${brandMateInfo.tokens.size > 10 ? ', ...' : ''}]`,
+            logKind: 'ok',
+          });
         }
         // Sibling SKU ambiguity — unified gate covering quantity dims,
         // attribute-family values, and auto-derived raw-token
@@ -3940,7 +4074,10 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                 const attrFamAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && !sibAmbAmz && productContext?.checkAttributeFamily)
                   ? productContext.checkAttributeFamily(tl)
                   : null;
-                const ourProduct = hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && !sibAmbAmz && !attrFamAmz;
+                const brandMateAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && !sibAmbAmz && !attrFamAmz && productContext?.checkBrandMate)
+                  ? productContext.checkBrandMate(tl)
+                  : null;
+                const ourProduct = hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && !sibAmbAmz && !attrFamAmz && !brandMateAmz;
                 if (ourProduct) {
                   if (!ourRank) {
                     ourRank    = r.position;
@@ -3996,6 +4133,11 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                     onProgress?.({
                       currentProduct: productName, currentSource: 'amazon',
                       currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but ATTRIBUTE MISMATCH (${attrFamAmz.family}: ours=${attrFamAmz.ours}, theirs=${attrFamAmz.theirs})`,
+                    });
+                  } else if (brandMateAmz) {
+                    onProgress?.({
+                      currentProduct: productName, currentSource: 'amazon',
+                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but BRAND-MATE TOKEN (listing has "${brandMateAmz.token}", which belongs to a sibling SKU in this batch)`,
                     });
                   } else if (variantConflicts.length > 0) {
                     const c = variantConflicts[0];
