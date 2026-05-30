@@ -93,6 +93,130 @@ export const ATTRIBUTE_FAMILIES = {
       'lavender', 'rose', 'citrus', 'sandalwood', 'vanilla',
     ],
   },
+
+  // dropy.in carries broader retail categories beyond supplements / beauty.
+  // The auto-derived raw-token discriminator (in checkSiblingAmbiguity)
+  // handles the bulk of distinctions universally — these families are the
+  // precision overlay where one exists.
+  food: {
+    flavor: [
+      'chocolate', 'vanilla', 'strawberry', 'mango', 'apple', 'orange',
+      'lemon', 'mint', 'caramel', 'coffee', 'matcha', 'unflavored',
+      'unflavoured', 'plain',
+    ],
+    diet: [
+      'sugar free', 'sugar-free', 'gluten free', 'gluten-free',
+      'vegan', 'keto', 'high protein', 'low carb', 'low-carb',
+    ],
+  },
+
+  electronics: {
+    connectivity: [
+      'wired', 'wireless', 'bluetooth', 'wifi', 'wi-fi',
+      'usb-c', 'usb c', 'lightning', 'micro usb', 'micro-usb',
+    ],
+    series: [
+      'pro', 'plus', 'ultra', 'max', 'mini', 'lite', 'air',
+      'fe', 'se', 'a-series', 'm-series', 'rog', 'thinkpad',
+    ],
+    refresh: [
+      '60hz', '90hz', '120hz', '144hz', '165hz', '240hz',
+    ],
+    chip: [
+      // example: Apple chips by generation, Snapdragon tiers, Intel cores
+      'm1', 'm2', 'm3', 'm4', 'a15', 'a16', 'a17 pro',
+      'snapdragon 8 gen 2', 'snapdragon 8 gen 3',
+      'intel i5', 'intel i7', 'intel i9', 'ryzen 5', 'ryzen 7', 'ryzen 9',
+    ],
+  },
+
+  baby: {
+    stage: [
+      'newborn', 'infant', 'toddler', 'preschool',
+      'stage 1', 'stage 2', 'stage 3', 'stage 4',
+      '0-3 months', '3-6 months', '6-9 months', '6-12 months', '9-12 months',
+      '12-18 months', '12-24 months', '18-24 months', '2-3 years',
+    ],
+    size: [
+      'newborn', 'nb', 'preemie',
+      'small', 'medium', 'large', 'xl', 'xxl', 'xs',
+      'size 1', 'size 2', 'size 3', 'size 4', 'size 5', 'size 6', 'size 7',
+    ],
+    formula_type: [
+      'whey', 'casein', 'soy', 'goat milk', 'hypoallergenic',
+      'sensitive', 'gentle', 'anti-reflux', 'thickened',
+    ],
+  },
+
+  toys: {
+    age_range: [
+      '0-2', '0-3', '3+', '3-5', '5+', '6+', '8+', '10+', '12+', '14+',
+      '0-2 years', '3-5 years', '6-8 years', '9-12 years',
+      'infant', 'toddler', 'preschool', 'school age', 'teen',
+    ],
+    type: [
+      'plush', 'doll', 'figure', 'action figure', 'vehicle', 'puzzle',
+      'board game', 'card game', 'building', 'building blocks', 'lego',
+      'remote control', 'rc', 'educational', 'musical', 'electronic',
+      'wooden', 'plastic',
+    ],
+  },
+
+  household: {
+    scent: [
+      'fragrance free', 'fragrance-free', 'unscented',
+      'lavender', 'rose', 'citrus', 'lemon', 'pine', 'fresh',
+      'ocean', 'spring', 'eucalyptus',
+    ],
+    form: [
+      'liquid', 'powder', 'pods', 'tablet', 'tablets', 'spray', 'wipes',
+      'capsules', 'bar', 'foam', 'gel', 'cream', 'concentrate',
+    ],
+    surface: [
+      'glass', 'wood', 'stone', 'marble', 'leather', 'fabric',
+      'carpet', 'tile', 'stainless steel', 'oven', 'bathroom', 'kitchen',
+    ],
+  },
+
+  automotive: {
+    fluid_grade: [
+      // common engine-oil / fluid grades
+      '0w-20', '5w-20', '5w-30', '5w-40', '10w-30', '10w-40', '15w-40',
+      '20w-50', '75w-90', '80w-90', '85w-140', 'atf', 'dexron',
+    ],
+    fuel_type: [
+      'gasoline', 'petrol', 'diesel', 'electric', 'hybrid',
+    ],
+    fitment: [
+      // universal, OEM-style, aftermarket — broad fitment language
+      'universal', 'oem', 'aftermarket',
+    ],
+  },
+
+  videogames: {
+    platform: [
+      'pc', 'ps5', 'ps4', 'playstation 5', 'playstation 4',
+      'xbox series x', 'xbox series s', 'xbox one',
+      'nintendo switch', 'switch', 'switch oled',
+      'steam', 'epic', 'cloud',
+    ],
+    edition: [
+      'standard', 'deluxe', 'collector', "collector's", 'gold',
+      'ultimate', 'gold edition', 'goty', 'game of the year',
+      'legendary', 'royal',
+    ],
+  },
+
+  books: {
+    format: [
+      'paperback', 'hardcover', 'hardback', 'mass market',
+      'kindle', 'ebook', 'e-book', 'audiobook', 'large print',
+    ],
+    edition: [
+      'first edition', '1st edition', 'second edition', 'revised',
+      'updated', 'annotated', 'illustrated', "collector's",
+    ],
+  },
 };
 
 // Optional per-brand overlays. Merged AFTER the category map, so brand

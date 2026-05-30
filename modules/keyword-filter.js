@@ -1617,33 +1617,154 @@ function _qtyEqual(dim, a, b) {
   return ratio >= 0.99 && ratio <= 1.01;
 }
 
-// Returns one of:
-//   null                                — gate doesn't apply (no siblings,
-//                                          or ctx confirms the right value)
-//   { ambiguous: true, dims }           — ctx lacks every discriminator
-//                                          value → cannot pin this SKU
-//   { mismatch: true, dim, ours, theirs} — ctx names a discriminator value
-//                                          that doesn't match ours
+// Raw-token discriminator extraction. Universal across categories — we
+// don't need a config to know that "fish oil" / "enteric coated" / "hd"
+// / "titanium" can distinguish sibling SKUs. The pre-pass takes the
+// product names in a baseKey group, tokenises each (stripping numerics,
+// units, and fillers), and any token that appears in SOME but not ALL
+// members becomes a discriminator.
 //
-// Caller treats both `ambiguous` and `mismatch` as a hard veto on the
-// candidate match. The breakdown log surfaces each reason separately so
-// the user can tell why a thumb was rejected.
+// Fillers cover commerce/generic words that aren't identity markers.
+// Length >= 3 cuts noise tokens. Words inside number+unit phrases get
+// stripped by parseQty's regex set first.
+const _DISCRIMINATOR_FILLERS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'with', 'for', 'in', 'of', 'to', 'from',
+  'by', 'is', 'its', 'on', 'new', 'pack', 'size', 'value', 'set', 'kit',
+  'box', 'bottle', 'each', 'item', 'qty', 'quantity', 'piece', 'pieces',
+  'unit', 'units', 'count', 'natural', 'pure', 'best', 'premium',
+  'organic', 'non', 'gmo', 'free', 'gluten', 'vegan', 'vegetarian',
+  'halal', 'kosher', 'certified', 'tested', 'verified',
+]);
+export function extractDiscriminatorTokens(name) {
+  const out = new Set();
+  if (!name) return out;
+  let t = String(name).toLowerCase();
+  // Strip number+unit phrases (parseQty's coverage)
+  t = t.replace(/\b\d+(?:\.\d+)?\s*(?:mg|mcg|µg|iu|ui|ml|fl\.?\s*oz|oz|l|liter|litre|g|gm|gram|kg|lb|gb|tb|w|watt|mah|epa|dha|spf|softgel|sgel|capsule|cap|tablet|tab|caplet|gummy|gummies|chewable|lozenge|sachet|strip|piece|pcs|count|ct|pack)s?\b/g, ' ');
+  t = t.replace(/pack\s*of\s*\d+/g, ' ');
+  t = t.replace(/\b\d+\s*'s\b/g, ' ');
+  t = t.replace(/\b\d+\b/g, ' ');
+  for (const w of t.split(/[^a-z]+/)) {
+    if (w.length < 3) continue;
+    if (_DISCRIMINATOR_FILLERS.has(w)) continue;
+    out.add(w);
+  }
+  return out;
+}
+
+// Returns one of:
+//   null                                       — gate doesn't apply (no
+//                                                 siblings) OR positive
+//                                                 confirmation present
+//   { ambiguous: true, ... }                   — ctx is silent on every
+//                                                 discriminator we own;
+//                                                 cannot pin to this SKU
+//   { mismatch: true, kind, ... }              — ctx asserts a discriminator
+//                                                 value that's another
+//                                                 sibling's (not ours)
+//
+// Universal logic (works for any product type, no per-category config):
+//   1. If ctx asserts a value of any discriminator that another sibling
+//      owns and WE don't own → mismatch (definitely not ours).
+//   2. Otherwise, require positive confirmation: at least one
+//      discriminator we own must be present in ctx OR (if we have no
+//      unique discriminators at all — the "plain" SKU) every other
+//      sibling's discriminator must be ABSENT from ctx.
+//   3. Otherwise → ambiguous.
+//
+// Three sources of discriminators, all unified via this gate:
+//   • quantity dimensions (count / dose / volume / mass / etc.)
+//   • formal attribute-family values (supplement.formulation = fish oil)
+//   • raw tokens that vary across siblings (auto-derived, universal)
 export function checkSiblingAmbiguity(text, productContext) {
   if (!productContext) return null;
-  const discriminators = productContext.siblingDiscriminators;
-  if (!Array.isArray(discriminators) || discriminators.length === 0) return null;
-  const ourQty = productContext.siblingQty || {};
-  const ctxQty = parseQty(text);
-  let sawAny = false;
-  for (const dim of discriminators) {
-    if (ctxQty[dim] != null) {
-      sawAny = true;
-      if (!_qtyEqual(dim, ctxQty[dim], ourQty[dim])) {
-        return { mismatch: true, dim, ours: ourQty[dim], theirs: ctxQty[dim] };
+  const info = productContext.siblingGroupInfo;
+  if (!info || info.siblingCount < 2) return null;
+
+  const ctx = String(text || '').toLowerCase();
+  const ctxQty = parseQty(ctx);
+  const ctxRawTokens = extractDiscriminatorTokens(ctx);
+  // Per-sibling attr-family Sets are stored on info.siblingAttrValuesByIdx
+  // (computed at pre-pass time); for ctx we compute on-the-fly.
+
+  // --- Step 1: Veto on other-sibling-only assertions ---
+  // For each raw discriminator token that another sibling has but we
+  // DON'T have, if ctx contains it → definitely not ours.
+  for (const tok of info.rawDiscriminators) {
+    if (!ctxRawTokens.has(tok)) continue;
+    const oursHas = info.ourRawTokens.has(tok);
+    if (!oursHas) {
+      // Other sibling owns this token, ctx asserts it → not ours.
+      return { mismatch: true, kind: 'raw', token: tok };
+    }
+  }
+  // Same for quantity discriminators.
+  for (const dim of info.quantityDiscriminators) {
+    if (ctxQty[dim] == null) continue;
+    if (info.ourQty[dim] == null || !_qtyEqual(dim, ctxQty[dim], info.ourQty[dim])) {
+      return {
+        mismatch: true,
+        kind: 'qty',
+        dim,
+        ours: info.ourQty[dim],
+        theirs: ctxQty[dim],
+      };
+    }
+  }
+  // Same for attribute-family discriminators.
+  if (Array.isArray(info.attrFamilyDiscriminators)) {
+    for (const { family, values } of info.attrFamilyDiscriminators) {
+      const ctxValues = familyValuesAll(ctx, values, null);
+      for (const v of ctxValues) {
+        const oursHas = info.ourAttrFamilyValues && info.ourAttrFamilyValues[family]
+                        && info.ourAttrFamilyValues[family].has(v);
+        if (!oursHas) {
+          return { mismatch: true, kind: 'attr', family, ours: info.ourAttrFamilyValues?.[family] ? Array.from(info.ourAttrFamilyValues[family]).join('+') : null, theirs: v };
+        }
       }
     }
   }
-  if (!sawAny) return { ambiguous: true, dims: discriminators.slice() };
+
+  // --- Step 2: Require positive confirmation ---
+  // At least one discriminator WE positively own must be confirmed by ctx.
+  let sawConfirmation = false;
+  for (const tok of info.ourRawTokens) {
+    if (info.rawDiscriminators.has(tok) && ctxRawTokens.has(tok)) {
+      sawConfirmation = true; break;
+    }
+  }
+  if (!sawConfirmation) {
+    for (const dim of info.quantityDiscriminators) {
+      if (info.ourQty[dim] != null && ctxQty[dim] != null && _qtyEqual(dim, ctxQty[dim], info.ourQty[dim])) {
+        sawConfirmation = true; break;
+      }
+    }
+  }
+  if (!sawConfirmation && Array.isArray(info.attrFamilyDiscriminators)) {
+    for (const { family, values } of info.attrFamilyDiscriminators) {
+      const ourSet = info.ourAttrFamilyValues?.[family];
+      if (!ourSet || ourSet.size === 0) continue;
+      const ctxValues = familyValuesAll(ctx, values, null);
+      for (const v of ourSet) {
+        if (ctxValues.has(v)) { sawConfirmation = true; break; }
+      }
+      if (sawConfirmation) break;
+    }
+  }
+
+  if (!sawConfirmation) {
+    // Special case: if WE have NO positive discriminators at all (the
+    // "plain" SKU — defined by ABSENCE of features), we can match a
+    // listing only if every OTHER sibling's exclusive discriminator is
+    // absent too. Step 1 already vetoed when ctx asserts another's
+    // discriminator. If we got here, ctx is clean of all asserts. The
+    // result is genuinely ambiguous — could be any plain-or-silent
+    // sibling. Reject.
+    return {
+      ambiguous: true,
+      reason: 'no_discriminator_confirmation',
+    };
+  }
   return null;
 }
 
@@ -1680,29 +1801,50 @@ function _escapeForFamilyRe(token) {
   return token.replace(/[.+*?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
 }
 
-// Returns the FIRST family value present in `text`, longest-token-first
-// so "color-treated" beats "color". null if no value of the family
-// appears. Boundary matching: token must be preceded by start-of-string
-// or a non-letter, and followed by end-of-string or a non-letter.
-// (Punctuation/digits/whitespace all count as boundaries.)
-function familyValue(text, values, cachedRes) {
-  if (!text || !Array.isArray(values) || values.length === 0) return null;
+// Returns ALL family values present in `text` as a Set, sorted/scanned
+// longest-first so "color-treated" claims the substring before "color"
+// would. Empty Set if no value of the family appears. A product can
+// assert MULTIPLE values within one family (e.g. process =
+// "molecularly distilled" AND "enteric coated" — both flags
+// simultaneously). The single-string return was missing the second
+// assertion; multi-value Set fixes that.
+function familyValuesAll(text, values, cachedRes) {
+  const out = new Set();
+  if (!text || !Array.isArray(values) || values.length === 0) return out;
   const t = String(text).toLowerCase();
   const sorted = [...values].sort((a, b) => b.length - a.length);
+  // To respect longest-match precedence, blank-out each match's region as
+  // we go so a shorter substring of an already-matched value doesn't
+  // re-fire. Without this, matching "color-treated" would also report
+  // "color" as a separate assertion.
+  let scratch = t;
   for (let i = 0; i < sorted.length; i++) {
     const v = sorted[i];
     let re = cachedRes && cachedRes[v];
     if (!re) {
-      re = new RegExp(`(^|[^a-z])${_escapeForFamilyRe(v)}([^a-z]|$)`, 'i');
+      re = new RegExp(`(^|[^a-z])(${_escapeForFamilyRe(v)})([^a-z]|$)`, 'gi');
       if (cachedRes) cachedRes[v] = re;
+    } else {
+      re.lastIndex = 0;
     }
-    if (re.test(t)) return v;
+    let m;
+    let hit = false;
+    while ((m = re.exec(scratch)) !== null) {
+      hit = true;
+      // Blank out the matched value so shorter substrings can't re-fire.
+      const start = m.index + m[1].length;
+      const end = start + m[2].length;
+      scratch = scratch.slice(0, start) + ' '.repeat(end - start) + scratch.slice(end);
+      re.lastIndex = end;
+    }
+    if (hit) out.add(v);
   }
-  return null;
+  return out;
 }
 
 // Pre-compute the product's family values from its name/type tokens.
-// Called once per product at engine init; result cached on productContext.
+// Called once per product at engine init; result cached on productContext
+// as { family: Set<value> }.
 export function computeProductFamilyValues(productContext) {
   if (!productContext) return {};
   const fam = productContext.attrFamilies || familiesFor(productContext);
@@ -1711,18 +1853,25 @@ export function computeProductFamilyValues(productContext) {
   const reCache = productContext._familyRes || (productContext._familyRes = {});
   for (const [familyName, values] of Object.entries(fam)) {
     reCache[familyName] = reCache[familyName] || {};
-    out[familyName] = familyValue(sourceText, values, reCache[familyName]);
+    out[familyName] = familyValuesAll(sourceText, values, reCache[familyName]);
   }
   return out;
 }
 
 // Check a candidate text for an attribute-family conflict against this
 // product. Returns:
-//   null                                       — no conflict (product silent,
-//                                                 or text matches our value,
-//                                                 or text silent on this axis)
-//   { family, ours, theirs }                   — text asserts a value of `family`
-//                                                 different from ours
+//   null                                       — no conflict (product silent
+//                                                 on every asserted family,
+//                                                 or text-asserted values
+//                                                 are subset of ours)
+//   { family, ours, theirs }                   — text asserts a value of
+//                                                 `family` that's NOT in our
+//                                                 set for that family
+//
+// Rule with multi-value Sets: text declares family value V; if V is not
+// in our set for that family AND our set is non-empty, conflict. Empty
+// set means "product silent" — gate doesn't apply (per the safety
+// property: silent product → no veto).
 export function checkAttributeFamily(text, productContext) {
   if (!productContext) return null;
   const fam = productContext.attrFamilies;
@@ -1731,12 +1880,20 @@ export function checkAttributeFamily(text, productContext) {
   if (!ours) return null;
   const reCache = productContext._familyRes || (productContext._familyRes = {});
   for (const [familyName, values] of Object.entries(fam)) {
-    const pv = ours[familyName];
-    if (!pv) continue; // product silent on this axis — gate doesn't apply
+    const ourSet = ours[familyName];
+    if (!ourSet || ourSet.size === 0) continue; // silent — no veto on this axis
     reCache[familyName] = reCache[familyName] || {};
-    const rv = familyValue(text, values, reCache[familyName]);
-    if (rv && rv !== pv) {
-      return { family: familyName, ours: pv, theirs: rv };
+    const theirSet = familyValuesAll(text, values, reCache[familyName]);
+    if (theirSet.size === 0) continue; // ctx silent — no conflict
+    // Conflict if ANY ctx-asserted value isn't in our set.
+    for (const v of theirSet) {
+      if (!ourSet.has(v)) {
+        return {
+          family: familyName,
+          ours: Array.from(ourSet).join('+'),
+          theirs: v,
+        };
+      }
     }
   }
   return null;

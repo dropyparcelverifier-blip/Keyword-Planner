@@ -1501,8 +1501,12 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
             const sa = productContext.checkSiblingAmbiguity(dText);
             if (sa) {
               vetoReason = sa.ambiguous
-                ? `ambig (no_discriminator: ${(sa.dims || []).join(',')})`
-                : `ambig (mismatch ${sa.dim}: ${sa.ours}/${sa.theirs})`;
+                ? `ambig (no_confirmation)`
+                : sa.kind === 'raw'
+                  ? `ambig (raw: ${sa.token})`
+                  : sa.kind === 'attr'
+                    ? `ambig (attr ${sa.family}: ${sa.ours ?? '—'}/${sa.theirs})`
+                    : `ambig (qty ${sa.dim}: ${sa.ours}/${sa.theirs})`;
             }
           }
           if (!vetoReason && typeof productContext?.checkAttributeFamily === 'function') {
@@ -1565,8 +1569,12 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
             swap:    ms.nameSwapMatch ? `+${ms.nameSwapMatch.extras.join(',')}/-${ms.nameSwapMatch.missing.join(',')}` : null,
             ambig:   ms.siblingAmbiguity
                        ? (ms.siblingAmbiguity.ambiguous
-                          ? `no_discriminator(${(ms.siblingAmbiguity.dims || []).join(',')})`
-                          : `mismatch(${ms.siblingAmbiguity.dim}:${ms.siblingAmbiguity.ours}/${ms.siblingAmbiguity.theirs})`)
+                          ? `no_confirmation`
+                          : (ms.siblingAmbiguity.kind === 'raw'
+                             ? `raw(${ms.siblingAmbiguity.token})`
+                             : ms.siblingAmbiguity.kind === 'attr'
+                               ? `attr(${ms.siblingAmbiguity.family}:${ms.siblingAmbiguity.ours ?? '—'}/${ms.siblingAmbiguity.theirs})`
+                               : `qty(${ms.siblingAmbiguity.dim}:${ms.siblingAmbiguity.ours}/${ms.siblingAmbiguity.theirs})`))
                        : null,
             attr:    ms.attrFamilyMatch
                        ? `${ms.attrFamilyMatch.family}:${ms.attrFamilyMatch.ours}/${ms.attrFamilyMatch.theirs}`
@@ -1796,56 +1804,109 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
 
   const sorted = [...products].sort((a, b) => a.priority - b.priority);
 
-  // Pre-pass: group products by baseKey (name with all quantity tokens
-  // stripped) so we can identify SKU groups that differ ONLY on a
-  // quantity dimension. For such groups, an unnumbered SERP image
-  // can't be pinned to a specific sibling — the ambiguity gate later
-  // rejects the match.
+  // Pre-pass: group products by baseKey (name stripped of every quantity
+  // token) and identify three kinds of cross-sibling discriminators —
+  // unified into one `siblingGroupInfo` object per product:
+  //   • quantityDiscriminators — count/dose/volume/mass dims that differ
+  //   • attrFamilyDiscriminators — supplement.formulation / skincare.spf
+  //     / etc. families where siblings disagree (including silent-vs-asserted)
+  //   • rawDiscriminators — raw tokens that appear in some siblings but
+  //     not all (auto-derived, universal across categories — handles the
+  //     "fish oil" vs "enteric coated" naming case without config)
   //
-  // We compute siblingInfo[productIdx] = { discriminators, qty } where
-  // discriminators is the list of dimensions ('count', 'volume', 'mass',
-  // 'dose') whose values differ across the group's members. Single
-  // members (no siblings) get no annotation — the gate doesn't fire.
+  // The unified ambiguity gate (checkSiblingAmbiguity) then enforces:
+  //   (a) ctx asserting a discriminator we don't own → mismatch veto
+  //   (b) ctx asserting no discriminator we DO own → ambiguity veto
+  //
+  // Single-member groups produce no info; gate is silent for them.
   const siblingInfoByIdx = new Map();
   if (typeof opts.baseKey === 'function' && typeof opts.parseQty === 'function') {
-    const groups = new Map(); // baseKey → [{idx, qty}]
+    const groups = new Map(); // baseKey → [{idx, qty, name, rawTokens, attrVals}]
     for (let i = 0; i < sorted.length; i++) {
       const p = sorted[i];
       const name = deriveName(cleanProductUrl(p.url));
       const k = opts.baseKey(name);
       if (!k) continue;
       const qty = opts.parseQty(name);
+      const rawTokens = (typeof opts.extractDiscriminatorTokens === 'function')
+        ? opts.extractDiscriminatorTokens(name)
+        : new Set();
       if (!groups.has(k)) groups.set(k, []);
-      groups.get(k).push({ idx: i, qty, name });
+      groups.get(k).push({ idx: i, qty, name, rawTokens });
     }
     for (const [k, members] of groups) {
       if (members.length < 2) continue;
-      // Determine which dimensions differ across the group's members.
-      const allDims = new Set();
-      members.forEach(m => Object.keys(m.qty).forEach(d => allDims.add(d)));
-      const discriminators = [];
-      for (const dim of allDims) {
+
+      // 1. Quantity dimensions that differ across members.
+      const allQtyDims = new Set();
+      members.forEach(m => Object.keys(m.qty).forEach(d => allQtyDims.add(d)));
+      const quantityDiscriminators = [];
+      for (const dim of allQtyDims) {
         const uniques = new Set();
         for (const m of members) {
           if (m.qty[dim] != null) uniques.add(Math.round(m.qty[dim] * 1000));
         }
-        if (uniques.size > 1) discriminators.push(dim);
+        // Discriminator if values differ OR if some assert, some are silent.
+        if (uniques.size > 1) quantityDiscriminators.push(dim);
+        else if (uniques.size === 1 && members.some(m => m.qty[dim] == null)) {
+          quantityDiscriminators.push(dim);
+        }
       }
-      if (discriminators.length === 0) continue;
-      // Attach per-member info.
+
+      // 2. Raw-token discriminators — tokens in some but not all members.
+      const rawDiscriminators = new Set();
+      const allRawTokens = new Set();
+      members.forEach(m => m.rawTokens.forEach(t => allRawTokens.add(t)));
+      for (const tok of allRawTokens) {
+        let present = 0;
+        for (const m of members) if (m.rawTokens.has(tok)) present++;
+        if (present > 0 && present < members.length) rawDiscriminators.add(tok);
+      }
+
+      // 3. Skip the group if no discriminators of any kind exist (data
+      //    quality issue — duplicate input SKUs). Log + leave gate off.
+      if (quantityDiscriminators.length === 0 && rawDiscriminators.size === 0) {
+        onProgress?.({
+          currentAction: `Sibling group "${k}" — ${members.length} SKU(s) with NO discriminators (likely duplicate inputs); gate disabled`,
+          logKind: 'err',
+        });
+        continue;
+      }
+
+      // 4. Attach per-member info. attrFamilyDiscriminators is populated
+      //    LATER (after each product's attribute families are computed
+      //    in the per-product init block) — see attrFamilyDiscriminators
+      //    finalisation below.
       for (const m of members) {
         siblingInfoByIdx.set(m.idx, {
           baseKey: k,
-          discriminators,
-          qty: m.qty,
           siblingCount: members.length,
+          quantityDiscriminators,
+          rawDiscriminators,
+          ourQty: m.qty,
+          ourRawTokens: m.rawTokens,
+          // Placeholders — filled in once each product's attrFamilyValues
+          // are computed by the per-product init block.
+          attrFamilyDiscriminators: [],
+          ourAttrFamilyValues: null,
         });
       }
+
+      const previewRaw = Array.from(rawDiscriminators).slice(0, 6).join(', ');
       onProgress?.({
-        currentAction: `Sibling group "${k}" — ${members.length} SKU(s), discriminator(s): ${discriminators.join(', ')}`,
+        currentAction: `Sibling group "${k}" — ${members.length} SKU(s); qty discriminator(s): [${quantityDiscriminators.join(', ') || '—'}]; raw discriminator(s): [${previewRaw}${rawDiscriminators.size > 6 ? ', ...' : ''}]`,
         logKind: 'ok',
       });
     }
+  }
+  // attrFamilyDiscriminators get finalised later (after the per-product
+  // attribute-family init runs). We stash a closure-accessible reference
+  // so the per-product init block can finish the pre-pass info.
+  const finalizeAttrFamilyDiscriminatorsForBaseKey = new Map();
+  for (const [idx, info] of siblingInfoByIdx) {
+    const list = finalizeAttrFamilyDiscriminatorsForBaseKey.get(info.baseKey) || [];
+    list.push({ idx, info });
+    finalizeAttrFamilyDiscriminatorsForBaseKey.set(info.baseKey, list);
   }
 
   const productsTotal = sorted.length;
@@ -2155,26 +2216,62 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
               opts.checkAttributeFamily(text, productContext);
           }
         }
-        // Sibling SKU ambiguity — when this product shares a baseKey with
-        // other products in the batch and differs ONLY on a quantity
-        // dimension (count / volume / mass / dose), an unnumbered SERP
-        // context can't be pinned to this specific sibling. Pre-pass
-        // populated siblingInfoByIdx for products that have siblings; we
-        // attach `siblingDiscriminators` + `siblingQty` to productContext
-        // so checkSiblingAmbiguity can fire from the match layer.
+        // Sibling SKU ambiguity — unified gate covering quantity dims,
+        // attribute-family values, and auto-derived raw-token
+        // discriminators. The pre-pass populated quantity + raw pieces of
+        // siblingInfoByIdx; here we attach the per-product attribute
+        // family Sets and bind the productContext checker. Once all
+        // siblings have been processed, the attrFamilyDiscriminators list
+        // is finalised across the group.
         const siblingInfo = siblingInfoByIdx.get(pi);
         if (siblingInfo) {
-          productContext.siblingDiscriminators = siblingInfo.discriminators;
-          productContext.siblingQty = siblingInfo.qty;
+          siblingInfo.ourAttrFamilyValues = productContext.attrFamilyValues || {};
+          productContext.siblingGroupInfo = siblingInfo;
           productContext.siblingBaseKey = siblingInfo.baseKey;
           if (typeof opts.checkSiblingAmbiguity === 'function') {
             productContext.checkSiblingAmbiguity = (text) =>
               opts.checkSiblingAmbiguity(text, productContext);
           }
+          // Finalise attrFamilyDiscriminators for this group: a family
+          // is a discriminator if at least one sibling's value-set
+          // differs from another's (including silent-vs-asserted). This
+          // runs once the last sibling of the group is initialised.
+          const groupMembers = finalizeAttrFamilyDiscriminatorsForBaseKey.get(siblingInfo.baseKey) || [];
+          const allInitialised = groupMembers.every(({ info }) => info.ourAttrFamilyValues != null);
+          if (allInitialised && productContext.attrFamilies) {
+            const familyDiscs = [];
+            for (const [familyName, values] of Object.entries(productContext.attrFamilies)) {
+              const distinctSets = new Set();
+              for (const { info } of groupMembers) {
+                const s = info.ourAttrFamilyValues[familyName];
+                const key = s ? Array.from(s).sort().join('|') : '';
+                distinctSets.add(key);
+              }
+              if (distinctSets.size > 1) {
+                familyDiscs.push({ family: familyName, values });
+              }
+            }
+            for (const { info } of groupMembers) {
+              info.attrFamilyDiscriminators = familyDiscs;
+            }
+            if (familyDiscs.length > 0) {
+              const preview = familyDiscs.map(d => d.family).join(', ');
+              onProgress?.({
+                currentProduct: productName,
+                currentSource: 'context',
+                currentAction: `Sibling group "${siblingInfo.baseKey}" attribute discriminator(s): ${preview}`,
+                logKind: 'ok',
+              });
+            }
+          }
+          const ourQtyStr = siblingInfo.quantityDiscriminators
+            .map(d => `${d}=${siblingInfo.ourQty[d] ?? '—'}`)
+            .join(', ') || '—';
+          const ourRawStr = Array.from(siblingInfo.ourRawTokens).filter(t => siblingInfo.rawDiscriminators.has(t)).join(',') || '—';
           onProgress?.({
             currentProduct: productName,
             currentSource: 'context',
-            currentAction: `Sibling SKU group "${siblingInfo.baseKey}" — ${siblingInfo.siblingCount} variant(s); our qty: ${siblingInfo.discriminators.map(d => `${d}=${siblingInfo.qty[d] ?? '—'}`).join(', ')}`,
+            currentAction: `Sibling SKU group "${siblingInfo.baseKey}" — ${siblingInfo.siblingCount} variant(s); our qty: [${ourQtyStr}]; our discriminator tokens: [${ourRawStr}]`,
             logKind: 'ok',
           });
         }
@@ -3757,12 +3854,17 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                       currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but SHADE/MODEL SWAP (+${swapMatchAmz.extras.join(',')} / -${swapMatchAmz.missing.join(',')})`,
                     });
                   } else if (sibAmbAmz) {
-                    onProgress?.({
-                      currentProduct: productName, currentSource: 'amazon',
-                      currentAction: sibAmbAmz.ambiguous
-                        ? `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING AMBIGUOUS — listing lacks discriminator(s) ${(sibAmbAmz.dims || []).join(',')}; cannot pin to our SKU`
-                        : `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING DIM MISMATCH (${sibAmbAmz.dim}: ours=${sibAmbAmz.ours}, theirs=${sibAmbAmz.theirs})`,
-                    });
+                    let msg;
+                    if (sibAmbAmz.ambiguous) {
+                      msg = `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING AMBIGUOUS — listing has no confirmation of any discriminator we own; cannot pin to our SKU`;
+                    } else if (sibAmbAmz.kind === 'raw') {
+                      msg = `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING TOKEN MISMATCH (listing has "${sibAmbAmz.token}" which is another sibling's discriminator)`;
+                    } else if (sibAmbAmz.kind === 'attr') {
+                      msg = `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING ATTR MISMATCH (${sibAmbAmz.family}: ours=${sibAmbAmz.ours ?? '—'}, theirs=${sibAmbAmz.theirs})`;
+                    } else {
+                      msg = `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING DIM MISMATCH (${sibAmbAmz.dim}: ours=${sibAmbAmz.ours}, theirs=${sibAmbAmz.theirs})`;
+                    }
+                    onProgress?.({ currentProduct: productName, currentSource: 'amazon', currentAction: msg });
                   } else if (attrFamAmz) {
                     onProgress?.({
                       currentProduct: productName, currentSource: 'amazon',
