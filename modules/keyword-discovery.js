@@ -267,6 +267,40 @@ export function simplifyForKP(name) {
   return s || name;
 }
 
+// Detect a multi-pack / bundle indicator in SERP listing text. Returns
+// null when no pack marker is present. Returns a label like
+// 'pack_variant_3' (count known) or 'pack_variant' (named bundle without
+// explicit count, e.g. "Value Pack"). Used to re-tag clean matches whose
+// listing is the multi-pack retail variant of the same SKU 
+// — still our
+// product, just packaged as a bundle. Tagged separately so the user can
+// audit pack listings without losing them from image_count.
+export function detectPackIndicator(text) {
+  if (!text) return null;
+  const s = String(text).toLowerCase();
+  // Order matters. "3 packs of 24" — N is the PACK count (3), not 24.
+  // Check this BEFORE "pack of N" so we don't read "packs of 24" as a
+  // 24-unit single pack.
+  let m = s.match(/\b(\d{1,3})\s+packs?\s+of\b/);
+  if (m && parseInt(m[1], 10) >= 2) return { count: parseInt(m[1], 10), label: `pack_variant_${m[1]}` };
+  // "pack of 3" — explicit single-pack-of-N (N units in one bundle).
+  m = s.match(/\b(?:pack|set|box|case|bundle)\s+of\s+(\d{1,3})\b/);
+  if (m && parseInt(m[1], 10) >= 2) return { count: parseInt(m[1], 10), label: `pack_variant_${m[1]}` };
+  // "3-Pack" / "3 Pack" — same idea, hyphen form.
+  m = s.match(/\b(\d{1,3})\s*[-–]\s*pack\b/);
+  if (m && parseInt(m[1], 10) >= 2) return { count: parseInt(m[1], 10), label: `pack_variant_${m[1]}` };
+  // Deliberately NOT matching "N count / N sheets / N strips / N wipes"
+  // since those are units-per-pack (e.g. "60 sheets" face mask, "72
+  // strips" Listerine) rather than a pack count. We'd rather miss those
+  // edge cases than mis-label them as multipacks.
+  // Named-pack forms — count inferred where possible, otherwise generic.
+  if (/\btwin\s+pack\b/.test(s))                       return { count: 2, label: 'pack_variant_2' };
+  if (/\b(?:triple|trio)\s+pack\b/.test(s))            return { count: 3, label: 'pack_variant_3' };
+  if (/\bquad\s+pack\b/.test(s))                       return { count: 4, label: 'pack_variant_4' };
+  if (/\b(?:value|combo|multi|family|variety)\s+pack\b/.test(s)) return { count: null, label: 'pack_variant' };
+  return null;
+}
+
 export function deriveName(handleOrUrl) {
   let handle = handleOrUrl;
   const m = handleOrUrl.match(/\/products\/([^/?#]+)/);
@@ -1385,6 +1419,18 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
     }
   }
 
+  // Pack-variant tagging — runs AFTER every veto layer. If we still have a
+  // clean match (matchQuality === 'clean', isMatch true), check whether the
+  // SERP listing says "Pack of 3" / "Twin Pack" / "3-Pack" / "Set of 2" /
+  // "60 count" etc. When it does, re-tag the match as 'pack_variant_N' so
+  // the CSV row shows it's a bundle of our SKU, not the single unit. Still
+  // counts toward image_count because it IS our product — just packaged as
+  // a multipack at retail.
+  if (isMatch && matchQuality === 'clean') {
+    const pack = detectPackIndicator(originalText);
+    if (pack) matchQuality = pack.label;
+  }
+
   return {
     total,
     clipScore: clipScorePct,
@@ -1703,8 +1749,17 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
             continue;
           }
           // dHash kept — pickup any matchQuality tag the partial-identity
-          // rescue stashed on dCtx.
-          pushMatch(r.url, confPct, r.embedding || null, dCtx._matchQuality || 'dhash');
+          // rescue stashed on dCtx. If the result would be a plain 'dhash'
+          // tag (no partial-identity rescue fired), check for a pack
+          // indicator in the surrounding SERP text and upgrade to
+          // 'pack_variant_N' if the listing is the multipack retail
+          // variant of our SKU.
+          let dQuality = dCtx._matchQuality || 'dhash';
+          if (dQuality === 'dhash') {
+            const pack = detectPackIndicator(dText);
+            if (pack) dQuality = pack.label;
+          }
+          pushMatch(r.url, confPct, r.embedding || null, dQuality);
           continue;
         }
         // Multi-signal path: ALL CLIP-scored thumbs are evaluated, regardless
@@ -3174,7 +3229,6 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             });
           } else {
             consecutiveSerpBlocks = 0;
-            row.imageCount           = serpData.count;
             // CLIP candidates that scored above threshold but had no brand
             // context in their surrounding SERP text. Almost always a
             // visually-similar competitor product. Kept as a separate count
@@ -3186,10 +3240,27 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             row.matchedPrices        = serpData.matchedPrices  || [];
             row.matchedQualities     = serpData.matchedQualities || [];
             row._matchedEmbeddings   = serpData.matchedEmbeddings || [];
-            // Summary: how many matches were ambiguous (brand-only, no
-            // spec confirmation)? Surfaces in CSV so the user can audit.
-            row.ambiguousMatchCount = (row.matchedQualities || [])
-              .filter(q => q === 'ambiguous_brand_match').length;
+            // image_count semantics: CONFIRMED matches only. A thumbnail
+            // counts as image_count when its surrounding SERP text resolves
+            // to our specific SKU (clean / dhash / partial_spec_confirmed /
+            // pack_variant_*). Pack variants count because they ARE our
+            // product, just packaged as a multipack at retail.
+            //
+            // Two quality tiers are EXCLUDED from image_count and tracked
+            // separately so a SERP with 9 different sibling Aquaphor
+            // thumbnails (only brand visible in text, can't pin to a
+            // specific SKU) doesn't claim all 9 as ours:
+            //   - ambiguous_brand_match → ambiguous_match_count
+            //   - no_brand_lowclip      → folded into ambiguous_match_count
+            const NON_CONFIRMED = (q) => q === 'ambiguous_brand_match' || q === 'no_brand_lowclip';
+            row.ambiguousMatchCount = (row.matchedQualities || []).filter(NON_CONFIRMED).length;
+            row.imageCount = Math.max(0, (serpData.count || 0) - row.ambiguousMatchCount);
+            // Count of pack-variant matches (multipack listings of our SKU).
+            // Subset of image_count; surfaced so the user can spot when a
+            // keyword's match story is dominated by bundle listings vs
+            // single-unit listings.
+            row.packVariantCount = (row.matchedQualities || [])
+              .filter(q => typeof q === 'string' && q.startsWith('pack_variant')).length;
             // Feed the per-product matched-URL cache with this keyword's
             // matches. Subsequent generic-query SERPs reuse these via the
             // rescue path's cache-trust check.

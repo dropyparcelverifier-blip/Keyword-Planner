@@ -66,7 +66,12 @@ function pairMatched(r) {
 // answer that; it just clutters the file with educational / competitor
 // queries where we never appear.
 function _exportWorthKeeping(r) {
-  return (r.imageCount || 0) > 0;
+  // image_count is the CONFIRMED-match count (clean / dhash /
+  // partial_spec_confirmed / pack_variant_*). ambiguous_match_count
+  // tracks lower-confidence brand-only matches separately. Keep rows
+  // that had either kind of attribution so the user can still audit
+  // the ambiguous ones — they're real signal, just unverified.
+  return (r.imageCount || 0) > 0 || (r.ambiguousMatchCount || 0) > 0;
 }
 
 // Row ordering: by adRating desc when available, else by image_count desc.
@@ -203,6 +208,7 @@ function rowsForExport(report) {
       // out ambiguous matches or audit them in Excel.
       matched_qualities:  safeCell((r.matchedQualities || []).join(' | ')),
       ambiguous_match_count: r.ambiguousMatchCount || 0,
+      pack_variant_count:    r.packVariantCount     || 0,
       product_url:   r.productUrl,
       product_image: r.productImage,
     };
@@ -380,6 +386,7 @@ export async function pushToAdBrain(report) {
         matched_prices:      paired.map(p => p.price ).filter(Boolean).join(' | ') || null,
         matched_qualities:   (r.matchedQualities || []).join(' | ') || null,
         ambiguous_match_count: r.ambiguousMatchCount || 0,
+        pack_variant_count:    r.packVariantCount    || 0,
         autosuggest_count: r.autosuggestCount,
         autosuggestions: (r.autosuggestions || []).join(' | '),
         amazon_suggest_count: r.amazon_suggest_count || 0,
