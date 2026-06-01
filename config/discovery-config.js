@@ -26,11 +26,13 @@ export const LOG_MAX = 300;
 export const STORAGE_KEY_KP_CACHE = 'adbrainKpCache'; // { [seed.toLowerCase()]: { keywords, ts } }
 export const KP_CACHE_TTL_MS = 24 * 60 * 60 * 1000;   // 24h — KP results don't change minute-to-minute
 
-// Global cap across all products. Map keyed by lowercased keyword -> no dupes.
-// Default 500 — accommodates both KP rounds + their autosuggest expansion:
-//   ~25 KP1 + ~25×15 autosuggest1 + ~25×25 KP2 + autosuggest2 = ~500-700 keywords
-//   when running near the cap.
-export const KEYWORD_CAP = 500;
+// Global runaway-prevention ceiling across ALL products in a single run.
+// NOT a per-product cap — that's `kpMaxPerProduct` (default 5000, settable
+// in the popup). With 23 products × ~200-2000 keywords each the report
+// can legitimately reach 5k-20k+ rows; the previous 500 stopped the run
+// at product 5 of 23 and trapped the watchdog in an infinite resume
+// loop (every resume immediately hit the cap and exited).
+export const KEYWORD_CAP = 50000;
 
 // ============ Image-matching configuration ============
 // Multi-signal perceptual hashing on SERP thumbnails vs. the product image(s).

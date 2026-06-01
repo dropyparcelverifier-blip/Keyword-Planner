@@ -1920,7 +1920,7 @@ function applyNoiseFilter(productRows, opts = {}) {
 export async function runKeywordDiscovery(products, onProgress, opts = {}) {
   const cap             = opts.cap             || KEYWORD_CAP;
   const kpUrl           = opts.kpUrl           || '';
-  const kpMaxPerProduct = opts.kpMaxPerProduct || 200;
+  const kpMaxPerProduct = opts.kpMaxPerProduct || 5000;
   const shouldStop      = opts.shouldStop      || (() => false);
   const matchProfile    = MATCH_PROFILES[opts.matchProfile] || MATCH_PROFILES[DEFAULT_MATCH_PROFILE];
   const matchProfileName = MATCH_PROFILES[opts.matchProfile] ? opts.matchProfile : DEFAULT_MATCH_PROFILE;
@@ -2740,7 +2740,16 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       const productKeywordSortedMap = new Map();
       const _sortedKey = (kw) => String(kw || '').toLowerCase().trim()
         .split(/\s+/).filter(Boolean).sort().join(' ');
-      const productCap = cap; // global cap also bounds per-product since each row enters report
+      // Per-product cap as an ABSOLUTE bound on report.size for this
+      // product's iteration. Previously `productCap = cap` aliased the
+      // global ceiling, so the FIRST product to push the report over the
+      // 500-row global stopped every subsequent product cold and the
+      // watchdog spun in an infinite resume loop. Now: snapshot the
+      // report size at the top of this product, add kpMaxPerProduct, and
+      // also clip to the global runaway ceiling so a misconfigured
+      // kpMaxPerProduct can't blow up memory.
+      const productStartReportSize = report.size;
+      const productCap = Math.min(cap, productStartReportSize + kpMaxPerProduct);
       // Per-product cache state already initialized above the product SERP
       // (productMatchedUrls / productMatchedConfidences) so the product SERP
       // can populate it before the per-keyword loop runs.

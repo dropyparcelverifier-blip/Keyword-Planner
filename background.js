@@ -86,6 +86,13 @@ const state = {
   restUntil: 0,         // chunk-rest deadline (ms); 0 if not resting
   pausedByCaptcha: false, // last run hit a verification check
   runIntent: false,     // user wants this run to continue across restarts
+  // Watchdog no-progress tracking — when a resume attempt doesn't advance
+  // doneProducts.length, increment. After 3 consecutive failed attempts,
+  // assume the engine is stuck (most commonly: global keyword cap reached
+  // before all products processed) and stop auto-resuming. The user can
+  // press Resume manually to override.
+  lastResumeDoneCount: -1,
+  consecutiveNoProgressResumes: 0,
 };
 
 // Side panel: clicking the extension icon opens the panel (Chrome 114+).
@@ -208,7 +215,25 @@ async function tryAutoResume(triggerLabel) {
   // the IIFE resolves — await it explicitly.
   await coldStart;
   if (!shouldAutoResume()) return;
-  pushLog(`Auto-resume (${triggerLabel}): ${state.doneProducts.length}/${state.lastProducts.length} products done — resuming run`, 'ok');
+  // No-progress gate. If the previous resume didn't advance doneProducts,
+  // increment a counter; after 3 consecutive failures, stop auto-resuming
+  // to break the infinite loop that triggers when the global keyword cap
+  // is reached but some products remain unprocessed. The user can still
+  // manually click Resume to override.
+  const currentDoneCount = state.doneProducts.length;
+  if (state.lastResumeDoneCount === currentDoneCount && state.lastResumeDoneCount >= 0) {
+    state.consecutiveNoProgressResumes++;
+    if (state.consecutiveNoProgressResumes >= 3) {
+      pushLog(`Auto-resume halted (${triggerLabel}): 3 consecutive resumes made no progress (still ${currentDoneCount}/${state.lastProducts.length} done). Engine likely hit the keyword cap; clearing runIntent. Press Resume to override.`, 'err');
+      state.runIntent = false;
+      await chrome.storage.local.set({ [STORAGE_KEY_RUN_INTENT]: false }).catch(() => {});
+      return;
+    }
+  } else {
+    state.consecutiveNoProgressResumes = 0;
+  }
+  state.lastResumeDoneCount = currentDoneCount;
+  pushLog(`Auto-resume (${triggerLabel}): ${currentDoneCount}/${state.lastProducts.length} products done — resuming run`, 'ok');
   try {
     await handleStart({ products: null });
   } catch (e) {
