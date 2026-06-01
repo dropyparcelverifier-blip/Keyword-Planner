@@ -774,6 +774,27 @@ chrome.runtime.sendMessage({ action: 'getState' }, (state) => {
   if (state.lastStatus) $('statusText').textContent = state.lastStatus;
   syncHeaderState(!!state.running);
   if (state.doneProducts !== undefined) $('doneProductsStat').textContent = state.doneProducts;
+  // Seed the per-product card's batch-progress label from getState — the
+  // progress events that drive pcBatchLabel only arrive when a row is
+  // emitted, so if the popup opens BETWEEN events (or after a SW restart
+  // mid-run) the label sticks at the default "Product 0 of 0" even though
+  // there are 23 products queued. state.totalProducts is the persisted
+  // truth (= state.lastProducts.length).
+  if (typeof state.totalProducts === 'number' && state.totalProducts > 0) {
+    const total = state.totalProducts;
+    const done = state.doneProducts || 0;
+    const pct = Math.min(100, Math.round((done / total) * 100));
+    const labelEl = $('pcBatchLabel');
+    const pctEl   = $('pcBatchPct');
+    const barEl   = $('pcBatchBar');
+    if (labelEl) labelEl.textContent = `Product ${Math.min(done + 1, total)} of ${total}`;
+    if (pctEl)   pctEl.textContent   = `${pct}%`;
+    if (barEl)   barEl.style.width   = `${pct}%`;
+    const totalEl = $('productsTotal');
+    const doneEl  = $('productsDone');
+    if (totalEl) totalEl.textContent = String(total);
+    if (doneEl)  doneEl.textContent  = String(done);
+  }
   if (typeof state.restUntil === 'number' && state.restUntil > Date.now()) {
     startRestCountdown(state.restUntil);
   }
