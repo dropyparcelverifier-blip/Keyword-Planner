@@ -154,7 +154,21 @@ function pushLog(text, kind) {
 
 function emitProgress(payload) {
   if (payload?.currentAction) pushLog(payload.currentAction, payload.logKind);
-  broadcast({ action: 'discoveryProgress', payload });
+  // Always include batch totals in the broadcast even when the engine
+  // didn't put them in this particular payload (e.g. "KP: waiting for
+  // hydrate" only carries currentAction). The popup's batch-progress
+  // label was sticking at "Product 0 of 0" between events that did
+  // include them, because most events don't. Sourcing from state.* on
+  // every emit keeps the label live across the full run regardless of
+  // which onProgress call fired.
+  const enriched = { ...payload };
+  if (enriched.productsTotal === undefined && state.lastProducts.length > 0) {
+    enriched.productsTotal = state.lastProducts.length;
+  }
+  if (enriched.productsDone === undefined) {
+    enriched.productsDone = state.doneProducts.length;
+  }
+  broadcast({ action: 'discoveryProgress', payload: enriched });
 }
 
 // Strip internal `_*` fields (which may contain Float32Array embeddings used
