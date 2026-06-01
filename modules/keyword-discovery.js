@@ -1271,15 +1271,31 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
       // user can visually verify in incognito that the tile IS our SKU.
       // Downstream sibling / wrong-form / brand-mate vetoes still gate
       // this layer, so a same-brand SIBLING thumb won't slip through.
+      //
+      // Text-confidence rescue (parallel path): when the SERP text shares
+      // ≥70% of our product's words AND brand + anchor are present, the
+      // listing is almost certainly our SKU even when CLIP score is lower
+      // (e.g. 66–76). This handles the common case where the user's full
+      // product name has a "garnish" word like "Healing" that retailers
+      // routinely drop ("Aquaphor Baby 3 in 1 Diaper Rash Cream" vs
+      // "Aquaphor Baby Healing Cream 3 In 1 Diaper Rash Cream"). Sibling /
+      // brand-mate / wrong-form vetoes still gate the path so a sibling
+      // SKU with high text overlap (Ointment vs Cream) won't pass.
       const highClipConfirms = clipScorePct >= 80;
-      if (brandMentioned && (specConf.confirmed || highClipConfirms)) {
+      const highTextConfirms = (textSim?.score || 0) >= 70;
+      if (brandMentioned && (specConf.confirmed || highClipConfirms || highTextConfirms)) {
         total = Math.max(0, total - 10);
         isMatch = total >= 55;
-        // Tag distinctly when the rescue rode on visual confidence (not
-        // text spec) so the CSV row makes the source of the confidence
-        // legible to the user.
-        if (highClipConfirms && !specConf.confirmed) {
-          matchQuality = 'partial_clip_high';
+        // Tag distinctly when the rescue rode on visual / text confidence
+        // (not spec) so the CSV row makes the source of the confidence
+        // legible to the user. CLIP-high wins the tag when both apply
+        // since visual identity is the stronger signal.
+        if (!specConf.confirmed) {
+          if (highClipConfirms) {
+            matchQuality = 'partial_clip_high';
+          } else if (highTextConfirms) {
+            matchQuality = 'partial_text_high';
+          }
         }
       } else if (brandMentioned) {
         // Weak partial: brand present, no spec, CLIP not high enough to
