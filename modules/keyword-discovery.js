@@ -3174,6 +3174,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             });
           } else {
             consecutiveSerpBlocks = 0;
+            row.imageCount           = serpData.count;
             // CLIP candidates that scored above threshold but had no brand
             // context in their surrounding SERP text. Almost always a
             // visually-similar competitor product. Kept as a separate count
@@ -3185,20 +3186,10 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             row.matchedPrices        = serpData.matchedPrices  || [];
             row.matchedQualities     = serpData.matchedQualities || [];
             row._matchedEmbeddings   = serpData.matchedEmbeddings || [];
-            // image_count semantics: CONFIRMED matches only. A thumbnail
-            // counts as image_count when its surrounding SERP text resolves
-            // to our specific SKU (matchQuality === 'clean' or 'dhash' or
-            // 'partial_spec_confirmed'). The 'ambiguous_brand_match' tier
-            // — brand mentioned but the listing could equally be a sibling
-            // SKU (Aquaphor Ointment vs Aquaphor Cream vs Aquaphor Paste
-            // when SERP text is just "amazon.in") — is excluded so a
-            // SERP showing 9 different Aquaphor products doesn't claim
-            // 9 matches for ONE specific SKU. Ambiguous matches stay
-            // visible in the separate ambiguous_match_count column for
-            // audit.
+            // Summary: how many matches were ambiguous (brand-only, no
+            // spec confirmation)? Surfaces in CSV so the user can audit.
             row.ambiguousMatchCount = (row.matchedQualities || [])
               .filter(q => q === 'ambiguous_brand_match').length;
-            row.imageCount = Math.max(0, (serpData.count || 0) - row.ambiguousMatchCount);
             // Feed the per-product matched-URL cache with this keyword's
             // matches. Subsequent generic-query SERPs reuse these via the
             // rescue path's cache-trust check.

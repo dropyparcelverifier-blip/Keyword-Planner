@@ -66,23 +66,15 @@ function pairMatched(r) {
 // answer that; it just clutters the file with educational / competitor
 // queries where we never appear.
 function _exportWorthKeeping(r) {
-  // image_count now reflects CONFIRMED matches only (clean / dhash /
-  // partial_spec_confirmed). Ambiguous brand-only matches are tracked
-  // separately in ambiguous_match_count. Keep rows that had either kind
-  // of attribution so the user can still audit the ambiguous ones in
-  // the CSV — they're real signal, just lower-confidence than clean.
-  return (r.imageCount || 0) > 0 || (r.ambiguousMatchCount || 0) > 0;
+  return (r.imageCount || 0) > 0;
 }
 
-// Row ordering: confirmed (image_count) first, then ambiguous-only rows.
-// Within each tier, ad_rating wins, then image_count breaks ties.
+// Row ordering: by adRating desc when available, else by image_count desc.
+// This puts the highest-scoring keywords at the top of the export so the user
+// can pick winners from the first rows without re-sorting in Excel.
 function orderRows(report) {
   const filtered = report.filter(_exportWorthKeeping);
   filtered.sort((a, b) => {
-    // Confirmed-match rows always rank above ambiguous-only rows.
-    const aConfirmed = (a.imageCount || 0) > 0 ? 1 : 0;
-    const bConfirmed = (b.imageCount || 0) > 0 ? 1 : 0;
-    if (aConfirmed !== bConfirmed) return bConfirmed - aConfirmed;
     const ra = (typeof a.adRating === 'number') ? a.adRating : -1;
     const rb = (typeof b.adRating === 'number') ? b.adRating : -1;
     if (rb !== ra) return rb - ra;
