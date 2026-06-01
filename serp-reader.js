@@ -292,14 +292,27 @@
     const maxY = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
     const viewportH = window.innerHeight;
 
-    // Wider scroll sweep — earlier we capped at 2.5× viewport, which missed
-    // the shopping carousel on tall SERPs. Scroll up to 3× viewport so the
-    // intersection-observer-based lazy thumbnails get a chance to fetch.
-    const targetBottom = Math.min(maxY, viewportH * 3);
-    let y = window.scrollY;
+    // Full-page scroll sweep — earlier we capped at 3× viewport which missed
+    // sections below ~3000px (the Images carousel, lower organic listings
+    // with product thumbnails, etc.) on tall brand-query SERPs. For an
+    // Aquaphor / La-Roche-Posay search the page can easily run 5000–7000px
+    // tall and the lower-half thumbnails contain real product matches.
+    // Scroll through the WHOLE page so the intersection-observer-based lazy
+    // loaders fetch every thumbnail. Cap at 12× viewport as a sanity bound
+    // against pathological infinite-scroll layouts.
+    const targetBottom = Math.min(maxY, viewportH * 12);
     for (let yy = viewportH * 0.5; yy <= targetBottom; yy += viewportH * 0.7) {
       window.scrollTo({ top: yy, behavior: 'smooth' });
       await sleep(Math.round(rand(250, 450)));
+    }
+    // Sweep back up too — some Google layouts only mount the shopping
+    // carousel images when the carousel itself enters the viewport, and
+    // those observers fire only on FIRST intersection. A backwards pass
+    // catches anything the forward pass missed (e.g. side-rail items that
+    // unmount when scrolled past).
+    for (let yy = targetBottom; yy > 0; yy -= viewportH * 1.2) {
+      window.scrollTo({ top: Math.max(0, yy), behavior: 'smooth' });
+      await sleep(Math.round(rand(150, 300)));
     }
     window.scrollTo({ top: 0, behavior: 'auto' });
     // Longer settle wait — gives lazy thumbnails (data:image/gif placeholders)
