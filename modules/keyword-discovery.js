@@ -1116,7 +1116,17 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
 
   const brandAliases = (productContext?.brandAliases || []).filter(a => a && a.length > 2);
   const handleWords  = (productContext?.handleWords  || []).filter(w => w && w.length > 3);
-  const brandMentioned = brandAliases.some(a => strippedText.includes(a));
+  // Brand check on strippedText (body) first — catches genuine brand
+  // mentions in title/alt/seller after stripping the query echo. If
+  // that misses, also check the ORIGINAL ctx URL/seller field: when
+  // the SERP listing's domain literally IS our brand's site (e.g.
+  // "aquaphorus.com" for an Aquaphor product), brand is unambiguous
+  // regardless of whether the body text echoed the query word. Without
+  // this, brand-domain SERP listings get flagged brand=✗ when the
+  // keyword query happens to include the brand word.
+  const sellerDomain = String(ctx?.seller || '').toLowerCase();
+  const brandInDomain = brandAliases.some(a => sellerDomain.includes(a));
+  const brandMentioned = brandAliases.some(a => strippedText.includes(a)) || brandInDomain;
   const anchorFound    = handleWords.some(w => strippedText.includes(w));
   // titleHasBrand: brand appears in the genuine page-title element (not the
   // alt / linkText where Google's query echo lives). Editorial images

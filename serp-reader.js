@@ -458,27 +458,83 @@
   }
 
   // Strategy 1 — Google's class names rotate every few months. Find the
-  // shopping carousel by its visible heading text ("Sponsored products" /
-  // "Shop ..." / "Sponsored") and walk up the DOM until we hit an ancestor
-  // with ≥ 3 images. That ancestor IS the carousel — regardless of what
-  // class name Google is using this week.
+  // shopping carousel by its visible heading text and walk up the DOM
+  // until we hit an ancestor with ≥ 3 images. That ancestor IS the
+  // carousel — regardless of what class name Google is using this week.
+  //
+  // Heading vocabulary that activates this strategy. Major gap caught:
+  // Google's "Popular products" / "Popular results" carousels — present
+  // on nearly every brand-query SERP, sometimes the only product zone
+  // on the page (AI Overview pushes everything else down). The previous
+  // list missed both, so every "Popular products" carousel was invisible
+  // to this collector and the SERP came back with only knowledge_panel
+  // and organic thumbnails (5-7 instead of 15-20).
+  const _SHOPPING_HEADINGS = new Set([
+    'sponsored products',
+    'sponsored',
+    'shop products',
+    'popular products',
+    'popular results',
+    'popular',
+    'top picks',
+    'top products',
+    'explore products',
+    'trending products',
+    'best matches',
+    'related products',
+    'price ranges',         // Google's price-bucketed carousels
+  ]);
   function _shoppingContainerFromHeading() {
-    const els = document.querySelectorAll('div, span, h2, h3, h4');
+    const els = document.querySelectorAll('div, span, h2, h3, h4, h5');
+    const found = [];
     for (const el of els) {
       const t = (el.textContent || '').trim();
       const tl = t.toLowerCase();
       // Exact-match the short heading variants; partial-match avoids
-      // accidentally grabbing prose containing the phrase.
-      if (tl !== 'sponsored products' && tl !== 'sponsored' &&
-          tl !== 'shop products' && !tl.startsWith('shop ')) continue;
+      // accidentally grabbing prose containing the phrase. Also accept
+      // any "Shop X" / "₹X – ₹Y" price-range heading.
+      const isShopping =
+        _SHOPPING_HEADINGS.has(tl) ||
+        tl.startsWith('shop ') ||
+        /^[₹$€£¥]\s?[\d,]+\s*[-–—]\s*[₹$€£¥]\s?[\d,]+$/.test(tl);
+      if (!isShopping) continue;
       let parent = el.parentElement;
       for (let i = 0; i < 8 && parent; i++) {
         const imgs = parent.querySelectorAll('img');
-        if (imgs.length >= 3) return parent;
+        if (imgs.length >= 3) { found.push(parent); break; }
         parent = parent.parentElement;
       }
     }
-    return null;
+    // Return the WIDEST container (most likely to be the carousel root)
+    // so we don't pick up a sub-tile by accident.
+    if (found.length === 0) return null;
+    found.sort((a, b) => (b.clientWidth || 0) - (a.clientWidth || 0));
+    return found[0];
+  }
+
+  // Variant of the above that returns ALL matching containers instead of
+  // just the widest — for SERPs with multiple carousels (Popular products
+  // + ₹1,000-2,500 + ₹2,500-5,000 stacked on top of each other) we need
+  // to harvest images from each separately.
+  function _allShoppingContainersFromHeading() {
+    const els = document.querySelectorAll('div, span, h2, h3, h4, h5');
+    const found = new Set();
+    for (const el of els) {
+      const t = (el.textContent || '').trim();
+      const tl = t.toLowerCase();
+      const isShopping =
+        _SHOPPING_HEADINGS.has(tl) ||
+        tl.startsWith('shop ') ||
+        /^[₹$€£¥]\s?[\d,]+\s*[-–—]\s*[₹$€£¥]\s?[\d,]+$/.test(tl);
+      if (!isShopping) continue;
+      let parent = el.parentElement;
+      for (let i = 0; i < 8 && parent; i++) {
+        const imgs = parent.querySelectorAll('img');
+        if (imgs.length >= 3) { found.add(parent); break; }
+        parent = parent.parentElement;
+      }
+    }
+    return Array.from(found);
   }
 
   // Shopping carousel images often have empty alt text + data:image/png src,
@@ -552,14 +608,80 @@
     } catch {}
   }
 
+  // Universal structural detector. Walks the DOM and identifies any
+  // container that "looks like" a product carousel regardless of class
+  // name, heading text, or DOM ancestry. The structural test:
+  //   - container has >= 3 <img> descendants that pass _imgPasses
+  //   - container has currency text (₹, $, €, £, ¥) somewhere inside
+  //     OR has role="list" / role="region" / display:flex+overflow
+  //   - container is reasonably wide (>= 60% of viewport) — filters
+  //     out small inline thumbnails that aren't carousels
+  // This catches carousels even when Google ships a brand-new layout
+  // tomorrow with no familiar headings or class names.
+  function _structuralCarouselContainers() {
+    const viewportW = window.innerWidth || 1280;
+    const minWidth = viewportW * 0.5;
+    const found = new Set();
+    const candidates = document.querySelectorAll('div, section, ul, ol');
+    const PRICE_RE = /[₹$€£¥]\s?\d[\d,]*(?:\.\d{1,2})?/;
+    for (const el of candidates) {
+      if (!isElementVisible(el)) continue;
+      if ((el.clientWidth || 0) < minWidth) continue;
+      const imgs = el.querySelectorAll('img');
+      if (imgs.length < 3) continue;
+      // Filter to img elements that LOOK like product thumbs
+      // (skip icon-sized images, sprites, etc.).
+      let productImgs = 0;
+      for (const img of imgs) {
+        const w = img.naturalWidth || img.clientWidth || 0;
+        const h = img.naturalHeight || img.clientHeight || 0;
+        if (w >= 50 && h >= 50) productImgs++;
+        if (productImgs >= 3) break;
+      }
+      if (productImgs < 3) continue;
+      // Structural signal: has currency text inside OR a carousel role.
+      const txt = el.textContent || '';
+      const hasPrice = PRICE_RE.test(txt);
+      const role = el.getAttribute('role') || '';
+      const isCarouselRole = role === 'list' || role === 'region' || role === 'listbox';
+      // Style probe — flex/grid containers with horizontal overflow are
+      // almost always carousels even when the role attribute is missing.
+      const cs = getComputedStyle(el);
+      const isFlexOverflow =
+        (cs.display === 'flex' || cs.display === 'grid') &&
+        (cs.overflowX === 'auto' || cs.overflowX === 'scroll');
+      if (!hasPrice && !isCarouselRole && !isFlexOverflow) continue;
+      // Avoid duplicates — skip if a parent we already added covers this
+      // element (we want the OUTERMOST container per visual zone).
+      let isNested = false;
+      for (const f of found) {
+        if (f !== el && f.contains(el)) { isNested = true; break; }
+      }
+      if (!isNested) {
+        // Also drop already-added children of this new container.
+        for (const f of Array.from(found)) {
+          if (el !== f && el.contains(f)) found.delete(f);
+        }
+        found.add(el);
+      }
+    }
+    return Array.from(found);
+  }
+
   function collectShoppingCarouselImages() {
     const out = [];
-    // Strategy 1: heading-text-anchored discovery — survives Google's
-    // periodic class-name churn.
-    const headingContainer = _shoppingContainerFromHeading();
-    if (headingContainer) {
-      _kickCarouselLazyLoaders(headingContainer);
-      headingContainer.querySelectorAll('img').forEach(img => {
+    // Strategy 1: heading-text-anchored discovery — fast path for the
+    // common "Popular products" / "Sponsored products" / price-range
+    // headings. Iterates over ALL matching containers.
+    const headingContainers = _allShoppingContainersFromHeading();
+    // Strategy 1b: universal structural detection — finds carousels that
+    // ship with brand-new heading text or no heading at all. Merge with
+    // heading-based containers, de-duped by reference identity.
+    const structuralContainers = _structuralCarouselContainers();
+    const containers = Array.from(new Set([...headingContainers, ...structuralContainers]));
+    for (const container of containers) {
+      _kickCarouselLazyLoaders(container);
+      container.querySelectorAll('img').forEach(img => {
         // Force-promote a known lazy `data-*` URL into src when the real
         // image hasn't decoded yet (Google ships a 1×1 GIF placeholder
         // until the observer fires).
