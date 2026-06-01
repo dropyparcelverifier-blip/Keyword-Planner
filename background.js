@@ -305,7 +305,21 @@ async function handleStart(msg) {
     });
   } else if (state.lastProducts.length > 0 && state.lastRunOpts) {
     products = state.lastProducts;
-    runOpts  = state.lastRunOpts;
+    // Strip stale `cap` from the saved runOpts so the engine falls back to
+    // the current KEYWORD_CAP default. Without this, a run started when
+    // KEYWORD_CAP was 500 keeps cap=500 forever in storage — even after a
+    // code change raises the default to 50000 — and resumes wedge at the
+    // old ceiling. Same protection for kpMaxPerProduct (was 200, now 5000).
+    runOpts  = { ...state.lastRunOpts };
+    if (typeof runOpts.cap === 'number' && runOpts.cap <= 1000) {
+      emitProgress({ currentAction: `Dropping stale cap=${runOpts.cap} from saved run options — using current default`, logKind: 'ok' });
+      delete runOpts.cap;
+    }
+    if (typeof runOpts.kpMaxPerProduct === 'number' && runOpts.kpMaxPerProduct < 1000) {
+      delete runOpts.kpMaxPerProduct;
+    }
+    state.lastRunOpts = runOpts;
+    await chrome.storage.local.set({ [STORAGE_KEY_LAST_RUN_OPTS]: runOpts }).catch(() => {});
     emitProgress({ currentAction: `Resuming previous run (${products.length} input products; ${state.doneProducts.length} already done)`, logKind: 'ok' });
   } else {
     return { ok: false, error: 'no products to discover — pick a product file first' };
