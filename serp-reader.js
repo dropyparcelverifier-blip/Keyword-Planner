@@ -351,6 +351,29 @@
       runCollectors(seen);
     }
 
+    // Targeted re-scan: find ALL carousel containers on the page (via the
+    // structural detector) and explicitly scroll EACH into view, wait for
+    // lazy loaders to fire, then re-run collectors on each. Catches the
+    // case where a brand-query SERP has 3 stacked carousels (Popular
+    // products + ₹1,000-2,500 + ₹2,500-5,000) and the full-page scroll
+    // didn't linger long enough on the lower ones for their
+    // IntersectionObserver-based lazy loads to fire. Without this, only
+    // the topmost carousel's images get captured.
+    try {
+      const carouselsForRescan = _structuralCarouselContainers();
+      if (carouselsForRescan.length > 1) {
+        for (const c of carouselsForRescan) {
+          try { c.scrollIntoView({ behavior: 'instant', block: 'center' }); } catch {}
+          _kickCarouselLazyLoaders(c);
+          await sleep(Math.round(rand(400, 700)));
+        }
+        // Settle wait after the targeted pass — gives the slowest
+        // carousels' last images a chance to decode.
+        await sleep(Math.round(rand(600, 1000)));
+        runCollectors(seen);
+      }
+    } catch {}
+
     if (startY !== 0) window.scrollTo(0, startY);
     const merged = Array.from(seen.values());
 
