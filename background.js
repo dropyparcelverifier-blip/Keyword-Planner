@@ -318,6 +318,31 @@ async function handleStart(msg) {
     if (typeof runOpts.kpMaxPerProduct === 'number' && runOpts.kpMaxPerProduct < 1000) {
       delete runOpts.kpMaxPerProduct;
     }
+    // Strip stale pacing values too — when the user had been running with
+    // the previous defaults (5-12s / 15-35s / 5-10min chunk rest) and the
+    // config got faster, resume should pick up the new defaults rather
+    // than freeze at the old slow ones. Only strip values that EXACTLY
+    // match the old defaults so users who explicitly customised in the
+    // popup keep their settings.
+    const STALE_PACING = {
+      searchDelayMinMs:  5000,
+      searchDelayMaxMs:  12000,
+      productDelayMinMs: 15000,
+      productDelayMaxMs: 35000,
+      chunkSize:         8,
+      chunkRestMinMs:    5 * 60 * 1000,
+      chunkRestMaxMs:    10 * 60 * 1000,
+    };
+    let strippedPacing = false;
+    for (const [k, oldDefault] of Object.entries(STALE_PACING)) {
+      if (runOpts[k] === oldDefault) {
+        delete runOpts[k];
+        strippedPacing = true;
+      }
+    }
+    if (strippedPacing) {
+      emitProgress({ currentAction: `Dropped stale pacing from saved run options — using current (faster) defaults`, logKind: 'ok' });
+    }
     state.lastRunOpts = runOpts;
     await chrome.storage.local.set({ [STORAGE_KEY_LAST_RUN_OPTS]: runOpts }).catch(() => {});
     emitProgress({ currentAction: `Resuming previous run (${products.length} input products; ${state.doneProducts.length} already done)`, logKind: 'ok' });
