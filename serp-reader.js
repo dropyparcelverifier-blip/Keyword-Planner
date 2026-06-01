@@ -352,24 +352,29 @@
     }
 
     // Targeted re-scan: find ALL carousel containers on the page (via the
-    // structural detector) and explicitly scroll EACH into view, wait for
-    // lazy loaders to fire, then re-run collectors on each. Catches the
-    // case where a brand-query SERP has 3 stacked carousels (Popular
-    // products + ₹1,000-2,500 + ₹2,500-5,000) and the full-page scroll
-    // didn't linger long enough on the lower ones for their
-    // IntersectionObserver-based lazy loads to fire. Without this, only
-    // the topmost carousel's images get captured.
+    // structural detector) and explicitly scroll EACH into view + step
+    // horizontally through it, waiting for lazy loaders to fire at each
+    // step, then re-run collectors. Catches the case where a brand-query
+    // SERP has multiple stacked carousels (Popular products + ₹1,000-2,500
+    // + ₹2,500-5,000) AND the case where a single carousel has 10–15
+    // tiles but only the first 4 are visible without horizontal scrolling.
+    // The previous single-jump kicker only fired the IntersectionObserver
+    // on the rightmost tile; this stepped variant fires it on every tile.
+    // We also run this for SINGLE-carousel pages (it was previously gated
+    // on >1, which is the most common case where capture was incomplete).
     try {
       const carouselsForRescan = _structuralCarouselContainers();
-      if (carouselsForRescan.length > 1) {
+      if (carouselsForRescan.length > 0) {
         for (const c of carouselsForRescan) {
-          try { c.scrollIntoView({ behavior: 'instant', block: 'center' }); } catch {}
-          _kickCarouselLazyLoaders(c);
-          await sleep(Math.round(rand(400, 700)));
+          await _scrollCarouselHorizontallyAsync(c);
         }
         // Settle wait after the targeted pass — gives the slowest
-        // carousels' last images a chance to decode.
-        await sleep(Math.round(rand(600, 1000)));
+        // carousels' last images a chance to decode before snapshot.
+        await sleep(Math.round(rand(500, 800)));
+        // Also promote any remaining lazy images globally — some
+        // carousels nest IMG elements outside our walk root (e.g. tile
+        // overlays rendered in a sibling layer).
+        _promoteLazyImagesIn(document.body);
         runCollectors(seen);
       }
     } catch {}
@@ -629,6 +634,109 @@
         setTimeout(() => { try { track.scrollLeft = origLeft; } catch {} }, 800);
       }
     } catch {}
+  }
+
+  // Find every horizontally-scrollable descendant of `root` (and `root`
+  // itself). Google sometimes wraps the visible track in 1–3 nested
+  // overflow:auto containers — we step every one of them. A container
+  // qualifies when scrollWidth > clientWidth AND its computed overflowX is
+  // auto/scroll (so we don't try to scroll a non-scrollable wrapper).
+  function _findHorizontalScrollables(root) {
+    const out = [];
+    if (!root) return out;
+    const isScrollable = (el) => {
+      if (!el || !el.getBoundingClientRect) return false;
+      if ((el.scrollWidth || 0) <= (el.clientWidth || 0) + 4) return false;
+      try {
+        const cs = getComputedStyle(el);
+        return cs.overflowX === 'auto' || cs.overflowX === 'scroll';
+      } catch { return false; }
+    };
+    if (isScrollable(root)) out.push(root);
+    // BFS through descendants — capped at a generous walk to avoid hangs on
+    // pathological pages.
+    const queue = [root];
+    let walked = 0;
+    while (queue.length && walked < 5000) {
+      const el = queue.shift();
+      walked++;
+      const children = el.children || [];
+      for (const child of children) {
+        if (isScrollable(child)) out.push(child);
+        queue.push(child);
+      }
+    }
+    return out;
+  }
+
+  // Promote known lazy-load URL attributes into the real `src` on every
+  // <img> beneath `root`. Used both inside the scroll-step loop (so each
+  // step's freshly-revealed thumbs decode) and after the scroll completes.
+  function _promoteLazyImagesIn(root) {
+    if (!root) return;
+    try {
+      root.querySelectorAll('img').forEach(img => {
+        if ((img.naturalWidth || 0) > 1) return;
+        const lazy = img.getAttribute('data-src') ||
+                     img.getAttribute('data-iurl') ||
+                     img.getAttribute('data-deferred-src') ||
+                     img.getAttribute('data-original') ||
+                     img.getAttribute('data-lazy') ||
+                     img.getAttribute('data-lazy-src') || '';
+        if (lazy && /^https?:/.test(lazy)) {
+          try { img.src = lazy; } catch {}
+        }
+      });
+    } catch {}
+  }
+
+  // Multi-step horizontal scroll. The previous _kickCarouselLazyLoaders
+  // jumped to scrollWidth ONCE and reset — that fires the
+  // IntersectionObserver only on the rightmost tiles; middle thumbs were
+  // never made visible so their images never decoded. Carousels like
+  // "Popular products" with 10–15 tiles only surfaced 4–5 captures.
+  //
+  // This stepped variant scrolls 0% → 20% → 40% → 60% → 80% → 100% with a
+  // settle pause at each step (long enough for the observer to fire and
+  // the network image to start fetching), promotes any data-* lazy URLs
+  // at each step, then restores the original scroll position. Result:
+  // every tile crosses the viewport at least once and every image
+  // attribute that points to a real URL is promoted into `src`.
+  async function _scrollCarouselHorizontallyAsync(container) {
+    if (!container) return;
+    try { container.scrollIntoView({ behavior: 'instant', block: 'center' }); } catch {}
+    const tracks = _findHorizontalScrollables(container);
+    // If the container itself isn't scrollable but no inner track was
+    // found, fall back to the legacy single-jump sync kicker.
+    if (tracks.length === 0) {
+      _kickCarouselLazyLoaders(container);
+      // Give the synchronous jump a moment to load before we move on.
+      await sleep(Math.round(rand(250, 400)));
+      return;
+    }
+    for (const track of tracks) {
+      const origLeft = track.scrollLeft;
+      const maxLeft = Math.max(0, (track.scrollWidth || 0) - (track.clientWidth || 0));
+      if (maxLeft <= 0) continue;
+      const STEPS = 6; // 0%, 20%, 40%, 60%, 80%, 100%
+      for (let i = 0; i <= STEPS; i++) {
+        const target = (maxLeft * i) / STEPS;
+        try { track.scrollLeft = target; } catch {}
+        // Wait for the IntersectionObserver to fire and the image
+        // network request to start. 180-260ms is enough for Google's
+        // typical lazy-load (which swaps the placeholder GIF for the
+        // real URL inside ~150ms of becoming visible).
+        await sleep(Math.round(rand(180, 260)));
+        _promoteLazyImagesIn(track);
+      }
+      // Final settle so the rightmost tiles finish decoding before the
+      // collector snapshots them.
+      await sleep(Math.round(rand(180, 280)));
+      _promoteLazyImagesIn(track);
+      // Restore the original scroll so the page doesn't end up visually
+      // shifted from the user's perspective (they may glance at the tab).
+      try { track.scrollLeft = origLeft; } catch {}
+    }
   }
 
   // Universal structural detector. Walks the DOM and identifies any
