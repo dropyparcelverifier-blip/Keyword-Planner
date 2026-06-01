@@ -1262,39 +1262,44 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
       const specConf = (typeof productContext.hasSpecConfirmation === 'function')
         ? productContext.hasSpecConfirmation(originalText)
         : { confirmed: false };
-      // Visual-confidence rescue: when CLIP score is very high (>= 80) the
-      // thumbnail is near-identical to our reference product image. Paired
-      // with brand mention (eliminates random visual lookalikes), this is
-      // enough to confirm WITHOUT explicit text spec — covers the common
-      // Google knowledge_panel / shopping_carousel case where each tile
-      // carries only "amazon.in" / "babyamore.in" as context but the
-      // user can visually verify in incognito that the tile IS our SKU.
-      // Downstream sibling / wrong-form / brand-mate vetoes still gate
-      // this layer, so a same-brand SIBLING thumb won't slip through.
+      // Visual-confidence rescue: when CLIP score is high (>= 75) the
+      // thumbnail is visually very similar to our reference product image.
+      // Paired with brand mention (eliminates random visual lookalikes),
+      // this is enough to confirm WITHOUT explicit text spec — covers the
+      // common Google knowledge_panel / shopping_carousel case where each
+      // tile carries only "amazon.in" / "babyamore.in" as context but the
+      // user can visually verify the tile IS our SKU. Downstream sibling /
+      // wrong-form / brand-mate vetoes still gate this layer, so a
+      // same-brand SIBLING thumb won't slip through.
       //
-      // Text-confidence rescue (parallel path): when the SERP text shares
-      // ≥70% of our product's words AND brand + anchor are present, the
-      // listing is almost certainly our SKU even when CLIP score is lower
-      // (e.g. 66–76). This handles the common case where the user's full
-      // product name has a "garnish" word like "Healing" that retailers
-      // routinely drop ("Aquaphor Baby 3 in 1 Diaper Rash Cream" vs
-      // "Aquaphor Baby Healing Cream 3 In 1 Diaper Rash Cream"). Sibling /
-      // brand-mate / wrong-form vetoes still gate the path so a sibling
-      // SKU with high text overlap (Ointment vs Cream) won't pass.
-      const highClipConfirms = clipScorePct >= 80;
-      const highTextConfirms = (textSim?.score || 0) >= 70;
-      if (brandMentioned && (specConf.confirmed || highClipConfirms || highTextConfirms)) {
+      // Text-confidence rescue (parallel): SERP text shares ≥60% of our
+      // product's words AND brand + anchor present → confirm. Handles
+      // cases where the user's full product name has "garnish" words
+      // ("Healing", "Advanced Therapy") that retailers routinely drop.
+      //
+      // Combined-signal rescue (third path): moderate CLIP (>= 65) +
+      // moderate text overlap (>= 50%) → confirm. Catches borderline
+      // visual + textual matches that fail BOTH single-signal thresholds
+      // but together are clearly our SKU. Tagged 'partial_combined' so
+      // the user can audit. Combined with brand requirement, this catches
+      // the long tail of borderline thumbnails without over-promoting
+      // random competitor pages.
+      const highClipConfirms = clipScorePct >= 75;
+      const highTextConfirms = (textSim?.score || 0) >= 60;
+      const combinedConfirms = clipScorePct >= 65 && (textSim?.score || 0) >= 50;
+      if (brandMentioned && (specConf.confirmed || highClipConfirms || highTextConfirms || combinedConfirms)) {
         total = Math.max(0, total - 10);
         isMatch = total >= 55;
-        // Tag distinctly when the rescue rode on visual / text confidence
-        // (not spec) so the CSV row makes the source of the confidence
-        // legible to the user. CLIP-high wins the tag when both apply
-        // since visual identity is the stronger signal.
+        // Tag distinctly when the rescue rode on visual / text / combined
+        // confidence (not spec) so the CSV row makes the source of the
+        // confidence legible. Priority: CLIP-high → text-high → combined.
         if (!specConf.confirmed) {
           if (highClipConfirms) {
             matchQuality = 'partial_clip_high';
           } else if (highTextConfirms) {
             matchQuality = 'partial_text_high';
+          } else if (combinedConfirms) {
+            matchQuality = 'partial_combined';
           }
         }
       } else if (brandMentioned) {
