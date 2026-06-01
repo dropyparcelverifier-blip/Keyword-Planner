@@ -259,10 +259,17 @@ function xlsxDataUrl(rows) {
 }
 
 // Single-product CSV — used for auto-export when a product's queue empties.
-export async function exportSingleProductCSV(rows, batchId) {
+// Filename intentionally OMITS batchId so a re-export of the same SKU (after
+// a resume that re-processed the product) shares a base name with the
+// previous file. Chrome will auto-suffix "(1)", "(2)" if the file still
+// exists; if the user moved/deleted the previous file, the new one drops
+// in cleanly. Previously the batchId timestamp was part of the filename,
+// which produced visually-distinct files for the same SKU across sessions
+// and made the Downloads folder confusing.
+export async function exportSingleProductCSV(rows, _batchId) {
   if (!rows || rows.length === 0) throw new Error('No rows for this product.');
   const slug = fileSlug(rows[0].sku, rows[0].productName);
-  const filename = `${slug}_${batchId || Date.now()}.csv`;
+  const filename = `${slug}.csv`;
   await chrome.downloads.download({ url: csvDataUrl(rows), filename, saveAs: false });
   return filename;
 }
