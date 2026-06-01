@@ -1540,7 +1540,14 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
   }
 
   if (resp?.captcha) {
-    return { ok: false, captcha: true, error: resp.error || 'CAPTCHA detected' };
+    return {
+      ok: false,
+      captcha: true,
+      error: resp.error || 'CAPTCHA detected',
+      // Tag which method got blocked so the inline retry flips to the
+      // other one ('chrome.search.query' vs 'directUrl').
+      method: chromeSearchOk ? 'chromeSearch' : 'directUrl',
+    };
   }
 
   // SERP reader now returns enriched items: { url, seller, price }. Build a
@@ -1884,6 +1891,11 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
 
   return {
     ok: true,
+    // Which navigation method actually landed the SERP — used by the
+    // CAPTCHA inline retry to flip to the OTHER method ('chromeSearch'
+    // vs 'directUrl') on the next attempt, since verification often
+    // sits on a per-method fingerprint.
+    method: chromeSearchOk ? 'chromeSearch' : 'directUrl',
     count: matchedThumbnails.length,
     matchedThumbnails,
     matchedConfidences,
@@ -3219,6 +3231,43 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                   logKind: 'ok',
                 });
                 serpData = retrySerp;
+              }
+            }
+          }
+          // Inline CAPTCHA retry — fresh-tab pass with the opposite
+          // navigation method before falling back to the end-of-product
+          // retry queue. Google rotates verification at the per-tab /
+          // per-referrer level; a fresh tab via the OTHER method often
+          // clears immediately. Skip if we've already tried this (the
+          // _captchaInlineRetry flag), if we're on a retry pass, or if
+          // it's a leaf row (those are low-priority and don't justify
+          // double the time budget).
+          if (serpData.captcha && !cycleOpts.isRetry && !cycleOpts.leaf && !row._captchaInlineRetry) {
+            row._captchaInlineRetry = true;
+            const captchaRetryDelay = randInt(7000, 14000);
+            // Toggle the method — if loadProductSerp used chrome.search.query
+            // first, retry with direct URL; if it used direct URL, retry via
+            // chrome.search.query (forceMethod=null reverts to default).
+            const flipMethod = (serpData.method === 'directUrl') ? null : 'directUrl';
+            onProgress?.({
+              currentProduct: productName, currentSource: 'serp',
+              currentAction: `${label} "${row.keyword}" — verification page, retrying in ${Math.round(captchaRetryDelay/1000)}s (fresh tab, ${flipMethod === 'directUrl' ? 'direct-URL' : 'chrome.search'} pass)`,
+              logKind: 'err',
+            });
+            const ok = await sleepInterruptible(captchaRetryDelay, shouldStop);
+            if (ok) {
+              const retrySerp = await loadProductSerp(row.keyword, productFps, productImages, clipThreshold,
+                (m) => onProgress?.({ currentProduct: productName, currentSource: 'serp', currentAction: `${label} captcha-retry ${m}` }),
+                productContext,
+                { forceMethod: flipMethod, priorMatchedUrls: productMatchedUrls, priorMatchedConfidences: productMatchedConfidences });
+              if (retrySerp.ok && !retrySerp.captcha) {
+                onProgress?.({
+                  currentProduct: productName, currentSource: 'serp',
+                  currentAction: `${label} "${row.keyword}" — captcha-retry cleared, ${retrySerp.count} match(es)`,
+                  logKind: 'ok',
+                });
+                serpData = retrySerp;
+                consecutiveSerpBlocks = 0;
               }
             }
           }
