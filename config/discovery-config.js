@@ -114,18 +114,22 @@ export const NOISE_FILTER_CLUSTER_HAMMING   = 5;
 // per-IP rate threshold from triggering as fast as the 25-50s range did,
 // but the engine handles CAPTCHA gracefully (continues with image_count=0)
 // if Google does flag a request.
-// NEW DEFAULTS — significantly faster than the earlier 10-25s / 30-75s.
-// The matching layer (CLIP+dHash+cache) and serp-reader visibility filter
-// are doing the heavy lifting on accuracy; pacing can be tighter without
-// hurting recall. CAPTCHA risk is higher but the engine continues gracefully
-// on verification pages (image_count=0 for affected rows).
-export const SEARCH_DELAY_MIN_MS   =        5 * 1000;
-export const SEARCH_DELAY_MAX_MS   =       12 * 1000;
-export const PRODUCT_DELAY_MIN_MS  =       15 * 1000;
-export const PRODUCT_DELAY_MAX_MS  =       35 * 1000;
-export const CHUNK_SIZE            =        8;
-export const CHUNK_REST_MIN_MS     =  5 * 60 * 1000;  // 5 min
-export const CHUNK_REST_MAX_MS     = 10 * 60 * 1000;  // 10 min
+// FAST DEFAULTS — roughly 2× faster than the previous 5-12 / 15-35 set.
+// Reasoning: a 23-product run was taking 20+ hours, which is impractical
+// to babysit. Halving the pacing keeps the run within "browsing-style"
+// cadence (still randomised, still pauses between SERPs) while bringing
+// a typical 20-product run down toward a working-day window. CAPTCHA risk
+// is higher than the old conservative pacing, but the engine continues
+// gracefully when Google does serve a verification page (sets
+// image_count=0 for affected rows and moves on). User can override any
+// of these in the popup Settings tab if they hit CAPTCHA repeatedly.
+export const SEARCH_DELAY_MIN_MS   =        3 * 1000;
+export const SEARCH_DELAY_MAX_MS   =        7 * 1000;
+export const PRODUCT_DELAY_MIN_MS  =        5 * 1000;
+export const PRODUCT_DELAY_MAX_MS  =       12 * 1000;
+export const CHUNK_SIZE            =       12;        // fewer chunk-rest breaks
+export const CHUNK_REST_MIN_MS     =  2 * 60 * 1000;  // 2 min
+export const CHUNK_REST_MAX_MS     =  4 * 60 * 1000;  // 4 min
 
 // Back-compat aliases used by the popup.js storage migration code:
 export const DEFAULT_SEARCH_DELAY_MIN_MS  = SEARCH_DELAY_MIN_MS;
@@ -144,7 +148,11 @@ export const AUTOSUGGEST_DELAY_MAX_MS = 800;
 export const DELAY_AFTER_TAB_LOAD_MS     = 1800;
 export const TAB_LOAD_TIMEOUT_MS         = 30000;
 export const ELEMENT_WAIT_TIMEOUT_MS     = 20000;
-export const KP_HYDRATE_TIMEOUT_MS       = 45000;
+// 30s is enough for KP's Discover-keywords card to hydrate on a warm tab
+// (typical: 5–20s). Trimmed from 45s — when hydration genuinely fails the
+// retry layer adds a fresh-navigate attempt with another 30s window, so
+// total worst-case time is the same but the happy path returns faster.
+export const KP_HYDRATE_TIMEOUT_MS       = 30000;
 export const KP_TABLE_TIMEOUT_MS         = 90000;
 
 // Currency normalisation. Store-locale is gl=in → INR. When the SERP shows
