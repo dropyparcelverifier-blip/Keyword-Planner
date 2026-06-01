@@ -740,46 +740,77 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
   const seen = new Set();
   const seedErrors = [];
 
+  // Treat these error substrings as TRANSIENT — Google's KP UI just didn't
+  // hydrate fast enough this time. A fresh navigate + retry rescues a
+  // surprising fraction of these (the second tab load tends to land on a
+  // warmer cache and the Discover button hydrates within seconds).
+  // "no keyword ideas" / "try different keywords" are NOT transient — that's
+  // KP's actual response, and retrying just wastes time.
+  const TRANSIENT_RE = /timed out|hydrate|never responded|shell|get results button|discover keywords/i;
+  const SEED_MAX_ATTEMPTS = 2;
+
   for (let i = 0; i < seedList.length; i++) {
     const seed = seedList[i];
     if (accumulated.length >= maxResults) break;
-    try {
-      // Navigate the KP tab for this seed. The Worker reuses the same tab id;
-      // the navigation forces kp.js to re-inject cleanly.
-      log(`KP seed ${i + 1}/${seedList.length}: navigating to ideas page`);
-      const tabId = await Worker.navigate(ideasUrl);
-      await sleep(randInt(2500, 4000));
-      const ready = await pingContentScript(tabId, 'KP_PING', 15, 1000);
-      if (!ready) {
-        seedErrors.push(`seed ${i + 1}: KP content script never responded`);
-        continue;
+    let succeeded = false;
+    for (let attempt = 1; attempt <= SEED_MAX_ATTEMPTS && !succeeded; attempt++) {
+      try {
+        // Navigate the KP tab for this seed. The Worker reuses the same tab id;
+        // the navigation forces kp.js to re-inject cleanly.
+        const attemptLabel = attempt > 1 ? ` (retry ${attempt}/${SEED_MAX_ATTEMPTS})` : '';
+        log(`KP seed ${i + 1}/${seedList.length}: navigating to ideas page${attemptLabel}`);
+        const tabId = await Worker.navigate(ideasUrl);
+        await sleep(randInt(2500, 4000));
+        const ready = await pingContentScript(tabId, 'KP_PING', 15, 1000);
+        if (!ready) {
+          if (attempt < SEED_MAX_ATTEMPTS) {
+            log(`KP seed ${i + 1}: content script never responded — retrying in 5s`);
+            await sleep(5000);
+            continue;
+          }
+          seedErrors.push(`seed ${i + 1}: KP content script never responded (after ${attempt} attempts)`);
+          break;
+        }
+        const single = await chrome.tabs.sendMessage(tabId, {
+          type: 'KP_GET_IDEAS',
+          seed: seed,                  // single seed per content-script call
+          maxResults: maxResults - accumulated.length,
+          hydrateTimeoutMs: KP_HYDRATE_TIMEOUT_MS,
+          tableTimeoutMs:   KP_TABLE_TIMEOUT_MS,
+        });
+        if (!single?.ok) {
+          const errMsg = single?.error || 'unknown';
+          if (attempt < SEED_MAX_ATTEMPTS && TRANSIENT_RE.test(errMsg)) {
+            log(`KP seed ${i + 1}: transient failure ("${errMsg.slice(0, 60)}") — retrying with fresh navigate in 5s`);
+            await sleep(5000);
+            continue;
+          }
+          seedErrors.push(`seed ${i + 1} ("${seed.slice(0, 30)}"): ${errMsg}${attempt > 1 ? ` (after ${attempt} attempts)` : ''}`);
+          break;
+        }
+        const keywords = Array.isArray(single.keywords) ? single.keywords : [];
+        log(`KP seed ${i + 1} "${seed.slice(0, 40)}" → ${keywords.length} ideas${attempt > 1 ? ` (succeeded on attempt ${attempt})` : ''}`);
+        for (const item of keywords) {
+          if (accumulated.length >= maxResults) break;
+          const kw = typeof item === 'string' ? item : item?.kw;
+          if (!kw) continue;
+          const lo = String(kw).toLowerCase().trim();
+          if (seen.has(lo)) continue;
+          seen.add(lo);
+          accumulated.push(item);
+        }
+        // Cache this seed's results so future single-seed lookups hit.
+        if (keywords.length > 0) await setCachedKp(seed, keywords);
+        succeeded = true;
+      } catch (e) {
+        if (attempt < SEED_MAX_ATTEMPTS && TRANSIENT_RE.test(e.message || '')) {
+          log(`KP seed ${i + 1}: threw transient error ("${(e.message || '').slice(0, 60)}") — retrying in 5s`);
+          await sleep(5000);
+          continue;
+        }
+        seedErrors.push(`seed ${i + 1} ("${seed.slice(0, 30)}"): ${e.message}${attempt > 1 ? ` (after ${attempt} attempts)` : ''}`);
+        break;
       }
-      const single = await chrome.tabs.sendMessage(tabId, {
-        type: 'KP_GET_IDEAS',
-        seed: seed,                  // single seed per content-script call
-        maxResults: maxResults - accumulated.length,
-        hydrateTimeoutMs: KP_HYDRATE_TIMEOUT_MS,
-        tableTimeoutMs:   KP_TABLE_TIMEOUT_MS,
-      });
-      if (!single?.ok) {
-        seedErrors.push(`seed ${i + 1} ("${seed.slice(0, 30)}"): ${single?.error || 'unknown'}`);
-        continue;
-      }
-      const keywords = Array.isArray(single.keywords) ? single.keywords : [];
-      log(`KP seed ${i + 1} "${seed.slice(0, 40)}" → ${keywords.length} ideas`);
-      for (const item of keywords) {
-        if (accumulated.length >= maxResults) break;
-        const kw = typeof item === 'string' ? item : item?.kw;
-        if (!kw) continue;
-        const lo = String(kw).toLowerCase().trim();
-        if (seen.has(lo)) continue;
-        seen.add(lo);
-        accumulated.push(item);
-      }
-      // Cache this seed's results so future single-seed lookups hit.
-      if (keywords.length > 0) await setCachedKp(seed, keywords);
-    } catch (e) {
-      seedErrors.push(`seed ${i + 1} ("${seed.slice(0, 30)}"): ${e.message}`);
     }
   }
 
