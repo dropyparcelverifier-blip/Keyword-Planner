@@ -1345,8 +1345,32 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
         isMatch = total >= 55;
       }
     } else if (identityTier === 'fail') {
-      total = Math.max(0, total - 30);
-      isMatch = total >= 55;
+      // Fail-tier rescue: when CLIP score is very high (≥ 85) AND brand
+      // is unambiguous via the seller's own domain (e.g. aquaphorus.com
+      // for an Aquaphor product, or nowfoods.com for a Now Foods
+      // product), accept as a brand-domain-confirmed match. The brand's
+      // own product page rarely embeds a competitor's image, so CLIP
+      // saying "near-identical to our reference product photo" combined
+      // with "this IS the brand's own page" is enough signal to call it
+      // our product — even when the body text echoes the query and
+      // strips out the brand word.
+      //
+      // Universal across all brands. The check requires brandInDomain
+      // (computed earlier from ctx?.seller) — a SERP listing on
+      // thebump.com or healthline.com does NOT trigger this, because
+      // those domains don't contain "aquaphor" / "nowfoods" / etc.
+      // Downstream sibling / wrong-form / brand-mate / variant-conflict
+      // vetoes still gate this path so a same-brand SIBLING SKU image
+      // hosted on the brand's domain is still vetoed.
+      const failClipRescue = clipScorePct >= 85 && brandInDomain;
+      if (failClipRescue) {
+        total = Math.max(0, total - 15);
+        isMatch = total >= 55;
+        matchQuality = 'partial_brand_domain_high_clip';
+      } else {
+        total = Math.max(0, total - 30);
+        isMatch = total >= 55;
+      }
     }
   }
 
@@ -1733,8 +1757,26 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
           let vetoReason = null;
           if (typeof productContext?.checkProductIdentity === 'function') {
             const ident = productContext.checkProductIdentity(dText);
+            // Brand-in-domain check, same logic as multi-signal path —
+            // catches the case where the SERP listing is hosted on the
+            // brand's own domain (aquaphorus.com / nowfoods.com /
+            // larocheposay.com) but the body text doesn't echo the
+            // brand word.
+            const dSellerDomain = String(dCtx.seller || '').toLowerCase();
+            const dBrandInDomain = (productContext.brandAliases || []).some(
+              a => a && dSellerDomain.includes(a)
+            );
             if (ident && ident.tier === 'fail') {
-              vetoReason = `identity fail (missing:${(ident.missingWords || []).join(',')})`;
+              // Fail-tier rescue: dHash already says the image is
+              // visually near-identical to our reference. If the seller
+              // domain IS the brand's own site, accept as a
+              // brand-domain-confirmed match. Universal across brands.
+              if (dBrandInDomain) {
+                dCtx._identityTier = 'fail';
+                dCtx._matchQuality = 'partial_brand_domain_high_clip';
+              } else {
+                vetoReason = `identity fail (missing:${(ident.missingWords || []).join(',')})`;
+              }
             } else if (ident && ident.tier === 'partial') {
               // Partial — same rescue logic as multi-signal path: require
               // brand + spec confirmation. Without spec confirmation a
