@@ -821,15 +821,39 @@
     document.querySelectorAll('img').forEach(img => {
       if (img.closest('header, footer, nav, #searchform, .logo, #logo, #hdtb')) return;
       if (img.closest('video, iframe, [data-video-id], [aria-label*="video" i]')) return;
-      if (!_imgVisibleOrWrapped(img)) return;
-      if (!imageHasLoaded(img)) return;
-      const rect = img.getBoundingClientRect();
-      if (rect.width < 50 || rect.height < 50) {
-        // Tiny rect but might be a lazy-loaded thumbnail in a g-img wrapper —
-        // accept if the wrapper has the right size.
-        const wrap = img.closest('g-img');
-        if (!wrap || !isElementVisible(wrap)) return;
+      // Promote lazy data-* URLs into src BEFORE visibility checks. Many
+      // Google carousels ship a 1×1 GIF placeholder and only swap to the
+      // real product image when their IntersectionObserver fires. If our
+      // scroll didn't trigger their observer, the inner <img> stays at
+      // 0×0 and used to get rejected here. Force-promote the lazy URL
+      // and we capture the thumbnail regardless of load state.
+      if (img.naturalWidth <= 1) {
+        const lazy = img.getAttribute('data-src') ||
+                     img.getAttribute('data-iurl') ||
+                     img.getAttribute('data-deferred-src') ||
+                     img.getAttribute('data-original') ||
+                     img.getAttribute('data-lazy') || '';
+        if (lazy && /^https?:|^data:/.test(lazy)) {
+          try { img.src = lazy; } catch {}
+        }
       }
+      // Wrapper-aware visibility. Allow images whose <g-img>/<a>/<div>
+      // wrapper is visible even when the inner <img> hasn't rendered yet.
+      const wrap = img.closest('g-img, a[href], [data-docid], [data-pla]');
+      const wrapVisible = wrap && isElementVisible(wrap);
+      if (!_imgVisibleOrWrapped(img) && !wrapVisible) return;
+      // Size gate — accept the image if EITHER the img OR the wrapper
+      // has product-thumbnail dimensions. Drop everything below 40×40
+      // (sprites, icons, tracking pixels).
+      const rect = img.getBoundingClientRect();
+      const wrapRect = wrap ? wrap.getBoundingClientRect() : null;
+      const w = Math.max(rect.width, wrapRect?.width || 0);
+      const h = Math.max(rect.height, wrapRect?.height || 0);
+      if (w < 40 || h < 40) return;
+      // Deliberately NOT checking imageHasLoaded — previously this dropped
+      // every lazy thumb that hadn't decoded yet. The CLIP matcher
+      // re-validates the URL anyway; if the image won't fetch, it scores
+      // 0 and gets filtered downstream. Better to overcapture here.
       _pushImgRecord(out, img, 'fallback');
     });
     return out;
