@@ -336,6 +336,17 @@ async function handleStart(msg) {
   }
   const excludeUrls = new Set(state.doneProducts);
 
+  // Snapshot doneProducts.length BEFORE the engine runs. If the engine
+  // exits without advancing this count AND no other "graceful pause" reason
+  // applies (stop / CAPTCHA / all-done), we know the engine is stuck in
+  // a state where it can't make progress (most commonly: the global
+  // keyword cap is hit but products remain). Clear runIntent so the
+  // watchdog stops trying to resume the same wedge over and over.
+  // This is more reliable than the state.consecutiveNoProgressResumes
+  // counter because state resets on every MV3 SW idle, but
+  // state.doneProducts persists in chrome.storage.
+  const doneBeforeRun = state.doneProducts.length;
+
   (async () => {
     try {
       await runKeywordDiscovery(
@@ -422,6 +433,23 @@ async function handleStart(msg) {
       const allProductsDone = state.lastProducts.length > 0 &&
         state.doneProducts.length >= state.lastProducts.length;
       if (allProductsDone && !stopped) {
+        await setRunIntent(false);
+      } else if (
+        !stopped &&
+        !allProductsDone &&
+        !state.pausedByCaptcha &&
+        state.doneProducts.length === doneBeforeRun
+      ) {
+        // Engine returned cleanly but made zero forward progress (no new
+        // product marked done). Most common cause: global keyword cap
+        // was already at/past ceiling on entry, so every product's
+        // outer-loop check broke immediately. Clear runIntent so the
+        // watchdog stops auto-resuming a wedge that can't unwedge
+        // itself. Surface a clear instruction to the user.
+        pushLog(
+          `Engine returned without progress (${state.doneProducts.length}/${state.lastProducts.length} done, ${state.report.length} keywords). Most likely the global keyword cap is at ceiling — reload the extension (chrome://extensions → reload AdBrain) and click Resume. Clearing runIntent to stop the auto-resume loop.`,
+          'err'
+        );
         await setRunIntent(false);
       }
       await persistReport();
