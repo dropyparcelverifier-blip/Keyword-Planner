@@ -93,6 +93,14 @@ const state = {
   // press Resume manually to override.
   lastResumeDoneCount: -1,
   consecutiveNoProgressResumes: 0,
+  // Re-entry guards. `running` flips to true AFTER several awaits inside
+  // handleStart — leaving a window where a second caller could pass the
+  // initial guard and spawn a parallel engine. `starting` is set SYNC at
+  // the entry to handleStart so the second caller bounces immediately.
+  // `resumeInFlight` is a Promise that tryAutoResume sets while it owns a
+  // resume cycle; concurrent tryAutoResume calls await/skip it.
+  starting: false,
+  resumeInFlight: null,
 };
 
 // Side panel: clicking the extension icon opens the panel (Chrome 114+).
@@ -225,10 +233,23 @@ function shouldAutoResume() {
 }
 
 async function tryAutoResume(triggerLabel) {
-  // The cold-start hydration may not have finished if onStartup fires before
-  // the IIFE resolves — await it explicitly.
-  await coldStart;
-  if (!shouldAutoResume()) return;
+  // Race-guard: onStartup and the watchdog alarm can both fire within ~1s of
+  // each other after a service-worker wake-up. Without this mutex BOTH would
+  // pass `shouldAutoResume()` (state.running is still false because
+  // handleStart hasn't yet set it past its awaits), call handleStart in
+  // parallel, and run two engines on the same products — duplicating SERP
+  // loads, KP scrapes, storage writes, and image_count rows in the report.
+  // Hold a single in-flight Promise; concurrent calls return that promise
+  // (so they observe completion without re-spawning).
+  if (state.resumeInFlight) {
+    pushLog(`Auto-resume (${triggerLabel}) skipped — another resume already in flight`, 'info');
+    return state.resumeInFlight;
+  }
+  state.resumeInFlight = (async () => {
+    // The cold-start hydration may not have finished if onStartup fires before
+    // the IIFE resolves — await it explicitly.
+    await coldStart;
+    if (!shouldAutoResume()) return;
   // No-progress gate. If the previous resume didn't advance doneProducts,
   // increment a counter; after 3 consecutive failures, stop auto-resuming
   // to break the infinite loop that triggers when the global keyword cap
@@ -252,6 +273,12 @@ async function tryAutoResume(triggerLabel) {
     await handleStart({ products: null });
   } catch (e) {
     pushLog(`Auto-resume failed: ${e.message}`, 'err');
+  }
+  })();
+  try {
+    return await state.resumeInFlight;
+  } finally {
+    state.resumeInFlight = null;
   }
 }
 
@@ -302,8 +329,25 @@ function pickRunOpts(msg) {
 }
 
 async function handleStart(msg) {
-  if (state.running) return { ok: false, error: 'already running' };
+  // Two-layer re-entry guard. `state.running` only flips to true AFTER
+  // several awaits later in this function (storage.set, emitProgress, etc.),
+  // which means a second caller can pass this check and start a parallel
+  // engine before the first one has marked itself running. `state.starting`
+  // is set SYNCHRONOUSLY here so the second caller bounces immediately.
+  if (state.running || state.starting) return { ok: false, error: 'already running' };
+  state.starting = true;
+  try {
+    return await _handleStartInner(msg);
+  } finally {
+    // Clear `starting` whether or not _handleStartInner threw — the inner
+    // function sets state.running=true when it has fully entered the run
+    // loop, after which a fresh handleStart call is correctly blocked by
+    // the `state.running` half of the guard above.
+    state.starting = false;
+  }
+}
 
+async function _handleStartInner(msg) {
   // Determine the input list. If msg has products, this is a fresh Start (or
   // a re-Start with a new file). If not, this is a Resume: reuse the
   // previously persisted product list + run options.
@@ -382,10 +426,24 @@ async function handleStart(msg) {
   await setRunIntent(true);
   await persistReport();
 
+  // Rebuild the report Map using COMPOSITE keys (productUrl|keyword) so the
+  // engine can find existing per-product rows on resume. Previously this Map
+  // was keyed by keyword alone — when two products discovered the same
+  // keyword, the second product's row silently merged into the first one's,
+  // and its image_count inherited the first product's SERP-match result.
+  // Per-product accuracy now: each (product, keyword) pair gets its own row,
+  // its own SERP load, and its own image-match computation.
+  //
+  // Backwards-compat: rows persisted before this fix lack productUrl on the
+  // synthesized side cases (none currently — productUrl is set on every row
+  // since the engine added it in 3125). Still defensive — fall back to the
+  // keyword-only key if productUrl is missing so old saved reports load.
   const reportMap = new Map();
   for (const r of state.report) {
     const k = (r.keyword || '').toLowerCase().trim();
-    if (k) reportMap.set(k, r);
+    if (!k) continue;
+    const pu = (r.productUrl || '').trim();
+    reportMap.set(pu ? `${pu}|${k}` : k, r);
   }
   const excludeUrls = new Set(state.doneProducts);
 
