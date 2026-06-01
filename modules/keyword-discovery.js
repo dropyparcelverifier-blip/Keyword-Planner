@@ -3045,29 +3045,37 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         }
       };
 
+      // Composite report key = `${cleanUrl}|${normalizedKeyword}`. Previously
+      // `report` was keyed by keyword alone, which meant that if "aquaphor
+      // diaper rash cream" was discovered for Product A AND for Product B,
+      // the second product would silently merge into Product A's row —
+      // inheriting Product A's image_count (which was matched against
+      // Product A's image, not B's). Result: per-product image counts mixed
+      // across products. Composite keys give every (product, keyword) pair
+      // its own row, its own SERP, and its own image-match calculation.
+      const keyFor = (k) => `${cleanUrl}|${k}`;
+
       const addRow = (keyword, source, parentKeyword, kpMeta) => {
         const key = (keyword || '').toLowerCase().trim();
         if (!key) return null;
+        const compositeKey = keyFor(key);
         // Exact duplicate of a keyword we've already added for this product.
         // Don't re-SERP it, but DO merge: bump frequency + union source.
         if (productKeywordSet.has(key)) {
-          _mergeIntoExisting(report.get(key), source);
+          _mergeIntoExisting(report.get(compositeKey), source);
           return null;
         }
         const sortedKey = _sortedKey(keyword);
         if (sortedKey && productKeywordSortedMap.has(sortedKey)) {
           // Same tokens, different order — merge into the canonical row.
           const canonicalKey = productKeywordSortedMap.get(sortedKey);
-          _mergeIntoExisting(report.get(canonicalKey), source);
+          _mergeIntoExisting(report.get(keyFor(canonicalKey)), source);
           return null;
         }
-        if (report.has(key)) {
-          // Cross-product duplicate (key already in report from a previous
-          // product). Still merge the source so the existing row shows this
-          // additional discovery route.
-          _mergeIntoExisting(report.get(key), source);
-          return null;
-        }
+        // No cross-product duplicate check — each (product, keyword) pair is
+        // independent. Previously this branch existed and silently dropped
+        // Product B's discovery of a keyword Product A had already added,
+        // attributing A's image_count to a row that was meant to describe B.
         if (report.size >= productCap) return null;
         if (isJunkKeyword(keyword)) return null;
         // External quality filter (geo/platform/UI-literal/etc.) if provided
@@ -3197,7 +3205,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             _brandOnly: !!row._brandOnly,
           });
         }
-        report.set(key, row);
+        report.set(compositeKey, row);
         productRows.push(row);
         return row;
       };
@@ -4201,7 +4209,10 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         const pnQuery = (productContext?.fullProductName || productName || '').trim();
         if (pnQuery) {
           const pnKey = pnQuery.toLowerCase();
-          let pnRow = report.get(pnKey);
+          // Composite key — see `keyFor` defined in addRow above. The report
+          // map is now keyed per (product, keyword) pair so multiple SKUs
+          // can share the same headline keyword.
+          let pnRow = report.get(keyFor(pnKey));
           if (!pnRow) {
             pnRow = addRow(pnQuery, 'product_name', '');
           }
