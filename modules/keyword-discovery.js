@@ -1297,12 +1297,31 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
       const highClipConfirms = clipScorePct >= 75;
       const highTextConfirms = (textSim?.score || 0) >= 60;
       const combinedConfirms = clipScorePct >= 65 && (textSim?.score || 0) >= 50;
-      if (brandMentioned && (specConf.confirmed || highClipConfirms || highTextConfirms || combinedConfirms)) {
+      // Anchor-plus-CLIP rescue: when CLIP score is moderate (≥ 65), brand
+      // is present, AND an anchor word (one of our product's identity
+      // words like "baby" or "healing") is present in the SERP text, the
+      // listing is almost certainly our SKU even if the overall text
+      // overlap is low. This catches retailer listings where Google
+      // truncates the snippet ("aquaphor baby" / "babyamore.in aquaphor
+      // baby") and text-similarity comes back at 20-40% but the IMAGE +
+      // brand + anchor combination is unambiguous. Sibling / wrong-form /
+      // brand-mate vetoes still run after this rescue, so a same-brand
+      // sibling SKU with matching anchor (Aquaphor Healing Ointment) is
+      // still vetoed.
+      const anchorPlusClipConfirms = clipScorePct >= 65 && anchorFound;
+      if (brandMentioned && (
+        specConf.confirmed ||
+        highClipConfirms ||
+        highTextConfirms ||
+        combinedConfirms ||
+        anchorPlusClipConfirms
+      )) {
         total = Math.max(0, total - 10);
         isMatch = total >= 55;
         // Tag distinctly when the rescue rode on visual / text / combined
-        // confidence (not spec) so the CSV row makes the source of the
-        // confidence legible. Priority: CLIP-high → text-high → combined.
+        // / anchor confidence (not spec) so the CSV row makes the source
+        // of the confidence legible. Priority order reflects signal
+        // strength: CLIP-high → text-high → combined → anchor+clip.
         if (!specConf.confirmed) {
           if (highClipConfirms) {
             matchQuality = 'partial_clip_high';
@@ -1310,6 +1329,8 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
             matchQuality = 'partial_text_high';
           } else if (combinedConfirms) {
             matchQuality = 'partial_combined';
+          } else if (anchorPlusClipConfirms) {
+            matchQuality = 'partial_anchor_clip';
           }
         }
       } else if (brandMentioned) {
