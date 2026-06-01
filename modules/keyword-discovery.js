@@ -1262,15 +1262,29 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
       const specConf = (typeof productContext.hasSpecConfirmation === 'function')
         ? productContext.hasSpecConfirmation(originalText)
         : { confirmed: false };
-      if (brandMentioned && specConf.confirmed) {
-        // Strong rescue: text uses alt naming (fish oil on bottle) but
-        // brand + at least one spec confirms it's our SKU.
+      // Visual-confidence rescue: when CLIP score is very high (>= 80) the
+      // thumbnail is near-identical to our reference product image. Paired
+      // with brand mention (eliminates random visual lookalikes), this is
+      // enough to confirm WITHOUT explicit text spec — covers the common
+      // Google knowledge_panel / shopping_carousel case where each tile
+      // carries only "amazon.in" / "babyamore.in" as context but the
+      // user can visually verify in incognito that the tile IS our SKU.
+      // Downstream sibling / wrong-form / brand-mate vetoes still gate
+      // this layer, so a same-brand SIBLING thumb won't slip through.
+      const highClipConfirms = clipScorePct >= 80;
+      if (brandMentioned && (specConf.confirmed || highClipConfirms)) {
         total = Math.max(0, total - 10);
         isMatch = total >= 55;
+        // Tag distinctly when the rescue rode on visual confidence (not
+        // text spec) so the CSV row makes the source of the confidence
+        // legible to the user.
+        if (highClipConfirms && !specConf.confirmed) {
+          matchQuality = 'partial_clip_high';
+        }
       } else if (brandMentioned) {
-        // Weak partial: brand present but no spec marker — could be us,
-        // could be a sibling. Tag ambiguous; the breakdown log shows
-        // the case so the user can audit.
+        // Weak partial: brand present, no spec, CLIP not high enough to
+        // visually confirm. Could be us, could be a sibling. Tag ambiguous;
+        // the breakdown log shows the case so the user can audit.
         total = Math.max(0, total - 25);
         isMatch = total >= 55;
         matchQuality = 'ambiguous_brand_match';
@@ -1680,10 +1694,21 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
                 // matchQuality tag below.)
               }
               // Stash the tier on the dCtx so the breakdown log + row
-              // pickup the matchQuality.
+              // pickup the matchQuality. dHash matches are already
+              // visually near-identical to the reference image, so when
+              // brand is also present we treat them as visual-confidence
+              // confirmed even without spec — same logic as the multi-
+              // signal partial_clip_high tier, just sourced from dHash
+              // instead of CLIP cosine.
               if (!vetoReason) {
                 dCtx._identityTier = 'partial';
-                dCtx._matchQuality = specConf.confirmed ? 'partial_spec_confirmed' : 'ambiguous_brand_match';
+                if (specConf.confirmed) {
+                  dCtx._matchQuality = 'partial_spec_confirmed';
+                } else if (brand) {
+                  dCtx._matchQuality = 'partial_clip_high';
+                } else {
+                  dCtx._matchQuality = 'ambiguous_brand_match';
+                }
               }
             }
           }
