@@ -267,16 +267,22 @@ function xlsxDataUrl(rows) {
 // Single-product CSV — used for auto-export when a product's queue empties.
 // Filename intentionally OMITS batchId so a re-export of the same SKU (after
 // a resume that re-processed the product) shares a base name with the
-// previous file. Chrome will auto-suffix "(1)", "(2)" if the file still
-// exists; if the user moved/deleted the previous file, the new one drops
-// in cleanly. Previously the batchId timestamp was part of the filename,
-// which produced visually-distinct files for the same SKU across sessions
-// and made the Downloads folder confusing.
+// previous file. conflictAction: 'overwrite' replaces any existing file
+// with the same name — previously Chrome's default 'uniquify' would suffix
+// "(1)", "(2)" each time, so a Stop-mid-product → Resume run produced two
+// CSVs per SKU in the Downloads folder. With overwrite the most recent run
+// is the only file on disk, which is what "auto-export per product" should
+// mean.
 export async function exportSingleProductCSV(rows, _batchId) {
   if (!rows || rows.length === 0) throw new Error('No rows for this product.');
   const slug = fileSlug(rows[0].sku, rows[0].productName);
   const filename = `${slug}.csv`;
-  await chrome.downloads.download({ url: csvDataUrl(rows), filename, saveAs: false });
+  await chrome.downloads.download({
+    url: csvDataUrl(rows),
+    filename,
+    saveAs: false,
+    conflictAction: 'overwrite',
+  });
   return filename;
 }
 
