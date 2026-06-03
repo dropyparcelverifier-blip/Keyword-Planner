@@ -1328,12 +1328,18 @@ export function checkSiblingProduct(text, productContext) {
   return null;
 }
 
-// Known supplement / health brand list for competitor-brand rejection.
-// When a keyword names one of these brands and that brand isn't ours, the
-// query is shopping for a different brand entirely (or a comparison) and
-// shouldn't burn a SERP load. Substring-matched as whole phrases so
-// "now" alone doesn't trigger "now foods" rejection on our own keywords.
+// Known supplement / health / skincare / baby brand list for competitor-
+// brand rejection. When a keyword names one of these brands and that
+// brand isn't ours, the query is shopping for a different brand entirely
+// (or a comparison) and shouldn't burn a SERP load. Substring-matched as
+// whole phrases so "now" alone doesn't trigger "now foods" rejection on
+// our own keywords. Note: includes our own portfolio (aquaphor, la-roche-
+// posay, listerine, etc.) — checkCompetitorBrand skips our brand at runtime,
+// so listing them here is safe AND useful: if another SKU's run names one
+// of OUR sibling brands, we still want to keep the query (brand-mate gate
+// will catch sibling-SKU specifics).
 const _KNOWN_COMPETITOR_BRANDS = [
+  // Supplement / health
   'now foods', 'now supplements', 'nature made', 'nature\'s bounty', 'natures bounty',
   'nordic naturals', 'garden of life', 'vitabiotics', 'solgar', 'gnc', 'kirkland',
   'swanson', 'life extension', 'doctor\'s best', 'doctors best',
@@ -1341,8 +1347,26 @@ const _KNOWN_COMPETITOR_BRANDS = [
   'optimum nutrition', 'myprotein', 'healthkart', 'oziva', 'wellbeing',
   'centrum', 'seven seas', 'blackmores', 'puritan\'s pride', 'puritans pride',
   'pharmeasy', 'apollo pharmacy', 'wellness forever',
+  // General skincare / face & body
   'cerave', 'cetaphil', 'neutrogena', 'olay', 'l\'oreal', 'loreal',
-  'mamaearth', 'plum', 'wow skin', 'minimalist', 'biotique',
+  'mamaearth', 'plum', 'wow skin', 'minimalist', 'biotique', 'nivea',
+  'dove', 'pond\'s', 'ponds', 'lakme', 'lakmé', 'mac', 'estee lauder',
+  'clinique', 'lancome', 'lancôme', 'shiseido', 'kiehl\'s', 'kiehls',
+  'the body shop', 'the inkey list', 'paula\'s choice', 'paulas choice',
+  'drunk elephant', 'sunday riley', 'glossier', 'fenty',
+  // Baby & diaper care — added after Aquaphor batch surfaced these in
+  // comparison queries (vs desitin / vs vaseline / vs sudocrem etc.)
+  'desitin', 'sudocrem', 'vaseline', 'boudreaux', 'butt paste', 'a+d ointment',
+  'a and d ointment', 'triple paste', 'burt\'s bees', 'burts bees',
+  'weleda', 'mustela', 'pampers', 'huggies', 'mamypoko', 'pigeon',
+  'johnson\'s baby', 'johnsons baby', 'sebamed', 'chicco', 'himalaya baby',
+  'mothercare', 'eucerin', 'bepanthen', 'penaten',
+  // Oral / mouthwash (Listerine portfolio context)
+  'colgate', 'crest', 'oral-b', 'oral b', 'sensodyne', 'parodontax',
+  'closeup', 'close-up', 'pepsodent', 'meswak', 'patanjali dant',
+  // Lip care (ChapStick portfolio context)
+  'burt\'s bees lip', 'eos', 'carmex', 'blistex', 'nivea lip',
+  'maybelline baby lips', 'vaseline lip',
 ];
 const _COMPETITOR_BRAND_RES = _KNOWN_COMPETITOR_BRANDS.map(b => ({
   text: b,

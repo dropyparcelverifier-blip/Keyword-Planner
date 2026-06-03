@@ -504,6 +504,71 @@
     }
     .pc-time-sep { margin: 0 6px; opacity: 0.5; }
 
+    /* Per-product history list under the progress card. Each completed
+       SKU lands as one row so the user can see the breakdown without
+       opening the CSV. */
+    .pc-history-wrap {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+    }
+    .pc-history-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .pc-history-count {
+      background: var(--accent-soft);
+      color: var(--accent);
+      padding: 1px 6px;
+      border-radius: 8px;
+      font-weight: 600;
+    }
+    .pc-history {
+      max-height: 220px;
+      overflow-y: auto;
+      font-size: 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .pc-history-row {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 8px;
+      align-items: center;
+      padding: 6px 8px;
+      background: var(--bg);
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+    .pc-history-row.partial { border-left: 2px solid #f59e0b; }
+    .pc-history-row.done    { border-left: 2px solid #10b981; }
+    .pc-history-status {
+      font-size: 10px;
+      color: var(--muted);
+      width: 14px;
+      text-align: center;
+    }
+    .pc-history-name {
+      color: var(--fg);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .pc-history-stats {
+      display: flex;
+      gap: 6px;
+      font-size: 10px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .pc-history-stats .v { color: var(--fg); font-weight: 600; }
+
     /* ============ Settings tab — grouped sections ============ */
     .settings-group {
       margin: 18px 0 4px;
@@ -874,6 +939,18 @@
           <span id="pcElapsed">0:00</span> elapsed
           <span class="pc-time-sep">·</span>
           <span id="pcRemaining">estimating…</span>
+        </div>
+
+        <!-- Per-product history. Each completed product appends a row here
+             so the user can see the per-SKU breakdown without waiting for
+             the CSV export. The cumulative counters above only show "Total
+             across all products" — this list disaggregates them. -->
+        <div id="pcHistoryWrap" class="pc-history-wrap" style="display:none;">
+          <div class="pc-history-header">
+            <span>Per-product results</span>
+            <span id="pcHistoryCount" class="pc-history-count">0</span>
+          </div>
+          <div id="pcHistory" class="pc-history"></div>
         </div>
       </div>
 
