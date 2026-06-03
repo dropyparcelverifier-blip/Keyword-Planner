@@ -235,6 +235,12 @@ $('startBtn').addEventListener('click', () => {
   syncHeaderState(true);
   $('log').innerHTML = '';
   $('keywordCount').textContent = '0';
+  // Fresh start — reset the per-product history list so we don't show
+  // rows from the previous run. (Resume re-uses this popup session and
+  // history accumulates only while the popup is open, so a Resume that
+  // happens with the popup closed will start fresh too — acceptable.)
+  pcState.productHistory = [];
+  pcRenderHistory();
 
   chrome.runtime.sendMessage(
     { action: 'startDiscovery', products: parsedProducts, ...runOpts },
@@ -465,6 +471,11 @@ const pcState = {
   // counts on every progress message.
   productKwBaseline: 0,
   productKwCount: 0,
+  // Per-product completion history. Each row: { name, status, kwCount,
+  // matchCount, thumbsCount }. Appended when the engine emits a "Product
+  // complete" / "Product PARTIAL" progress action — the cumulative
+  // counters above show the running total, this list disaggregates them.
+  productHistory: [],
 };
 
 function pcResetCountersForNewProduct() {
@@ -546,6 +557,65 @@ function pcDeriveCounters(action) {
   if (/Skipped irrelevant/i.test(action)) pcState.filteredCount++;
 }
 
+// Parse the engine's product-completion lines and append to history.
+// Engine emits (from keyword-discovery.js, line ~4584):
+//   "Product complete (3/23) — 46 new keywords this product (28 with image
+//    matches, 142 total matched thumbs); report total = 87"
+//   "Product PARTIAL (3/23) — 12 new keywords this product (4 with image
+//    matches, 18 total matched thumbs); will re-process on Resume; ..."
+// Append one row per call, render at most once per completion.
+function pcMaybeAppendHistory(productName, action) {
+  if (!action) return;
+  const completeRe = /^Product\s+(complete|PARTIAL)\s*\((\d+)\/(\d+)\)\s*—\s*(\d+)\s+new keywords[^(]*\((\d+)\s+with image matches,\s*(\d+)\s+total matched/i;
+  const m = action.match(completeRe);
+  if (!m) return;
+  const [, kind, , , kwCount, matchCount, thumbsCount] = m;
+  const status = kind.toLowerCase() === 'partial' ? 'partial' : 'done';
+  // De-dupe: if the same product+status already at the tail, skip — engine
+  // can emit the line twice in some resume paths.
+  const tail = pcState.productHistory[pcState.productHistory.length - 1];
+  if (tail && tail.name === productName && tail.status === status) return;
+  pcState.productHistory.push({
+    name: productName || '—',
+    status,
+    kwCount: parseInt(kwCount, 10) || 0,
+    matchCount: parseInt(matchCount, 10) || 0,
+    thumbsCount: parseInt(thumbsCount, 10) || 0,
+  });
+  pcRenderHistory();
+}
+
+function pcRenderHistory() {
+  const wrap = document.getElementById('pcHistoryWrap');
+  const list = document.getElementById('pcHistory');
+  const count = document.getElementById('pcHistoryCount');
+  if (!wrap || !list || !count) return;
+  if (pcState.productHistory.length === 0) {
+    wrap.style.display = 'none';
+    return;
+  }
+  wrap.style.display = 'block';
+  count.textContent = String(pcState.productHistory.length);
+  // Newest first — user wants to see the just-completed product without
+  // scrolling.
+  const rows = pcState.productHistory.slice().reverse().map(h => {
+    const icon = h.status === 'done' ? '✓' : '◐';
+    const safeName = String(h.name).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    return `
+      <div class="pc-history-row ${h.status}">
+        <span class="pc-history-status">${icon}</span>
+        <span class="pc-history-name" title="${safeName}">${safeName}</span>
+        <span class="pc-history-stats">
+          <span><span class="v">${h.kwCount}</span> kw</span>
+          <span><span class="v">${h.matchCount}</span> img</span>
+          <span><span class="v">${h.thumbsCount}</span> thumbs</span>
+        </span>
+      </div>
+    `;
+  }).join('');
+  list.innerHTML = rows;
+}
+
 function pcUpdate(p) {
   const card = document.getElementById('progressCard');
   if (!card) return;
@@ -581,6 +651,11 @@ function pcUpdate(p) {
 
   // Derive cumulative counters from the action text.
   pcDeriveCounters(p.currentAction);
+
+  // Append a row to the per-product history list when the engine reports
+  // a product as complete or partial. The list lives below the counters
+  // and disaggregates the cumulative totals.
+  pcMaybeAppendHistory(productKey, p.currentAction);
 
   // Stage-specific detail lines.
   if (p.currentSource === 'kp' && typeof p.currentAction === 'string') {
