@@ -1072,7 +1072,43 @@
   <!-- ─────── Manager tab — distributed multi-PC mode ─────── -->
   <div class="panel" id="panel-manager">
 
+    <!-- Role selector. Determines which sections of this tab are visible
+         so each PC sees only the controls relevant to its job. Stored in
+         localStorage so the choice sticks per-PC. -->
     <div class="settings-group">
+      <div class="settings-group-title">This PC's role</div>
+      <div class="section" style="display:flex; gap:6px;">
+        <button class="secondary mgr-role-btn" data-role="manager" id="mgrRoleManager">Manager only</button>
+        <button class="secondary mgr-role-btn" data-role="worker"  id="mgrRoleWorker">Worker only</button>
+        <button class="secondary mgr-role-btn" data-role="both"    id="mgrRoleBoth">Both</button>
+      </div>
+      <div class="hint" style="margin-top:6px;">
+        <strong>Manager</strong> uploads the product list once and watches batch progress.
+        <strong>Worker</strong> claims chunks from the queue and runs them.
+        <strong>Both</strong> for single-PC test or the PC that doubles up.
+      </div>
+    </div>
+
+    <!-- Inline Supabase credentials. Hidden once both are set so it
+         doesn't visually clutter day-to-day use. Same storage keys as
+         the Settings tab, so saving here also unlocks Push to AdBrain. -->
+    <div class="settings-group" id="mgrCredsCard">
+      <div class="settings-group-title">Connection (first-time only)</div>
+      <div class="hint" id="mgrCredsStatus" style="margin-bottom:8px;">Checking…</div>
+      <div class="section">
+        <label class="label">Supabase project URL</label>
+        <input type="text" id="mgrSupabaseUrl" placeholder="https://xxxxx.supabase.co" />
+      </div>
+      <div class="section">
+        <label class="label">service_role key</label>
+        <input type="password" id="mgrServiceKey" placeholder="eyJhbGc..." />
+        <div class="hint">Stored locally in this PC's <code>chrome.storage</code>. Used by every queue call AND by Push-to-AdBrain.</div>
+      </div>
+      <button id="mgrSaveCredsBtn">Save credentials</button>
+      <div id="mgrSaveCredsResult" class="hint" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="settings-group mgr-role-section" data-show-when="manager,both">
       <div class="settings-group-title">Step 1 — Upload products (manager only)</div>
       <div class="section">
         <label class="label">Product file to upload to the shared queue</label>
@@ -1089,7 +1125,7 @@
       <div id="mgrUploadResult" class="hint" style="margin-top:8px;"></div>
     </div>
 
-    <div class="settings-group">
+    <div class="settings-group mgr-role-section" data-show-when="manager,worker,both">
       <div class="settings-group-title">Step 2 — Live status</div>
       <div class="section">
         <button class="secondary" id="mgrRefreshBtn">Refresh now</button>
@@ -1104,7 +1140,7 @@
       </div>
     </div>
 
-    <div class="settings-group">
+    <div class="settings-group mgr-role-section" data-show-when="worker,both">
       <div class="settings-group-title">Step 3 — Claim work on THIS PC</div>
       <div class="section">
         <label class="label">Worker ID for this PC</label>
@@ -1122,6 +1158,21 @@
       </div>
       <button id="mgrClaimBtn">Claim &amp; start on this PC</button>
       <div id="mgrClaimResult" class="hint" style="margin-top:8px;"></div>
+    </div>
+
+    <!-- Centralized CSV download. Pulls every row for a batch from
+         Supabase and generates per-SKU CSVs locally on THIS PC so the
+         manager doesn't have to collect files from each worker's
+         Downloads folder. Shown to manager + both. -->
+    <div class="settings-group mgr-role-section" data-show-when="manager,both">
+      <div class="settings-group-title">Step 4 — Download all CSVs (manager)</div>
+      <div class="section">
+        <label class="label">Batch to download</label>
+        <input type="text" id="mgrDownloadBatchId" placeholder="paste a Batch ID from the status above" />
+        <div class="hint">Pulls every row in <code>adbrain_discovered_keywords</code> with that batch_id from Supabase, then generates one CSV per SKU locally. Runs on THIS PC even if other workers processed the products.</div>
+      </div>
+      <button id="mgrDownloadBtn">Download all CSVs from Supabase</button>
+      <div id="mgrDownloadResult" class="hint" style="margin-top:8px;"></div>
     </div>
   </div>
 

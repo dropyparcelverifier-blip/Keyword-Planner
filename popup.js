@@ -1149,6 +1149,78 @@ let rtRefreshTimer = null;
 // doesn't overwrite the local-mode parsedProducts on the Run tab.
 let mgrParsedProducts = [];
 
+// Role toggle — Manager / Worker / Both. Hides sections that aren't
+// relevant to the chosen role so each PC sees a focused UI. Persisted
+// in localStorage so the choice sticks per-PC across popup opens.
+const MGR_ROLE_KEY = 'adbrainMgrRole';
+function mgrApplyRole(role) {
+  if (!['manager', 'worker', 'both'].includes(role)) role = 'both';
+  localStorage.setItem(MGR_ROLE_KEY, role);
+  document.querySelectorAll('.mgr-role-btn').forEach(b => {
+    b.classList.toggle('primary', b.dataset.role === role);
+    b.classList.toggle('secondary', b.dataset.role !== role);
+  });
+  document.querySelectorAll('.mgr-role-section').forEach(s => {
+    const allowed = String(s.dataset.showWhen || '').split(',').map(x => x.trim());
+    s.style.display = allowed.includes(role) ? '' : 'none';
+  });
+}
+document.querySelectorAll('.mgr-role-btn').forEach(b => {
+  b.addEventListener('click', () => mgrApplyRole(b.dataset.role));
+});
+mgrApplyRole(localStorage.getItem(MGR_ROLE_KEY) || 'both');
+
+// Inline credentials card. Hides when both serviceKey + supabaseUrl
+// are populated so daily use isn't visually cluttered. First-time
+// setup happens here without a Settings-tab detour.
+function mgrCheckCreds() {
+  chrome.runtime.sendMessage({ action: 'jobs:credsStatus' }, (resp) => {
+    if (!resp?.ok) return;
+    const card = $('mgrCredsCard');
+    const status = $('mgrCredsStatus');
+    const haveAll = resp.hasServiceKey && resp.hasSupabaseUrl;
+    if (haveAll) {
+      // Compress the card into a one-line confirmation when set, but
+      // keep it editable in case the user wants to change keys later.
+      if (card) card.style.display = 'none';
+      if (status) status.textContent = '';
+      return;
+    }
+    if (card) card.style.display = '';
+    if (status) {
+      const missing = [];
+      if (!resp.hasSupabaseUrl) missing.push('Supabase URL');
+      if (!resp.hasServiceKey)  missing.push('service_role key');
+      status.textContent = `Missing: ${missing.join(' + ')}. Paste them below.`;
+      status.style.color = 'var(--warn)';
+    }
+    if (resp.supabaseUrl && $('mgrSupabaseUrl') && !$('mgrSupabaseUrl').value) {
+      $('mgrSupabaseUrl').value = resp.supabaseUrl;
+    }
+  });
+}
+
+$('mgrSaveCredsBtn')?.addEventListener('click', () => {
+  const url = $('mgrSupabaseUrl').value.trim();
+  const key = $('mgrServiceKey').value.trim();
+  if (!url || !key) {
+    $('mgrSaveCredsResult').textContent = 'Both fields required.';
+    $('mgrSaveCredsResult').style.color = 'var(--danger)';
+    return;
+  }
+  chrome.runtime.sendMessage({ action: 'jobs:saveCreds', supabaseUrl: url, serviceKey: key }, (resp) => {
+    if (!resp?.ok) {
+      $('mgrSaveCredsResult').textContent = `Save failed: ${resp?.error || 'unknown'}`;
+      $('mgrSaveCredsResult').style.color = 'var(--danger)';
+      return;
+    }
+    $('mgrSaveCredsResult').textContent = '✓ Saved. Settings tab also reflects these values.';
+    $('mgrSaveCredsResult').style.color = 'var(--success)';
+    $('mgrServiceKey').value = ''; // wipe from DOM so it doesn't lurk
+    mgrCheckCreds();
+  });
+});
+
 function _mgrParseRow(row) {
   let urlVal = '', priVal = '', skuVal = '', handlesVal = '', brandVal = '';
   for (const k of Object.keys(row)) {
@@ -1342,17 +1414,60 @@ $('mgrClaimBtn')?.addEventListener('click', () => {
   );
 });
 
-// Auto-refresh summary every 30s while the Manager panel is visible.
+// Centralised CSV download — pull every row for a batch from Supabase
+// and generate per-SKU CSVs locally. Cures the "CSVs scattered across
+// workers' Downloads folders" problem.
+$('mgrDownloadBtn')?.addEventListener('click', () => {
+  const batchId = $('mgrDownloadBatchId').value.trim()
+    || $('mgrClaimBatchId').value.trim()
+    || $('mgrBatchId').value.trim();
+  if (!batchId) {
+    $('mgrDownloadResult').textContent = 'Paste a Batch ID to download.';
+    $('mgrDownloadResult').style.color = 'var(--danger)';
+    return;
+  }
+  $('mgrDownloadBtn').disabled = true;
+  $('mgrDownloadResult').textContent = 'Fetching from Supabase…';
+  $('mgrDownloadResult').style.color = 'var(--muted)';
+  chrome.runtime.sendMessage(
+    { action: 'jobs:downloadBatchCsvs', batchId },
+    (resp) => {
+      $('mgrDownloadBtn').disabled = false;
+      if (!resp?.ok) {
+        $('mgrDownloadResult').textContent = `Download failed: ${resp?.error || 'unknown'}`;
+        $('mgrDownloadResult').style.color = 'var(--danger)';
+        return;
+      }
+      if (resp.count === 0) {
+        $('mgrDownloadResult').textContent = 'No rows in this batch yet — workers haven\'t pushed anything.';
+        $('mgrDownloadResult').style.color = 'var(--warn)';
+        return;
+      }
+      $('mgrDownloadResult').textContent =
+        `✓ Downloaded ${resp.count} CSV(s) (${resp.rows} rows) for batch "${batchId}" to this PC's Downloads folder.`;
+      $('mgrDownloadResult').style.color = 'var(--success)';
+    }
+  );
+});
+
+// Auto-refresh summary every 30s while the Manager panel is visible,
+// and run the creds check + role apply on tab open so worker PCs see a
+// clean focused UI immediately.
 let mgrAutoRefresh = null;
 document.querySelectorAll('.tab').forEach(tab => {
   tab.addEventListener('click', () => {
     if (mgrAutoRefresh) { clearInterval(mgrAutoRefresh); mgrAutoRefresh = null; }
     if (tab.dataset.tab === 'manager') {
+      mgrCheckCreds();
+      mgrApplyRole(localStorage.getItem(MGR_ROLE_KEY) || 'both');
       mgrRefreshSummary();
       mgrAutoRefresh = setInterval(mgrRefreshSummary, 30000);
     }
   });
 });
+// Also run a creds check on popup open so the warning shows immediately
+// if this is a fresh PC install.
+mgrCheckCreds();
 
 // Hydrate worker ID on popup open so it persists across sessions.
 chrome.storage.local.get(['adbrainWorkerId'], (data) => {

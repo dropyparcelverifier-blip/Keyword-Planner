@@ -12,7 +12,12 @@ import {
   releaseStaleJobs,
   getJobSummary,
   getActiveWorkers,
+  fetchBatchReportFromSupabase,
 } from './modules/discovery-jobs.js';
+import {
+  STORAGE_KEY_SERVICE_KEY,
+  STORAGE_KEY_SUPABASE_URL,
+} from './config/discovery-config.js';
 import {
   shouldKeepKeyword,
   categorizeKeyword,
@@ -890,6 +895,69 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
+  // Manager UI — pull every row for a batch back from Supabase and
+  // generate the per-SKU CSVs locally on THIS PC. Solves the "CSVs are
+  // scattered across worker PCs' Downloads folders" problem — manager
+  // runs this once, gets one .csv per SKU for the entire batch.
+  if (action === 'jobs:downloadBatchCsvs') {
+    (async () => {
+      try {
+        const batchId = String(msg.batchId || '').trim();
+        if (!batchId) throw new Error('Batch ID required.');
+        emitProgress({ currentAction: `Fetching report rows for batch "${batchId}" from Supabase…`, logKind: 'ok' });
+        const report = await fetchBatchReportFromSupabase(batchId, (p) => {
+          emitProgress({ currentAction: `Fetched ${p.fetched} row(s)…`, logKind: 'ok' });
+        });
+        if (report.length === 0) {
+          sendResponse({ ok: true, filenames: [], count: 0, message: 'no rows in batch' });
+          return;
+        }
+        emitProgress({ currentAction: `Generating CSVs from ${report.length} rows…`, logKind: 'ok' });
+        const filenames = await toCSV(report, batchId);
+        emitProgress({ currentAction: `✓ Downloaded ${filenames.length} CSV(s) for batch "${batchId}".`, logKind: 'ok' });
+        sendResponse({ ok: true, filenames, count: filenames.length, rows: report.length });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message });
+      }
+    })();
+    return true;
+  }
+  // Manager UI — credentials check + inline save so worker PCs don't
+  // have to navigate to the Settings tab. Mirrors the same storage keys
+  // the Settings tab writes to.
+  if (action === 'jobs:credsStatus') {
+    (async () => {
+      const data = await chrome.storage.local.get([STORAGE_KEY_SERVICE_KEY, STORAGE_KEY_SUPABASE_URL]);
+      const key = (data[STORAGE_KEY_SERVICE_KEY] || '').trim();
+      const url = (data[STORAGE_KEY_SUPABASE_URL] || '').trim();
+      sendResponse({
+        ok: true,
+        hasServiceKey: key.length > 20,
+        hasSupabaseUrl: url.length > 8 && !url.includes('YOUR-ADBRAIN-PROJECT'),
+        supabaseUrl: url,
+      });
+    })();
+    return true;
+  }
+  if (action === 'jobs:saveCreds') {
+    (async () => {
+      const updates = {};
+      if (typeof msg.serviceKey === 'string' && msg.serviceKey.trim()) {
+        updates[STORAGE_KEY_SERVICE_KEY] = msg.serviceKey.trim();
+      }
+      if (typeof msg.supabaseUrl === 'string' && msg.supabaseUrl.trim()) {
+        updates[STORAGE_KEY_SUPABASE_URL] = msg.supabaseUrl.trim().replace(/\/+$/, '');
+      }
+      if (Object.keys(updates).length === 0) {
+        sendResponse({ ok: false, error: 'nothing to save' });
+        return;
+      }
+      await chrome.storage.local.set(updates);
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
   // Settings tab — set/get this worker's identity.
   if (action === 'jobs:setWorkerId') {
     (async () => {
