@@ -2511,7 +2511,16 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           logKind: 'err',
         });
         productsDone++;
-        await onProductDone(cleanUrl);
+        // Distributed mode: mark this job as FAILED rather than DONE.
+        // Marking aborts as "done" silently buried real failures so the
+        // dashboard's failed-jobs panel was always empty even when the
+        // engine couldn't process products. onProductFailed gets a
+        // reason string so the manager can see why each one died.
+        if (typeof opts.onProductFailed === 'function') {
+          await opts.onProductFailed(cleanUrl, 'no_product_image');
+        } else {
+          await onProductDone(cleanUrl);
+        }
         continue;
       }
 
