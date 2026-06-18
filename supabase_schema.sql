@@ -229,3 +229,4 @@ from public.adbrain_discovery_jobs
 group by batch_id
 order by batch_id desc;
 
+
