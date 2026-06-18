@@ -41,29 +41,34 @@
       min-height: 100vh;
     }
     header {
-      padding: 12px 16px;
+      padding: 9px 14px;
       border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
+      gap: 10px;
       background: linear-gradient(180deg, var(--bg-elev), var(--bg));
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      backdrop-filter: saturate(150%);
     }
     header h1 {
-      font-size: 15px;
+      font-size: 13px;
       margin: 0;
-      letter-spacing: 0.3px;
+      letter-spacing: 0.2px;
       font-weight: 600;
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 7px;
     }
     header h1::before {
       content: '';
-      width: 8px; height: 8px;
+      width: 7px; height: 7px;
       border-radius: 50%;
       background: var(--muted);
       display: inline-block;
+      flex-shrink: 0;
     }
     body[data-state="running"] header h1::before {
       background: var(--accent);
@@ -82,23 +87,24 @@
       0%, 100% { box-shadow: 0 0 0 3px var(--accent-soft); }
       50%      { box-shadow: 0 0 0 6px var(--accent-soft); }
     }
-    header .sub { font-size: 11px; color: var(--muted); }
+    header .sub { font-size: 10px; color: var(--muted); }
     .header-right {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
     }
     .header-status {
       font-size: 10px;
       color: var(--muted-strong);
-      padding: 3px 8px;
+      padding: 2px 8px;
       border-radius: 999px;
       background: var(--panel);
       border: 1px solid var(--border);
-      max-width: 200px;
+      max-width: 180px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      font-weight: 500;
     }
     body[data-state="running"] .header-status {
       color: var(--accent-hover); border-color: var(--accent); background: var(--accent-soft);
@@ -113,41 +119,46 @@
       display: flex;
       border-bottom: 1px solid var(--border);
       background: var(--bg-elev);
-      padding: 0 8px;
+      padding: 0 6px;
+      position: sticky;
+      top: 41px;  /* below the sticky header (45px height) */
+      z-index: 29;
     }
     .tab {
       flex: 1;
-      padding: 11px 8px;
+      padding: 9px 8px;
       text-align: center;
       cursor: pointer;
-      font-size: 12px;
-      font-weight: 500;
+      font-size: 11px;
+      font-weight: 600;
       color: var(--muted);
       border-bottom: 2px solid transparent;
-      transition: color 0.15s, border-color 0.15s;
+      transition: color 0.12s, border-color 0.12s, background 0.12s;
+      letter-spacing: 0.2px;
     }
-    .tab:hover { color: var(--muted-strong); }
+    .tab:hover { color: var(--muted-strong); background: rgba(255,255,255,0.02); }
     .tab.active {
-      color: var(--text);
+      color: var(--accent);
       border-bottom-color: var(--accent);
     }
-    .panel { padding: 14px 16px; display: none; }
+    .panel { padding: 10px 12px; display: none; }
     .panel.active { display: block; }
-    .section { margin-bottom: 14px; }
+    .section { margin-bottom: 10px; }
     .label {
       display: block;
-      font-size: 11px;
+      font-size: 10px;
       color: var(--muted);
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      margin-bottom: 6px;
+      margin-bottom: 4px;
+      font-weight: 600;
     }
     input[type="file"], input[type="text"], input[type="password"], input[type="number"] {
       width: 100%;
-      padding: 9px 11px;
+      padding: 7px 10px;
       background: var(--bg-elev);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: 5px;
       color: var(--text);
       font-size: 12px;
       font-family: inherit;
@@ -156,14 +167,14 @@
     input:focus {
       outline: none;
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px var(--accent-soft);
+      box-shadow: 0 0 0 2px var(--accent-soft);
     }
     button {
-      padding: 9px 14px;
+      padding: 7px 12px;
       background: var(--accent);
       color: white;
       border: none;
-      border-radius: 6px;
+      border-radius: 5px;
       cursor: pointer;
       font-weight: 500;
       font-size: 12px;
@@ -189,30 +200,34 @@
     .role-banner {
       display: flex;
       align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;          /* let it stack on narrow side-panel widths */
-      padding: 8px 12px;
-      margin: 8px 0;
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      box-shadow: var(--shadow-md);
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 6px 12px;
+      margin: 0;
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      border-radius: 0;
+      box-shadow: none;
+      position: sticky;
+      top: 81px;  /* below header(45) + tabs(36) */
+      z-index: 28;
     }
     .role-banner-label {
-      font-size: 11px;
+      font-size: 9px;
       color: var(--muted);
       text-transform: uppercase;
-      letter-spacing: 0.4px;
+      letter-spacing: 0.6px;
       flex-shrink: 0;
+      font-weight: 600;
     }
-    .role-banner-btns { display: flex; gap: 4px; flex-shrink: 0; }
+    .role-banner-btns { display: flex; gap: 3px; flex-shrink: 0; background: var(--bg); padding: 2px; border-radius: 6px; border: 1px solid var(--border); }
     .role-btn {
-      padding: 6px 12px;
-      font-size: 12px;
-      font-weight: 500;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      background: var(--bg);
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: 4px;
+      border: 1px solid transparent;
+      background: transparent;
       color: var(--muted);
       cursor: pointer;
       box-shadow: none;
@@ -224,7 +239,7 @@
       border-color: var(--accent);
     }
     .role-banner-hint {
-      font-size: 11px;
+      font-size: 10px;
       color: var(--muted);
       margin-left: auto;
       font-style: italic;
@@ -747,8 +762,8 @@
     .log-line { margin-bottom: 2px; word-break: break-word; }
     .log-line.err { color: var(--danger); }
     .log-line.ok  { color: var(--success); }
-    .hint { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
-    .file-info { margin-top: 6px; font-size: 11px; color: var(--success); }
+    .hint { font-size: 10px; color: var(--muted); margin-top: 4px; line-height: 1.45; }
+    .file-info { margin-top: 4px; font-size: 10px; color: var(--success); }
     .source-pill {
       display: inline-block; padding: 1px 6px; border-radius: 9px;
       background: var(--border); color: var(--text);
@@ -1029,15 +1044,15 @@
 
     /* ============ Settings tab — grouped sections ============ */
     .settings-group {
-      margin: 18px 0 4px;
-      padding: 8px 12px 6px;
+      margin: 12px 0 3px;
+      padding: 5px 10px 4px;
       border-left: 2px solid var(--accent);
-      background: linear-gradient(90deg, rgba(79,140,255,0.08), transparent 60%);
-      border-radius: 0 6px 6px 0;
+      background: linear-gradient(90deg, rgba(79,140,255,0.07), transparent 60%);
+      border-radius: 0 5px 5px 0;
     }
     .settings-group-title {
-      font-size: 11px;
-      font-weight: 600;
+      font-size: 10px;
+      font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.6px;
       color: var(--accent-hover);
@@ -1046,7 +1061,8 @@
     .settings-group-sub {
       font-size: 10px;
       color: var(--muted);
-      margin-top: 2px;
+      margin-top: 1px;
+      line-height: 1.35;
     }
 
     /* The CLIP-threshold control gets its own emphasis — it's the biggest
