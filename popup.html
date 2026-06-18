@@ -1252,7 +1252,11 @@
     <div class="tab"        data-tab="run"      data-show-when="both">Local run</div>
     <div class="tab active" data-tab="queue"    data-show-when="manager,worker,both">Queue</div>
     <div class="tab"        data-tab="results"  data-show-when="manager,worker,both">Results</div>
-    <div class="tab"        data-tab="settings" data-show-when="manager,worker,both">Settings</div>
+    <!-- Settings hidden from Worker role — workers don't configure
+         pacing, KP URL, match profile, etc. The manager controls
+         everything and pushes it via the setup code or the worker-
+         commands bus. Worker only needs to set Worker ID + Connect. -->
+    <div class="tab"        data-tab="settings" data-show-when="manager,both">Settings</div>
   </div>
 
   <div class="panel" id="panel-run">
@@ -1529,7 +1533,7 @@
     <!-- Inline Supabase credentials. Same storage keys as the Settings
          tab, so saving here also unlocks Push to AdBrain. Card stays
          visible so managers can always re-generate setup codes for
-         new workers. -->
+         new workers. Workers see ONLY the "Apply setup code" half. -->
     <div class="queue-card" id="mgrCredsCard">
       <div class="queue-card-head">
         <span class="queue-card-icon">🔌</span>
@@ -1538,17 +1542,21 @@
           <div class="queue-card-sub" id="mgrCredsStatus">Checking…</div>
         </div>
       </div>
-      <div class="qc-row">
-        <label class="label">Supabase project URL</label>
-        <input type="text" id="mgrSupabaseUrl" placeholder="https://xxxxx.supabase.co" />
-      </div>
-      <div class="qc-row">
-        <label class="label">service_role key</label>
-        <input type="password" id="mgrServiceKey" placeholder="eyJhbGc..." />
-        <div class="hint">Stored locally in this PC's <code>chrome.storage</code>. Used by every queue call AND by Push-to-AdBrain.</div>
-      </div>
-      <div class="queue-card-action">
-        <button id="mgrSaveCredsBtn">Save credentials</button>
+      <!-- Manual URL + key entry — Manager / Both only. Workers apply
+           a setup code from the manager instead (see card below). -->
+      <div data-show-when="manager,both">
+        <div class="qc-row">
+          <label class="label">Supabase project URL</label>
+          <input type="text" id="mgrSupabaseUrl" placeholder="https://xxxxx.supabase.co" />
+        </div>
+        <div class="qc-row">
+          <label class="label">service_role key</label>
+          <input type="password" id="mgrServiceKey" placeholder="eyJhbGc..." />
+          <div class="hint">Stored locally in this PC's <code>chrome.storage</code>. Used by every queue call AND by Push-to-AdBrain.</div>
+        </div>
+        <div class="queue-card-action">
+          <button id="mgrSaveCredsBtn">Save credentials</button>
+        </div>
       </div>
       <div id="mgrSaveCredsResult" class="queue-card-result"></div>
 
@@ -1646,9 +1654,12 @@
       </div>
     </div>
 
-    <!-- Live status: visible to everyone. Manager + worker both want to
-         see the batch's progress and who's working on what. -->
-    <div class="queue-card" data-show-when="manager,worker,both">
+    <!-- Live batch status: Manager + Both only. Workers don't need the
+         full batch-progress view here — they have their own per-PC
+         live status inside the auto-connect card below, and the
+         Dashboard provides the fleet view. Keeping this off the
+         worker UI keeps it focused on the worker's own job. -->
+    <div class="queue-card" data-show-when="manager,both">
       <div class="queue-card-head">
         <span class="queue-card-icon">📊</span>
         <div class="queue-card-title-wrap">

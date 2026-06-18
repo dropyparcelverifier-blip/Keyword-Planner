@@ -1312,7 +1312,8 @@ $('mgrApplySetupBtn')?.addEventListener('click', () => {
   if (!raw) { setQResult(r, 'Paste the setup code first.', 'error'); return; }
   chrome.runtime.sendMessage({ action: 'jobs:importSetupCode', code: raw }, (resp) => {
     if (!resp?.ok) { setQResult(r, `Apply failed: ${resp?.error || 'invalid code'}`, 'error'); return; }
-    setQResult(r, '✓ Setup applied. You can now claim jobs from the queue.', 'success');
+    const kpNote = resp.applied?.kpUrl ? ' Keyword Planner URL also configured.' : '';
+    setQResult(r, `✓ Setup applied — Supabase connected.${kpNote} You can now click Connect & start working.`, 'success');
     $('mgrApplySetupCode').value = '';
     mgrCheckCreds();
   });

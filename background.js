@@ -28,6 +28,7 @@ import {
 import {
   STORAGE_KEY_SERVICE_KEY,
   STORAGE_KEY_SUPABASE_URL,
+  STORAGE_KEY_KP_URL,
 } from './config/discovery-config.js';
 import {
   shouldKeepKeyword,
@@ -1436,19 +1437,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // share it only over encrypted channels (warning shown in the UI).
   if (action === 'jobs:exportSetupCode') {
     (async () => {
-      const data = await chrome.storage.local.get([STORAGE_KEY_SERVICE_KEY, STORAGE_KEY_SUPABASE_URL]);
+      const data = await chrome.storage.local.get([
+        STORAGE_KEY_SERVICE_KEY,
+        STORAGE_KEY_SUPABASE_URL,
+        STORAGE_KEY_KP_URL,
+      ]);
       const url = (data[STORAGE_KEY_SUPABASE_URL] || '').trim();
       const key = (data[STORAGE_KEY_SERVICE_KEY] || '').trim();
+      const kpUrl = (data[STORAGE_KEY_KP_URL] || '').trim();
       if (!url || !key || url.includes('YOUR-ADBRAIN-PROJECT')) {
         sendResponse({ ok: false, error: 'Save Supabase URL + service_role key first.' });
         return;
       }
       // Encode as `adb1:<base64>` so future versions can use a different
       // prefix to identify the format. JSON wrapper carries a version
-      // field for forward-compat too.
-      const payload = JSON.stringify({ v: 1, url, key });
+      // field for forward-compat too. v=2 adds kpUrl so workers also
+      // get the manager's Google Ads Keyword Planner URL pre-filled —
+      // without it, workers can't run KP scrapes.
+      const payload = JSON.stringify({ v: 2, url, key, kpUrl });
       const b64 = btoa(unescape(encodeURIComponent(payload)));
-      sendResponse({ ok: true, code: `adb1:${b64}` });
+      sendResponse({
+        ok: true,
+        code: `adb1:${b64}`,
+        includes: { kpUrl: !!kpUrl },
+      });
     })();
     return true;
   }
@@ -1466,7 +1478,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } catch {
           throw new Error('Could not decode setup code — paste the exact string the manager generated.');
         }
-        if (!payload || payload.v !== 1 || !payload.url || !payload.key) {
+        // Accept v=1 (URL + key only) and v=2 (also kpUrl). Reject
+        // unknown versions so old workers don't silently apply garbage.
+        if (!payload || (payload.v !== 1 && payload.v !== 2) || !payload.url || !payload.key) {
           throw new Error('Setup code is missing required fields.');
         }
         // Re-use the same URL-normalisation as jobs:saveCreds so a code
@@ -1478,11 +1492,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } catch {
           normalized = String(payload.url).replace(/\/+$/, '').replace(/^(https?:\/\/[^/]+)\/.*$/, '$1');
         }
-        await chrome.storage.local.set({
+        const updates = {
           [STORAGE_KEY_SUPABASE_URL]: normalized,
           [STORAGE_KEY_SERVICE_KEY]:  String(payload.key).trim(),
-        });
-        sendResponse({ ok: true });
+        };
+        // v=2: bring the manager's KP URL along too, so workers don't
+        // have to navigate to Settings → Keyword Planner to paste it.
+        // Without a KP URL the engine can't run KP scrapes — every
+        // worker NEEDS this. Empty kpUrl in the code is OK (manager
+        // hadn't saved one yet); we just leave the worker's existing
+        // KP URL untouched in that case.
+        if (payload.v >= 2 && payload.kpUrl) {
+          updates[STORAGE_KEY_KP_URL] = String(payload.kpUrl).trim();
+        }
+        await chrome.storage.local.set(updates);
+        sendResponse({ ok: true, applied: { kpUrl: !!updates[STORAGE_KEY_KP_URL] } });
       } catch (e) {
         sendResponse({ ok: false, error: e.message });
       }
