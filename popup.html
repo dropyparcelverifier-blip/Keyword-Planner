@@ -801,6 +801,7 @@
   <div class="tabs">
     <div class="tab active" data-tab="run">Run</div>
     <div class="tab" data-tab="results">Results</div>
+    <div class="tab" data-tab="manager">Manager</div>
     <div class="tab" data-tab="settings">Settings</div>
   </div>
 
@@ -1065,6 +1066,62 @@
       <button class="rt-detail-close" id="rtDetailClose">×</button>
       <div class="rt-detail-keyword" id="rtDetailKeyword">—</div>
       <div class="rt-detail-grid" id="rtDetailGrid"></div>
+    </div>
+  </div>
+
+  <!-- ─────── Manager tab — distributed multi-PC mode ─────── -->
+  <div class="panel" id="panel-manager">
+
+    <div class="settings-group">
+      <div class="settings-group-title">Step 1 — Upload products (manager only)</div>
+      <div class="section">
+        <label class="label">Product file to upload to the shared queue</label>
+        <input type="file" id="mgrFileInput" accept=".csv,.xlsx,.xls" />
+        <div class="file-info" id="mgrFileInfo">No file selected.</div>
+        <div class="hint">Same format as the Run tab's product file. The list will be inserted into <code>adbrain_discovery_jobs</code> with status=pending so worker PCs can claim chunks.</div>
+      </div>
+      <div class="section">
+        <label class="label">Batch ID (workers will claim from this batch)</label>
+        <input type="text" id="mgrBatchId" placeholder="auto-generate from timestamp" />
+        <div class="hint">Leave blank to auto-generate. Re-uploading the same Batch ID is idempotent — duplicates are merged, not re-inserted.</div>
+      </div>
+      <button id="mgrUploadBtn" disabled>Upload to manager queue</button>
+      <div id="mgrUploadResult" class="hint" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="settings-group">
+      <div class="settings-group-title">Step 2 — Live status</div>
+      <div class="section">
+        <button class="secondary" id="mgrRefreshBtn">Refresh now</button>
+        <span class="hint" style="margin-left:8px;">Auto-refreshes every 30s while this tab is open.</span>
+      </div>
+      <div id="mgrSummary" style="margin-top:10px; font-size: 12px;">Click "Refresh now" to load.</div>
+      <div id="mgrWorkers" style="margin-top:10px; font-size: 12px;"></div>
+      <div class="section" style="margin-top:14px;">
+        <button class="secondary" id="mgrReleaseBtn">Release stale claims (&gt; 10 min idle)</button>
+        <div class="hint" style="margin-top:6px;">Releases any worker's claim that hasn't heartbeated in 10+ min. Distributed cleanup — also runs automatically before every claim.</div>
+        <div id="mgrReleaseResult" class="hint" style="margin-top:6px;"></div>
+      </div>
+    </div>
+
+    <div class="settings-group">
+      <div class="settings-group-title">Step 3 — Claim work on THIS PC</div>
+      <div class="section">
+        <label class="label">Worker ID for this PC</label>
+        <input type="text" id="mgrWorkerId" placeholder="e.g. PC-A, Office, Home" />
+        <div class="hint">Persisted in <code>chrome.storage</code>. Must be unique across your PCs so heartbeats / claims don't collide.</div>
+      </div>
+      <div class="section">
+        <label class="label">Batch to pull from</label>
+        <input type="text" id="mgrClaimBatchId" placeholder="paste a Batch ID from the status above" />
+      </div>
+      <div class="section">
+        <label class="label">Chunk size (jobs per claim)</label>
+        <input type="number" id="mgrChunkSize" value="5" min="1" max="50" />
+        <div class="hint">When this PC finishes its chunk, click "Claim more" again for the next chunk. 5 is a balanced default for &lt; 10 PCs.</div>
+      </div>
+      <button id="mgrClaimBtn">Claim &amp; start on this PC</button>
+      <div id="mgrClaimResult" class="hint" style="margin-top:8px;"></div>
     </div>
   </div>
 

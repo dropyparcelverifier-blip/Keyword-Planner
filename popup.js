@@ -1140,3 +1140,224 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 let rtRefreshTimer = null;
+
+// ─────────────────────────────────────────────────────────────────
+// Manager tab — distributed multi-PC mode
+// ─────────────────────────────────────────────────────────────────
+// File parsing is identical to the Run tab's fileInput handler — but we
+// keep a separate buffer (mgrParsedProducts) so loading a queue file
+// doesn't overwrite the local-mode parsedProducts on the Run tab.
+let mgrParsedProducts = [];
+
+function _mgrParseRow(row) {
+  let urlVal = '', priVal = '', skuVal = '', handlesVal = '', brandVal = '';
+  for (const k of Object.keys(row)) {
+    const kl = k.toLowerCase().trim();
+    if (kl === 'product url' || kl === 'producturl' || kl === 'url') urlVal = String(row[k]).trim();
+    if (kl === 'priority' || kl === 'priroty' || kl === 'prioty' || kl === 'priorty' || kl === 'rank' || kl === 'order') priVal = String(row[k]).trim();
+    if (!brandVal && (kl === 'brand' || kl === 'brands' || kl === 'manufacturer')) brandVal = String(row[k]).trim();
+    if (!skuVal && (kl === 'sku' || /\bsku\b/.test(kl) || kl === 'item id' || kl === 'item number' || kl === 'product code' || kl === 'product id')) skuVal = String(row[k]).trim();
+    if (kl === 'handles' || kl === 'handle' || kl === 'extra seeds' || kl === 'seeds' || kl === 'extra keywords') handlesVal = String(row[k]).trim();
+  }
+  return { urlVal, priVal, skuVal, handlesVal, brandVal };
+}
+
+$('mgrFileInput')?.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+    mgrParsedProducts = [];
+    let invalid = 0;
+    for (const row of rows) {
+      const { urlVal, priVal, skuVal, handlesVal, brandVal } = _mgrParseRow(row);
+      if (!urlVal) { invalid++; continue; }
+      try { new URL(urlVal); } catch { invalid++; continue; }
+      const priority = parseInt(priVal, 10);
+      mgrParsedProducts.push({
+        url: urlVal, sku: skuVal,
+        priority: (priority >= 1 && priority <= 100) ? priority : 100,
+        handles: handlesVal ? handlesVal.split(/[|,;]/).map(s => s.trim()).filter(Boolean) : [],
+        brands: brandVal ? [brandVal] : [],
+      });
+    }
+    $('mgrFileInfo').textContent = `${mgrParsedProducts.length} valid URL(s) loaded${invalid ? ` (${invalid} rejected)` : ''}`;
+    $('mgrFileInfo').style.color = mgrParsedProducts.length > 0 ? 'var(--success)' : 'var(--danger)';
+    $('mgrUploadBtn').disabled = mgrParsedProducts.length === 0;
+  } catch (err) {
+    $('mgrFileInfo').textContent = `Parse error: ${err.message}`;
+    $('mgrFileInfo').style.color = 'var(--danger)';
+    mgrParsedProducts = [];
+    $('mgrUploadBtn').disabled = true;
+  }
+});
+
+// Upload current file to the shared queue.
+$('mgrUploadBtn')?.addEventListener('click', () => {
+  if (mgrParsedProducts.length === 0) return;
+  const batchId = ($('mgrBatchId').value || '').trim() || String(Date.now());
+  $('mgrUploadBtn').disabled = true;
+  $('mgrUploadResult').textContent = `Uploading ${mgrParsedProducts.length} product(s)…`;
+  $('mgrUploadResult').style.color = 'var(--muted)';
+  chrome.runtime.sendMessage(
+    { action: 'jobs:upload', products: mgrParsedProducts, batchId },
+    (resp) => {
+      $('mgrUploadBtn').disabled = false;
+      if (!resp?.ok) {
+        $('mgrUploadResult').textContent = `Upload failed: ${resp?.error || 'unknown'}`;
+        $('mgrUploadResult').style.color = 'var(--danger)';
+        return;
+      }
+      $('mgrUploadResult').textContent =
+        `✓ Uploaded ${resp.uploaded}/${resp.total} into batch "${resp.batchId}". Share this Batch ID with worker PCs.`;
+      $('mgrUploadResult').style.color = 'var(--success)';
+      // Pre-fill the claim section's batch ID so single-PC manager+worker is one click.
+      if (!$('mgrClaimBatchId').value) $('mgrClaimBatchId').value = resp.batchId;
+      if (!$('mgrBatchId').value)      $('mgrBatchId').value      = resp.batchId;
+      mgrRefreshSummary();
+    }
+  );
+});
+
+// Render live summary + active-worker breakdown.
+function mgrRenderSummary(summary, workers) {
+  const wrap = $('mgrSummary');
+  if (!wrap) return;
+  if (!Array.isArray(summary) || summary.length === 0) {
+    wrap.textContent = 'No batches yet — upload a file in Step 1.';
+    return;
+  }
+  const rows = summary.map(b => {
+    const pct = b.total > 0 ? Math.round((b.done / b.total) * 100) : 0;
+    const safeId = String(b.batch_id).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    return `
+      <div style="border:1px solid var(--border); border-radius:6px; padding:8px 10px; margin-bottom:6px;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <code style="font-weight:600;">${safeId}</code>
+          <span><strong>${b.done}</strong> / ${b.total} done · ${pct}%</span>
+        </div>
+        <div style="font-size:11px; color:var(--muted); margin-top:4px;">
+          pending: <strong>${b.pending}</strong> · claimed: <strong>${b.claimed}</strong>
+          · failed: <strong>${b.failed}</strong> · workers: <strong>${b.active_workers}</strong>
+        </div>
+      </div>
+    `;
+  }).join('');
+  wrap.innerHTML = rows;
+
+  const wWrap = $('mgrWorkers');
+  if (!wWrap) return;
+  if (!Array.isArray(workers) || workers.length === 0) {
+    wWrap.innerHTML = '';
+    return;
+  }
+  const wRows = workers.map(w => {
+    const safeW = String(w.worker).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    const ago = w.lastHeartbeat ? Math.round((Date.now() - new Date(w.lastHeartbeat).getTime()) / 1000) : null;
+    const hb = ago === null ? 'no heartbeat yet'
+             : ago < 60 ? `${ago}s ago` : `${Math.round(ago / 60)} min ago`;
+    return `<div style="font-size:11px; color:var(--muted);">• <strong>${safeW}</strong>: ${w.count} job(s) in flight (last heartbeat ${hb})</div>`;
+  }).join('');
+  wWrap.innerHTML = `<div style="border-top:1px solid var(--border); padding-top:8px;"><strong>Active workers</strong><br>${wRows}</div>`;
+}
+
+function mgrRefreshSummary() {
+  const batchId = ($('mgrClaimBatchId').value || $('mgrBatchId').value || '').trim();
+  chrome.runtime.sendMessage(
+    { action: 'jobs:summary', batchId },
+    (resp) => {
+      if (!resp?.ok) {
+        $('mgrSummary').textContent = `Status fetch failed: ${resp?.error || 'unknown'}`;
+        $('mgrSummary').style.color = 'var(--danger)';
+        return;
+      }
+      $('mgrSummary').style.color = '';
+      mgrRenderSummary(resp.summary, resp.workers);
+    }
+  );
+}
+
+$('mgrRefreshBtn')?.addEventListener('click', mgrRefreshSummary);
+
+$('mgrReleaseBtn')?.addEventListener('click', () => {
+  $('mgrReleaseResult').textContent = 'Releasing…';
+  $('mgrReleaseResult').style.color = 'var(--muted)';
+  chrome.runtime.sendMessage({ action: 'jobs:releaseStale', staleMinutes: 10 }, (resp) => {
+    if (!resp?.ok) {
+      $('mgrReleaseResult').textContent = `Release failed: ${resp?.error || 'unknown'}`;
+      $('mgrReleaseResult').style.color = 'var(--danger)';
+      return;
+    }
+    $('mgrReleaseResult').textContent = `✓ Released ${resp.released} stale claim(s).`;
+    $('mgrReleaseResult').style.color = 'var(--success)';
+    mgrRefreshSummary();
+  });
+});
+
+// Persist worker ID on blur — workers configure once.
+$('mgrWorkerId')?.addEventListener('change', () => {
+  const id = $('mgrWorkerId').value.trim();
+  chrome.runtime.sendMessage({ action: 'jobs:setWorkerId', workerId: id });
+});
+
+// Claim a chunk and hand it to the engine.
+$('mgrClaimBtn')?.addEventListener('click', () => {
+  const workerId = $('mgrWorkerId').value.trim();
+  const batchId  = $('mgrClaimBatchId').value.trim();
+  const limit    = parseInt($('mgrChunkSize').value, 10) || 5;
+  if (!workerId) {
+    $('mgrClaimResult').textContent = 'Set a Worker ID first.';
+    $('mgrClaimResult').style.color = 'var(--danger)';
+    return;
+  }
+  if (!batchId) {
+    $('mgrClaimResult').textContent = 'Paste a Batch ID to claim from.';
+    $('mgrClaimResult').style.color = 'var(--danger)';
+    return;
+  }
+  $('mgrClaimResult').textContent = 'Claiming…';
+  $('mgrClaimResult').style.color = 'var(--muted)';
+  // Snapshot the same runOpts the Run tab would use so the engine runs
+  // identically whether started from a local file or a queue claim.
+  const runOpts = (typeof readRunOpts === 'function') ? readRunOpts() : {};
+  chrome.runtime.sendMessage(
+    { action: 'jobs:claimAndStart', workerId, batchId, limit, runOpts },
+    (resp) => {
+      if (!resp?.ok) {
+        $('mgrClaimResult').textContent = `Claim failed: ${resp?.error || 'unknown'}`;
+        $('mgrClaimResult').style.color = 'var(--danger)';
+        return;
+      }
+      if (resp.claimed === 0) {
+        $('mgrClaimResult').textContent = '✓ Queue empty — no jobs left to claim in this batch.';
+        $('mgrClaimResult').style.color = 'var(--warn)';
+        return;
+      }
+      $('mgrClaimResult').textContent = `✓ Claimed ${resp.claimed} job(s). Engine started — watch the Run tab.`;
+      $('mgrClaimResult').style.color = 'var(--success)';
+      mgrRefreshSummary();
+    }
+  );
+});
+
+// Auto-refresh summary every 30s while the Manager panel is visible.
+let mgrAutoRefresh = null;
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    if (mgrAutoRefresh) { clearInterval(mgrAutoRefresh); mgrAutoRefresh = null; }
+    if (tab.dataset.tab === 'manager') {
+      mgrRefreshSummary();
+      mgrAutoRefresh = setInterval(mgrRefreshSummary, 30000);
+    }
+  });
+});
+
+// Hydrate worker ID on popup open so it persists across sessions.
+chrome.storage.local.get(['adbrainWorkerId'], (data) => {
+  if (data.adbrainWorkerId) {
+    const el = $('mgrWorkerId');
+    if (el) el.value = data.adbrainWorkerId;
+  }
+});

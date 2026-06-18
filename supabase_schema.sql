@@ -119,3 +119,112 @@ create index if not exists adbrain_discovered_keywords_ad_rating_idx
   on public.adbrain_discovered_keywords (ad_rating desc);
 create index if not exists adbrain_discovered_keywords_funnel_idx
   on public.adbrain_discovered_keywords (funnel);
+
+-- ============================================================================
+-- DISTRIBUTED WORK QUEUE (multi-PC mode)
+-- ============================================================================
+-- Workflow:
+--   1. ONE PC (the "manager") uploads sample-products.xlsx via the Manager
+--      tab in the popup → bulk-insert into adbrain_discovery_jobs (status='pending').
+--   2. Each worker PC sets a Worker ID in Settings (e.g. "PC-A") and clicks
+--      "Claim from queue" on the Run tab. The extension calls the
+--      adbrain_claim_jobs RPC which atomically locks N pending rows for
+--      this worker (status='claimed') and returns them as products to the
+--      engine.
+--   3. The engine runs as normal; when each product completes, the extension
+--      PATCHes the matching adbrain_discovery_jobs row to status='done'.
+--   4. Every 60s while running, each worker PATCHes heartbeat_at=now() on
+--      its claimed rows. If a PC crashes, no heartbeat for >10min →
+--      adbrain_release_stale_jobs() releases the claim so another PC picks
+--      it up.
+-- The keyword results land in adbrain_discovered_keywords (existing table) —
+-- this jobs table only coordinates work distribution.
+
+create table if not exists public.adbrain_discovery_jobs (
+  id              bigserial primary key,
+  batch_id        text        not null,   -- groups a single upload session
+  sku             text,
+  product_url     text        not null,   -- canonical Shopify product URL
+  product_name    text,
+  priority        int         default 100,
+  handles         text,                    -- pipe-joined extra KP seeds
+  brands          text,                    -- pipe-joined brand aliases
+  status          text        not null default 'pending',
+                                          -- 'pending' | 'claimed' | 'done' | 'failed'
+  claimed_by      text,                    -- worker_id of the claiming PC
+  claimed_at      timestamptz,
+  heartbeat_at    timestamptz,             -- updated every 60s by the worker
+  done_at         timestamptz,
+  failed_reason   text,
+  attempts        int         default 0,
+  created_at      timestamptz default now(),
+  unique (batch_id, product_url)
+);
+
+create index if not exists adbrain_discovery_jobs_status_idx
+  on public.adbrain_discovery_jobs (status, priority desc, id asc);
+create index if not exists adbrain_discovery_jobs_batch_idx
+  on public.adbrain_discovery_jobs (batch_id);
+create index if not exists adbrain_discovery_jobs_claimed_idx
+  on public.adbrain_discovery_jobs (claimed_by, heartbeat_at);
+
+-- Atomic claim: locks up to p_limit pending rows for p_worker_id within a
+-- batch. FOR UPDATE SKIP LOCKED is the Postgres feature that makes
+-- concurrent claims from different PCs race-safe — each PC gets a
+-- different set of rows, no double-processing possible.
+create or replace function public.adbrain_claim_jobs(
+  p_worker_id text,
+  p_batch_id  text,
+  p_limit     int  default 5
+) returns setof public.adbrain_discovery_jobs
+language sql as $$
+  update public.adbrain_discovery_jobs
+     set status      = 'claimed',
+         claimed_by  = p_worker_id,
+         claimed_at  = now(),
+         heartbeat_at= now(),
+         attempts    = attempts + 1
+   where id in (
+     select id from public.adbrain_discovery_jobs
+      where status   = 'pending'
+        and batch_id = p_batch_id
+      order by priority desc, id asc
+      limit p_limit
+      for update skip locked
+   )
+  returning *;
+$$;
+
+-- Auto-release: any claim with heartbeat_at older than p_stale_minutes
+-- (default 10) goes back to pending so another PC can pick it up. Called
+-- by every worker on each claim cycle — distributed cleanup without a
+-- central scheduler.
+create or replace function public.adbrain_release_stale_jobs(
+  p_stale_minutes int default 10
+) returns int
+language sql as $$
+  with released as (
+    update public.adbrain_discovery_jobs
+       set status='pending', claimed_by=null,
+           claimed_at=null, heartbeat_at=null
+     where status='claimed'
+       and (heartbeat_at is null or heartbeat_at < now() - (p_stale_minutes || ' minutes')::interval)
+    returning id
+  )
+  select count(*)::int from released;
+$$;
+
+-- View for the Manager tab's live status — one row per batch with counts.
+create or replace view public.adbrain_discovery_job_summary as
+select
+  batch_id,
+  count(*)                                                     as total,
+  count(*) filter (where status='pending')                     as pending,
+  count(*) filter (where status='claimed')                     as claimed,
+  count(*) filter (where status='done')                        as done,
+  count(*) filter (where status='failed')                      as failed,
+  count(distinct claimed_by) filter (where status='claimed')   as active_workers,
+  max(done_at)                                                  as last_done_at
+from public.adbrain_discovery_jobs
+group by batch_id
+order by batch_id desc;
