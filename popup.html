@@ -387,6 +387,73 @@
       color: var(--text);
     }
 
+    /* Worker live status block — shown when this PC is running a chunk.
+       Replaces the bare "Connect & start" button with current progress
+       + a Stop button so the worker has a self-contained view of what
+       it's doing without needing to open the dashboard. */
+    .worker-live {
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .worker-live-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .worker-live-dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 6px var(--success);
+      animation: workerPulse 1.5s ease-in-out infinite;
+      flex-shrink: 0;
+    }
+    .worker-live-dot.idle  { background: var(--muted); box-shadow: none; animation: none; }
+    .worker-live-dot.err   { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+    @keyframes workerPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .worker-live-status {
+      font-weight: 600;
+      color: var(--text);
+      font-size: 12px;
+      flex: 1;
+    }
+    .worker-live-batch {
+      font-family: 'SF Mono', Consolas, monospace;
+      font-size: 10px;
+      color: var(--muted);
+      background: var(--panel);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .worker-live-stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .wl-stat {
+      text-align: center;
+      padding: 6px 4px;
+      background: var(--panel);
+      border-radius: 6px;
+    }
+    .wl-stat-v { font-size: 16px; font-weight: 700; color: var(--text); line-height: 1.1; }
+    .wl-stat-l { font-size: 9px; color: var(--muted); text-transform: uppercase;
+      letter-spacing: 0.4px; margin-top: 2px; }
+    .worker-live-action {
+      font-size: 11px;
+      color: var(--muted);
+      padding: 6px 8px;
+      background: var(--panel);
+      border-radius: 4px;
+      border-left: 2px solid var(--accent);
+      word-break: break-word;
+      line-height: 1.4;
+      min-height: 14px;
+    }
+
     /* Stat-card grid for the Live Status panel — discrete metric tiles
        instead of inline-styled divs. */
     .stat-grid {
@@ -1168,7 +1235,9 @@
 
   <!-- Sticky role banner. Drives the entire popup's visibility — sets
        body[data-mgr-role] which CSS uses to hide irrelevant tabs and
-       sections. Always visible so the user can switch role at any time. -->
+       sections. The "Change role" link is a small affordance so workers
+       aren't permanently locked in if they need to switch (e.g., the
+       PC needs to temporarily run manager tasks). -->
   <div class="role-banner">
     <div class="role-banner-label">This PC is a</div>
     <div class="role-banner-btns">
@@ -1616,8 +1685,32 @@
         <input type="text" id="mgrWorkerId" placeholder="e.g. PC-A, Office, Home" />
         <div class="hint">Must be unique across your PCs. Used for heartbeat locking and the live-status breakdown.</div>
       </div>
-      <div class="queue-card-action">
+
+      <!-- Live worker status — shows when the engine is running. Replaces
+           the bare "Connect & start" button while active with the current
+           batch, in-flight count, last action, and a Stop button.
+           Updated from chrome.runtime onMessage(discoveryProgress) +
+           getState polling. -->
+      <div id="workerLiveStatus" class="worker-live" style="display:none; margin-top:12px;">
+        <div class="worker-live-head">
+          <span class="worker-live-dot" id="workerLiveDot"></span>
+          <span class="worker-live-status" id="workerLiveStatusText">Idle</span>
+          <span class="worker-live-batch" id="workerLiveBatch">—</span>
+        </div>
+        <div class="worker-live-stats">
+          <div class="wl-stat"><div class="wl-stat-v" id="workerLiveDone">0</div><div class="wl-stat-l">done</div></div>
+          <div class="wl-stat"><div class="wl-stat-v" id="workerLiveFlight">0</div><div class="wl-stat-l">in flight</div></div>
+          <div class="wl-stat"><div class="wl-stat-v" id="workerLiveTotal">0</div><div class="wl-stat-l">kw total</div></div>
+        </div>
+        <div class="worker-live-action" id="workerLiveAction">Waiting for engine…</div>
+      </div>
+
+      <div class="queue-card-action" id="workerConnectActions">
         <button id="mgrAutoConnectBtn">Connect &amp; start working</button>
+      </div>
+      <div class="queue-card-action" id="workerStopActions" style="display:none;">
+        <button class="secondary" id="workerStopBtn">Stop after current product</button>
+        <button id="workerForceStopBtn" style="background: var(--danger); border-color: var(--danger);">Stop immediately</button>
       </div>
       <div id="mgrAutoConnectResult" class="queue-card-result"></div>
     </div>

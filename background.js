@@ -9,6 +9,7 @@ import {
   claimJobs,
   heartbeatClaims,
   markJobDone,
+  markJobFailed,
   releaseStaleJobs,
   getJobSummary,
   getActiveWorkers,
@@ -183,7 +184,13 @@ const coldStart = (async () => {
     STORAGE_KEY_CLAIMED_JOBS,
     'adbrainContinuousClaim',
     'adbrainContinuousChunkSize',
+    'adbrainActivityBuffer',
   ]);
+  // Restore activity buffer from before SW death so we don't lose recent
+  // events that hadn't been pushed to Supabase yet.
+  if (Array.isArray(data.adbrainActivityBuffer)) {
+    _activityBuffer.push(...data.adbrainActivityBuffer);
+  }
   if (typeof data[STORAGE_KEY_WORKER_ID] === 'string')      state.workerId = data[STORAGE_KEY_WORKER_ID];
   if (typeof data[STORAGE_KEY_QUEUE_BATCH_ID] === 'string') state.queueBatchId = data[STORAGE_KEY_QUEUE_BATCH_ID];
   if (Array.isArray(data[STORAGE_KEY_CLAIMED_JOBS]))         state.claimedJobs = data[STORAGE_KEY_CLAIMED_JOBS];
@@ -369,26 +376,34 @@ try {
 try {
   chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 1, delayInMinutes: 0.1 });
 } catch {}
-// Dashboard activity-log push alarm — fires every minute. Drains the
+// Dashboard activity-log push alarm — fires every 30s (Chrome's minimum
+// reliable period for production-mode alarms is 0.5 min). Drains the
 // in-memory log buffer to Supabase so the manager dashboard's activity
-// feed populates within ~60s of an engine event. Worker-side only;
-// no-op when state.workerId is empty.
+// feed stays within ~30s of live. Worker-side only; no-op when
+// state.workerId is empty.
 const DASHBOARD_PUSH_ALARM = 'adbrain-dashboard-push';
 try {
-  chrome.alarms.create(DASHBOARD_PUSH_ALARM, { periodInMinutes: 1, delayInMinutes: 0.1 });
+  chrome.alarms.create(DASHBOARD_PUSH_ALARM, { periodInMinutes: 0.5, delayInMinutes: 0.05 });
 } catch {}
-// Worker command-poll alarm — fires every minute, checks for unacked
-// commands targeted at this worker (or broadcast). Honors stop/pause/
-// release_claims and acks them so they don't re-fire.
+// Worker command-poll alarm — fires every 30s, checks for unacked
+// commands targeted at this worker (or broadcast). Stop/pause reach
+// the worker within ~30s of the manager clicking the button.
 const COMMAND_POLL_ALARM = 'adbrain-command-poll';
 try {
-  chrome.alarms.create(COMMAND_POLL_ALARM, { periodInMinutes: 1, delayInMinutes: 0.2 });
+  chrome.alarms.create(COMMAND_POLL_ALARM, { periodInMinutes: 0.5, delayInMinutes: 0.1 });
 } catch {}
 
-// In-memory activity log buffer. Drained every minute by the
-// DASHBOARD_PUSH_ALARM. Capped to avoid runaway memory on long runs.
+// In-memory activity log buffer. Drained every 30s by the alarm AND
+// immediately on high-impact events (errors, product done/failed). Capped
+// to avoid runaway memory on long runs. Also periodically persisted to
+// chrome.storage so SW death doesn't lose recent events that haven't
+// hit Supabase yet.
 const _activityBuffer = [];
 const ACTIVITY_BUFFER_CAP = 500;
+const ACTIVITY_STORAGE_KEY = 'adbrainActivityBuffer';
+let _activityPersistTimer = null;
+let _activityFlushScheduled = false;
+
 function bufferActivity(entry) {
   if (!entry || !entry.message) return;
   if (!state.workerId) return;  // only push when running in distributed mode
@@ -404,6 +419,21 @@ function bufferActivity(entry) {
   });
   if (_activityBuffer.length > ACTIVITY_BUFFER_CAP) {
     _activityBuffer.splice(0, _activityBuffer.length - ACTIVITY_BUFFER_CAP);
+  }
+  // Debounced persist to chrome.storage so SW kill doesn't lose data.
+  if (_activityPersistTimer) clearTimeout(_activityPersistTimer);
+  _activityPersistTimer = setTimeout(() => {
+    chrome.storage.local.set({ [ACTIVITY_STORAGE_KEY]: _activityBuffer.slice(-200) }).catch(() => {});
+    _activityPersistTimer = null;
+  }, 2000);
+  // Immediate flush for high-impact events so dashboard sees them within
+  // a few seconds instead of waiting for the 30s alarm.
+  const isUrgent = entry.level === 'err' || entry.level === 'warn'
+    || /product (complete|partial|failed)/i.test(entry.message)
+    || /captcha/i.test(entry.message);
+  if (isUrgent && !_activityFlushScheduled) {
+    _activityFlushScheduled = true;
+    setTimeout(() => { _activityFlushScheduled = false; flushActivityBuffer(); }, 1000);
   }
 }
 
@@ -744,6 +774,41 @@ async function _handleStartInner(msg) {
               }
             }
           },
+          // Engine calls this when a product genuinely cannot be processed
+          // (no product image, repeated KP failure, etc.). Distributed mode
+          // marks the job as 'failed' with the reason so the manager
+          // dashboard's failed-jobs panel populates with real entries +
+          // worker attribution. Local mode just records it in doneProducts
+          // to prevent infinite retry.
+          onProductFailed: async (cleanUrl, reason) => {
+            if (!state.doneProducts.includes(cleanUrl)) {
+              state.doneProducts.push(cleanUrl);
+              await persistDone();
+            }
+            if (state.workerId && state.queueBatchId) {
+              try {
+                await markJobFailed({
+                  workerId:  state.workerId,
+                  batchId:   state.queueBatchId,
+                  productUrl: cleanUrl,
+                  reason:    reason || 'unknown',
+                });
+              } catch (e) {
+                pushLog(`jobs:markFailed warning: ${e.message}`, 'err');
+              }
+              const idx = state.claimedJobs.findIndex(j => j.productUrl === cleanUrl);
+              if (idx >= 0) {
+                state.claimedJobs.splice(idx, 1);
+                await chrome.storage.local.set({ [STORAGE_KEY_CLAIMED_JOBS]: state.claimedJobs }).catch(() => {});
+              }
+            }
+            bufferActivity({
+              level: 'err',
+              source: 'engine',
+              message: `Product failed: ${cleanUrl} — ${reason || 'unknown'}`,
+              productUrl: cleanUrl,
+            });
+          },
         }
       );
       state.report = Array.from(reportMap.values());
@@ -907,6 +972,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         batchId: state.batchId,
         lastStatus: state.lastStatus,
         doneProducts: state.doneProducts.length,
+        doneProductsList: state.doneProducts,
         lastPushedCount: state.lastPushedCount,
         unpushedCount: Math.max(0, state.report.length - state.lastPushedCount),
         log: state.log.slice(-LOG_MAX),
@@ -920,6 +986,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // "auto-resume scheduled" instead of "Resume" so the user knows
         // the watchdog will pick this up after a crash without intervention.
         runIntent: state.runIntent,
+        // Distributed-mode state for the Worker-tab live status block.
+        workerId: state.workerId,
+        queueBatchId: state.queueBatchId,
+        claimedJobs: state.claimedJobs,
+        continuousClaim: state.continuousClaim,
       });
     });
     return true;

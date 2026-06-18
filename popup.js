@@ -719,6 +719,15 @@ function pcUpdate(p) {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action === 'discoveryProgress') {
     const p = msg.payload || {};
+    // Keep the worker-live block fresh on every progress tick. The
+    // current action line is the most useful single signal of what
+    // the engine is doing right now.
+    if (p.currentAction) {
+      const act = $('workerLiveAction');
+      if (act) act.textContent = p.currentAction.length > 100
+        ? p.currentAction.slice(0, 100) + '…'
+        : p.currentAction;
+    }
     if (p.currentProduct !== undefined) $('currentProduct').textContent = p.currentProduct || '—';
     if (p.currentSource !== undefined) $('currentSource').textContent = p.currentSource || '—';
     if (p.currentAction !== undefined) $('currentAction').textContent = p.currentAction || '—';
@@ -789,6 +798,7 @@ chrome.runtime.onMessage.addListener((msg) => {
       canResume = !!state.canResume;
       runIntent = !!state.runIntent;
       setRunningUI(false);
+      updateWorkerLiveStatus(state);
     });
   }
 });
@@ -840,6 +850,7 @@ chrome.runtime.sendMessage({ action: 'getState' }, (state) => {
   pausedByCaptcha = !!state.pausedByCaptcha;
   runIntent = !!state.runIntent;
   setRunningUI(!!state.running);
+  updateWorkerLiveStatus(state);
   if (state.reportSize > 0) {
     $('exportCsvBtn').disabled = false;
     $('exportXlsxBtn').disabled = false;
@@ -1564,6 +1575,55 @@ $('mgrWorkerId')?.addEventListener('input', () => {
   _mgrWorkerIdTimer = setTimeout(() => {
     chrome.runtime.sendMessage({ action: 'jobs:setWorkerId', workerId: id });
   }, 400);
+});
+
+// Worker live-status update — tracks engine state and updates the
+// worker live block in real time. Driven by discoveryProgress events
+// (when state changes) + getState polling (when popup opens fresh).
+function updateWorkerLiveStatus(state) {
+  const live = $('workerLiveStatus');
+  const connectActions = $('workerConnectActions');
+  const stopActions = $('workerStopActions');
+  if (!live) return;
+  const running = !!state?.running;
+  if (running) {
+    live.style.display = 'block';
+    if (connectActions) connectActions.style.display = 'none';
+    if (stopActions) stopActions.style.display = 'flex';
+    const dot = $('workerLiveDot');
+    if (dot) dot.classList.remove('idle', 'err');
+    const statusText = state.pausedByCaptcha ? 'Paused (CAPTCHA)' : 'Working';
+    if (state.pausedByCaptcha && dot) dot.classList.add('err');
+    $('workerLiveStatusText').textContent = statusText;
+    $('workerLiveBatch').textContent = state.queueBatchId ? `batch ${String(state.queueBatchId).slice(0, 16)}` : '—';
+    $('workerLiveDone').textContent = (typeof state.doneProducts === 'number')
+      ? state.doneProducts
+      : (state.doneProducts?.length || 0);
+    $('workerLiveFlight').textContent = state.claimedJobs?.length || 0;
+    $('workerLiveTotal').textContent = state.reportSize || 0;
+  } else {
+    live.style.display = 'none';
+    if (connectActions) connectActions.style.display = 'flex';
+    if (stopActions) stopActions.style.display = 'none';
+  }
+}
+
+// Stop buttons (worker mode). "Graceful" = honor mid-product, finish
+// current product, then halt + clear continuous mode. "Force" = the
+// same Stop signal but explicit copy so the user knows it's not magic.
+$('workerStopBtn')?.addEventListener('click', () => {
+  if (!confirm('Stop after the current product finishes? The remaining claimed jobs will be released back to the queue.')) return;
+  chrome.runtime.sendMessage({ action: 'stopDiscovery' }, () => {
+    $('workerStopBtn').textContent = 'Stop requested…';
+    $('workerStopBtn').disabled = true;
+  });
+});
+$('workerForceStopBtn')?.addEventListener('click', () => {
+  if (!confirm('Stop immediately? In-flight SERP loads / KP queries will be abandoned.')) return;
+  chrome.runtime.sendMessage({ action: 'stopDiscovery' }, () => {
+    $('workerForceStopBtn').textContent = 'Stopping…';
+    $('workerForceStopBtn').disabled = true;
+  });
 });
 
 // One-button worker connect — auto-detects the newest pending batch

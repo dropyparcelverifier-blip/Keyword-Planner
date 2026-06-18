@@ -194,6 +194,35 @@ export async function markJobDone({ workerId, batchId, productUrl }) {
   return { updated: 1 };
 }
 
+// WORKER: mark a single job as FAILED by product_url with a reason.
+// Status transition: claimed → failed. Used when the engine genuinely
+// can't process a product (no image, repeated KP failure, CLIP crash)
+// instead of silently marking 'done'. The dashboard's failed-jobs
+// panel then shows real entries with worker attribution + reason.
+export async function markJobFailed({ workerId, batchId, productUrl, reason }) {
+  if (!workerId || !batchId || !productUrl) return { updated: 0 };
+  const { base, headers } = await _supabaseHeaders();
+  const url = `${base}/rest/v1/${JOBS_TABLE}`
+    + `?batch_id=eq.${encodeURIComponent(batchId)}`
+    + `&product_url=eq.${encodeURIComponent(productUrl)}`
+    + `&claimed_by=eq.${encodeURIComponent(workerId)}`;
+  const resp = await fetch(url, {
+    method: 'PATCH',
+    headers: { ...headers, 'Prefer': 'return=minimal' },
+    body: JSON.stringify({
+      status: 'failed',
+      failed_reason: String(reason || 'unknown').slice(0, 200),
+      done_at: new Date().toISOString(),
+      heartbeat_at: new Date().toISOString(),
+    }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    return { updated: 0, error: `HTTP ${resp.status}: ${text.slice(0, 120)}` };
+  }
+  return { updated: 1 };
+}
+
 // WORKER (or anyone): release stale claims (no heartbeat in >10 min) so
 // other PCs can pick them up. Called by every worker on each claim cycle —
 // distributed cleanup, no central scheduler needed.
