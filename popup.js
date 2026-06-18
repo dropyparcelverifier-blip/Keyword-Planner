@@ -1187,6 +1187,13 @@ function mgrApplyRole(role) {
       if (firstVisible) firstVisible.click();
     }
   }
+  // Re-run the creds check on every role change. The credentials warning
+  // card should show up regardless of which tab is active — workers
+  // newly switched in shouldn't have to click Queue to see they're
+  // missing keys. Safe to call before the function exists (defined
+  // later in this file) because role-button click handlers fire on
+  // user interaction, after parse.
+  if (typeof mgrCheckCreds === 'function') mgrCheckCreds();
 }
 document.querySelectorAll('.role-btn').forEach(b => {
   b.addEventListener('click', () => mgrApplyRole(b.dataset.role));
