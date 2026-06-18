@@ -777,6 +777,37 @@ async function _handleStartInner(msg) {
                 }
               }
             }
+            // DISTRIBUTED MODE: auto-push this product's keyword rows to
+            // Supabase RIGHT AWAY. Otherwise the manager's centralized
+            // "Download all CSVs from Supabase" would find the queue row
+            // marked 'done' but ZERO actual keyword data, because that
+            // data only goes to Supabase via the manual "Push to AdBrain"
+            // button. In distributed mode, every worker must push as it
+            // goes — that's how the centralized download works at all.
+            if (state.workerId) {
+              const productRows = state.report.filter(r => r.productUrl === cleanUrl);
+              if (productRows.length > 0) {
+                try {
+                  const r = await pushToAdBrain(productRows);
+                  emitProgress({
+                    currentAction: `Auto-pushed ${r.success || productRows.length} row(s) for ${cleanUrl} to Supabase`,
+                    logKind: 'ok',
+                  });
+                  // Advance lastPushedCount so the manual "Push" button
+                  // doesn't re-push these rows.
+                  state.lastPushedCount = Math.max(
+                    state.lastPushedCount,
+                    state.report.length
+                  );
+                  await persistPushed();
+                } catch (e) {
+                  emitProgress({
+                    currentAction: `Auto-push to Supabase failed for ${cleanUrl}: ${e.message} — manager won't see these rows in the centralized download until you click "Push to AdBrain" from this PC.`,
+                    logKind: 'err',
+                  });
+                }
+              }
+            }
           },
           // Engine calls this when a product genuinely cannot be processed
           // (no product image, repeated KP failure, etc.). Distributed mode
