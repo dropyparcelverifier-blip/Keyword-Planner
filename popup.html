@@ -179,6 +179,68 @@
     button.danger { background: var(--danger); color: #1a0d0d; }
     button.danger:hover:not(:disabled) { background: #fca5a5; }
 
+    /* ============ Role banner — drives whole-popup role-based UI ============
+       Always-visible sticky banner under the header. The chosen role sets
+       body[data-mgr-role] which the visibility rules below use to hide
+       tabs and sections that aren't relevant to this PC's job.
+       Replaces the per-tab role buttons that lived inside the Manager
+       tab — those were too easy to miss, so the user's PC ended up in
+       the wrong mode and showed confusing controls. */
+    .role-banner {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      margin: 8px 0;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: var(--shadow-md);
+    }
+    .role-banner-label {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      flex-shrink: 0;
+    }
+    .role-banner-btns { display: flex; gap: 4px; }
+    .role-btn {
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 500;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--muted);
+      cursor: pointer;
+      box-shadow: none;
+    }
+    .role-btn:hover { background: var(--panel-2); color: var(--text); }
+    .role-btn.active {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+    }
+    .role-banner-hint {
+      font-size: 11px;
+      color: var(--muted);
+      margin-left: auto;
+      font-style: italic;
+    }
+
+    /* Whole-popup role-based visibility. Any element with [data-show-when]
+       is shown ONLY if its comma-separated list includes the current role.
+       Tabs (top-of-popup) and sections (inside the Queue tab) use this same
+       mechanism — single source of truth, no JS toggling display:none on
+       each section individually.
+       Use display:revert so the element falls back to its natural display
+       value (block for div, inline-flex for .tab) when shown. */
+    [data-show-when] { display: none !important; }
+    body[data-mgr-role="manager"] [data-show-when*="manager"],
+    body[data-mgr-role="worker"]  [data-show-when*="worker"],
+    body[data-mgr-role="both"]    [data-show-when*="both"] { display: revert !important; }
+
     /* Reusable banner classes (replaces inline style="..."). Each banner
        has the same layout but a different colour family. */
     .banner {
@@ -786,7 +848,7 @@
     }
   </style>
 </head>
-<body>
+<body data-mgr-role="both">
   <header>
     <div>
       <h1>AdBrain Discovery</h1>
@@ -798,14 +860,27 @@
     </div>
   </header>
 
-  <div class="tabs">
-    <div class="tab active" data-tab="run">Run</div>
-    <div class="tab" data-tab="results">Results</div>
-    <div class="tab" data-tab="manager">Manager</div>
-    <div class="tab" data-tab="settings">Settings</div>
+  <!-- Sticky role banner. Drives the entire popup's visibility — sets
+       body[data-mgr-role] which CSS uses to hide irrelevant tabs and
+       sections. Always visible so the user can switch role at any time. -->
+  <div class="role-banner">
+    <div class="role-banner-label">This PC is a</div>
+    <div class="role-banner-btns">
+      <button class="role-btn" data-role="manager" id="roleBtnManager" title="Upload product files, monitor batch progress, collect all CSVs">Manager</button>
+      <button class="role-btn" data-role="worker"  id="roleBtnWorker"  title="Claim chunks from the manager's queue and run the engine">Worker</button>
+      <button class="role-btn" data-role="both"    id="roleBtnBoth"    title="Single-PC setup — manager + worker on one machine">Both</button>
+    </div>
+    <span class="role-banner-hint" id="roleBannerHint"></span>
   </div>
 
-  <div class="panel active" id="panel-run">
+  <div class="tabs">
+    <div class="tab"        data-tab="run"      data-show-when="both">Local run</div>
+    <div class="tab active" data-tab="queue"    data-show-when="manager,worker,both">Queue</div>
+    <div class="tab"        data-tab="results"  data-show-when="manager,worker,both">Results</div>
+    <div class="tab"        data-tab="settings" data-show-when="manager,worker,both">Settings</div>
+  </div>
+
+  <div class="panel" id="panel-run">
     <div class="section">
       <label class="label">Product file (CSV / XLSX)</label>
       <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" />
@@ -1069,25 +1144,12 @@
     </div>
   </div>
 
-  <!-- ─────── Manager tab — distributed multi-PC mode ─────── -->
-  <div class="panel" id="panel-manager">
-
-    <!-- Role selector. Determines which sections of this tab are visible
-         so each PC sees only the controls relevant to its job. Stored in
-         localStorage so the choice sticks per-PC. -->
-    <div class="settings-group">
-      <div class="settings-group-title">This PC's role</div>
-      <div class="section" style="display:flex; gap:6px;">
-        <button class="secondary mgr-role-btn" data-role="manager" id="mgrRoleManager">Manager only</button>
-        <button class="secondary mgr-role-btn" data-role="worker"  id="mgrRoleWorker">Worker only</button>
-        <button class="secondary mgr-role-btn" data-role="both"    id="mgrRoleBoth">Both</button>
-      </div>
-      <div class="hint" style="margin-top:6px;">
-        <strong>Manager</strong> uploads the product list once and watches batch progress.
-        <strong>Worker</strong> claims chunks from the queue and runs them.
-        <strong>Both</strong> for single-PC test or the PC that doubles up.
-      </div>
-    </div>
+  <!-- ─────── Queue tab — distributed multi-PC workflow ─────── -->
+  <!-- Panel ID matches the tab's data-tab="queue" attribute. Visibility
+       of inner sections is driven by body[data-mgr-role] via CSS.
+       Queue is the default-active panel — Run is only shown for the
+       "both" role and is not the primary entrypoint anymore. -->
+  <div class="panel active" id="panel-queue">
 
     <!-- Inline Supabase credentials. Hidden once both are set so it
          doesn't visually clutter day-to-day use. Same storage keys as
@@ -1108,25 +1170,25 @@
       <div id="mgrSaveCredsResult" class="hint" style="margin-top:8px;"></div>
     </div>
 
-    <div class="settings-group mgr-role-section" data-show-when="manager,both">
-      <div class="settings-group-title">Step 1 — Upload products (manager only)</div>
+    <div class="settings-group" data-show-when="manager,both">
+      <div class="settings-group-title">📤 Upload products (manager)</div>
       <div class="section">
         <label class="label">Product file to upload to the shared queue</label>
         <input type="file" id="mgrFileInput" accept=".csv,.xlsx,.xls" />
         <div class="file-info" id="mgrFileInfo">No file selected.</div>
-        <div class="hint">Same format as the Run tab's product file. The list will be inserted into <code>adbrain_discovery_jobs</code> with status=pending so worker PCs can claim chunks.</div>
+        <div class="hint">Columns (case-insensitive): "Product URL", "Priority", "SKU", "Handles", "Brand". Rows are inserted into <code>adbrain_discovery_jobs</code> with status=pending so worker PCs can claim chunks.</div>
       </div>
       <div class="section">
-        <label class="label">Batch ID (workers will claim from this batch)</label>
+        <label class="label">Batch ID (share this with worker PCs)</label>
         <input type="text" id="mgrBatchId" placeholder="auto-generate from timestamp" />
-        <div class="hint">Leave blank to auto-generate. Re-uploading the same Batch ID is idempotent — duplicates are merged, not re-inserted.</div>
+        <div class="hint">Leave blank to auto-generate. Re-uploading the same Batch ID is idempotent — duplicates merge, not re-insert. Workers paste this ID below to claim from.</div>
       </div>
       <button id="mgrUploadBtn" disabled>Upload to manager queue</button>
       <div id="mgrUploadResult" class="hint" style="margin-top:8px;"></div>
     </div>
 
-    <div class="settings-group mgr-role-section" data-show-when="manager,worker,both">
-      <div class="settings-group-title">Step 2 — Live status</div>
+    <div class="settings-group" data-show-when="manager,worker,both">
+      <div class="settings-group-title">📊 Live batch status</div>
       <div class="section">
         <button class="secondary" id="mgrRefreshBtn">Refresh now</button>
         <span class="hint" style="margin-left:8px;">Auto-refreshes every 30s while this tab is open.</span>
@@ -1140,8 +1202,8 @@
       </div>
     </div>
 
-    <div class="settings-group mgr-role-section" data-show-when="worker,both">
-      <div class="settings-group-title">Step 3 — Claim work on THIS PC</div>
+    <div class="settings-group" data-show-when="worker,both">
+      <div class="settings-group-title">⚡ Claim &amp; run work on this PC</div>
       <div class="section">
         <label class="label">Worker ID for this PC</label>
         <input type="text" id="mgrWorkerId" placeholder="e.g. PC-A, Office, Home" />
@@ -1164,8 +1226,8 @@
          Supabase and generates per-SKU CSVs locally on THIS PC so the
          manager doesn't have to collect files from each worker's
          Downloads folder. Shown to manager + both. -->
-    <div class="settings-group mgr-role-section" data-show-when="manager,both">
-      <div class="settings-group-title">Step 4 — Download all CSVs (manager)</div>
+    <div class="settings-group" data-show-when="manager,both">
+      <div class="settings-group-title">📦 Download all CSVs (manager)</div>
       <div class="section">
         <label class="label">Batch to download</label>
         <input type="text" id="mgrDownloadBatchId" placeholder="paste a Batch ID from the status above" />

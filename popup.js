@@ -1149,23 +1149,46 @@ let rtRefreshTimer = null;
 // doesn't overwrite the local-mode parsedProducts on the Run tab.
 let mgrParsedProducts = [];
 
-// Role toggle — Manager / Worker / Both. Hides sections that aren't
-// relevant to the chosen role so each PC sees a focused UI. Persisted
-// in localStorage so the choice sticks per-PC across popup opens.
+// ─── Role-based UI ───
+// Setting body[data-mgr-role] is the SOLE driver of role-based
+// visibility. Tabs and sections marked with [data-show-when="..."]
+// are shown/hidden via CSS based on the body attribute. This replaces
+// the previous per-element style.display toggling — single source of
+// truth, no per-section JS, easier to add new role-gated elements.
 const MGR_ROLE_KEY = 'adbrainMgrRole';
+
+// Role-aware hint text shown in the banner so the user always knows
+// what THIS role means for their PC.
+const ROLE_HINT = {
+  manager: 'Upload products, watch progress, download all CSVs',
+  worker:  'Claim chunks from the queue, run the engine',
+  both:    'Single-PC: do everything on this machine',
+};
+
 function mgrApplyRole(role) {
   if (!['manager', 'worker', 'both'].includes(role)) role = 'both';
   localStorage.setItem(MGR_ROLE_KEY, role);
-  document.querySelectorAll('.mgr-role-btn').forEach(b => {
-    b.classList.toggle('primary', b.dataset.role === role);
-    b.classList.toggle('secondary', b.dataset.role !== role);
+  document.body.dataset.mgrRole = role;
+  // Active-state styling for the banner buttons.
+  document.querySelectorAll('.role-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.role === role);
   });
-  document.querySelectorAll('.mgr-role-section').forEach(s => {
-    const allowed = String(s.dataset.showWhen || '').split(',').map(x => x.trim());
-    s.style.display = allowed.includes(role) ? '' : 'none';
-  });
+  const hint = document.getElementById('roleBannerHint');
+  if (hint) hint.textContent = ROLE_HINT[role] || '';
+  // If the current active tab is now hidden by the new role, fall back
+  // to the first visible tab so the user isn't staring at an empty
+  // panel. Queue is visible for all roles so it's a safe default.
+  const activeTab = document.querySelector('.tab.active');
+  if (activeTab) {
+    const sw = String(activeTab.dataset.showWhen || '');
+    if (!sw.includes(role)) {
+      const firstVisible = Array.from(document.querySelectorAll('.tab'))
+        .find(t => String(t.dataset.showWhen || '').includes(role));
+      if (firstVisible) firstVisible.click();
+    }
+  }
 }
-document.querySelectorAll('.mgr-role-btn').forEach(b => {
+document.querySelectorAll('.role-btn').forEach(b => {
   b.addEventListener('click', () => mgrApplyRole(b.dataset.role));
 });
 mgrApplyRole(localStorage.getItem(MGR_ROLE_KEY) || 'both');
@@ -1469,9 +1492,10 @@ let mgrAutoRefresh = null;
 document.querySelectorAll('.tab').forEach(tab => {
   tab.addEventListener('click', () => {
     if (mgrAutoRefresh) { clearInterval(mgrAutoRefresh); mgrAutoRefresh = null; }
-    if (tab.dataset.tab === 'manager') {
+    // Tab id changed from 'manager' to 'queue' so the label could rename
+    // without breaking selectors; the panel id is panel-queue.
+    if (tab.dataset.tab === 'queue') {
       mgrCheckCreds();
-      mgrApplyRole(localStorage.getItem(MGR_ROLE_KEY) || 'both');
       mgrRefreshSummary();
       mgrAutoRefresh = setInterval(mgrRefreshSummary, 30000);
     }
