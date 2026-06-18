@@ -797,6 +797,15 @@ chrome.runtime.onMessage.addListener((msg) => {
         ? p.currentAction.slice(0, 100) + '…'
         : p.currentAction;
       pushWorkerMiniLogLine(p.currentAction, p.logKind);
+      // Also push to local activity log (the worker's own visible log
+      // card). Debounced via the existing refreshLocalLog so we don't
+      // hammer storage on every progress tick.
+      if (!_localLogRefreshTimer) {
+        _localLogRefreshTimer = setTimeout(() => {
+          _localLogRefreshTimer = null;
+          refreshLocalLog();
+        }, 800);
+      }
     }
     if (p.currentProduct !== undefined) $('currentProduct').textContent = p.currentProduct || '—';
     if (p.currentSource !== undefined) $('currentSource').textContent = p.currentSource || '—';
@@ -1665,6 +1674,48 @@ $('mgrWorkerId')?.addEventListener('input', () => {
     chrome.runtime.sendMessage({ action: 'jobs:setWorkerId', workerId: id });
   }, 400);
 });
+
+// ─── Local activity log card (worker mode) ───
+// Worker can see THIS PC's recent engine activity without opening the
+// Dashboard. Sources state.log (persisted in chrome.storage). Updated
+// in real time from discoveryProgress events + initial getState.
+let _localLogRefreshTimer = null;
+function renderLocalLog(entries) {
+  const wrap = $('localLogList');
+  if (!wrap) return;
+  if (!Array.isArray(entries) || entries.length === 0) {
+    wrap.innerHTML = `<div style="font-size: 11px; color: var(--muted); padding: 8px;">No activity yet.</div>`;
+    return;
+  }
+  // Newest 50, newest first.
+  const slice = entries.slice(-50).reverse();
+  wrap.innerHTML = slice.map(e => {
+    const t = e.ts
+      ? new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      : '—';
+    const kind = e.kind === 'ok' ? 'ok' : e.kind === 'err' ? 'err' : e.kind === 'warn' ? 'warn' : '';
+    const safe = String(e.text || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    return `<div class="local-log-line ${kind}"><span class="lt">${t}</span><span class="lm">${safe}</span></div>`;
+  }).join('');
+}
+
+function refreshLocalLog() {
+  chrome.runtime.sendMessage({ action: 'getState' }, (state) => {
+    if (!state) return;
+    renderLocalLog(state.log || []);
+  });
+}
+
+$('localLogRefreshBtn')?.addEventListener('click', refreshLocalLog);
+$('localLogClearBtn')?.addEventListener('click', () => {
+  if (!confirm('Clear the local activity log? This only clears this PC\'s log, not Supabase.')) return;
+  chrome.runtime.sendMessage({ action: 'clearLog' }, () => {
+    refreshLocalLog();
+  });
+});
+
+// Initial load.
+refreshLocalLog();
 
 // Worker mini-log — last 6 events shown inside the worker live status
 // block so the user has visibility without opening the full activity
