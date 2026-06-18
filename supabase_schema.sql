@@ -301,7 +301,44 @@ select
   failed_reason, attempts
 from public.adbrain_discovery_jobs;
 
--- Refresh the schema cache so the dashboard's new endpoints work IMMEDIATELY.
+-- ============================================================================
+-- MANAGER-CONTROLLED WORKER CONFIG (single global row)
+-- ============================================================================
+-- The manager pushes run options (KP URL, pacing, match profile, caps, etc.)
+-- to this table; every worker fetches it before each claim and merges into
+-- its local runOpts. Result: workers don't have to be reconfigured manually
+-- when the manager changes settings — change once at the manager, every PC
+-- picks it up on its next chunk claim.
+--
+-- Single-row table by design (id=1 always). UPSERT semantics: managers can
+-- write partial updates; null columns mean "use the worker's local default."
+create table if not exists public.adbrain_worker_config (
+  id                          int  primary key default 1,
+  kp_url                      text,
+  kp_max_per_product          int,
+  match_profile               text,          -- 'loose' | 'normal' | 'strict' | 'custom'
+  clip_threshold_override     numeric,       -- only used when match_profile='custom'
+  max_image_match_rows        int,           -- 0 = unbounded
+  search_delay_min_ms         int,
+  search_delay_max_ms         int,
+  product_delay_min_ms        int,
+  product_delay_max_ms        int,
+  chunk_size                  int,
+  chunk_rest_min_ms           int,
+  chunk_rest_max_ms           int,
+  cap                         int,           -- global keyword cap
+  auto_export                 boolean,
+  updated_at                  timestamptz default now(),
+  updated_by                  text,
+  constraint adbrain_worker_config_single check (id = 1)
+);
+
+-- Seed the single row if it doesn't exist so PATCH calls don't fail.
+insert into public.adbrain_worker_config (id) values (1)
+  on conflict (id) do nothing;
+
+-- Refresh the schema cache so all the new endpoints (dashboard tables +
+-- worker config) work IMMEDIATELY.
 NOTIFY pgrst, 'reload schema';
 
 
