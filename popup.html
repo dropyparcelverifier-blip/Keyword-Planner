@@ -480,6 +480,36 @@
       border: 1px solid var(--border);
     }
     .worker-mini-log:empty { display: none; }
+    /* Local activity log card — worker mode's view of its own engine. */
+    .local-log-list {
+      max-height: 200px;
+      overflow-y: auto;
+      font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+      font-size: 10px;
+      line-height: 1.5;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 4px 0;
+    }
+    .local-log-list::-webkit-scrollbar { width: 5px; }
+    .local-log-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    .local-log-line {
+      display: grid;
+      grid-template-columns: 56px 1fr;
+      gap: 6px;
+      padding: 1px 8px;
+      border-left: 2px solid transparent;
+      color: var(--muted);
+    }
+    .local-log-line .lt { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .local-log-line .lm { color: var(--text); word-break: break-word; }
+    .local-log-line.ok   { border-left-color: var(--success); }
+    .local-log-line.warn { border-left-color: var(--warn); }
+    .local-log-line.err  { border-left-color: var(--danger); }
+    .local-log-line.ok   .lm { color: var(--success); }
+    .local-log-line.warn .lm { color: var(--warn); }
+    .local-log-line.err  .lm { color: var(--danger); }
     .worker-mini-log-line {
       display: grid;
       grid-template-columns: 42px 1fr;
@@ -1714,6 +1744,27 @@
         <button class="secondary" id="mgrReleaseBtn">Release stale (&gt; 10 min)</button>
       </div>
       <div id="mgrReleaseResult" class="queue-card-result"></div>
+    </div>
+
+    <!-- Local activity log — visible to workers (and Both) so each PC
+         has a self-contained view of what's happening without opening
+         the Dashboard. Sources: state.log persisted in chrome.storage,
+         live-updated by discoveryProgress events while running. -->
+    <div class="queue-card" data-show-when="worker,both">
+      <div class="queue-card-head">
+        <span class="queue-card-icon">📡</span>
+        <div class="queue-card-title-wrap">
+          <div class="queue-card-title">Recent activity (this PC)</div>
+          <div class="queue-card-sub">Last 50 events from this PC's engine. Pushed to manager via the dashboard's activity feed.</div>
+        </div>
+      </div>
+      <div id="localLogList" class="local-log-list">
+        <div style="font-size: 11px; color: var(--muted); padding: 8px;">No activity yet.</div>
+      </div>
+      <div class="queue-card-action">
+        <button class="secondary" id="localLogClearBtn">Clear log</button>
+        <button class="secondary" id="localLogRefreshBtn">Refresh</button>
+      </div>
     </div>
 
     <!-- Worker: one-button auto-connect. Detects the newest pending
