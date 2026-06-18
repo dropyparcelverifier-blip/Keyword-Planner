@@ -15,6 +15,7 @@ import {
   getFailedJobs,
   requeueJob,
   fetchBatchReportFromSupabase,
+  getActiveBatchId,
 } from './modules/discovery-jobs.js';
 import {
   STORAGE_KEY_SERVICE_KEY,
@@ -137,6 +138,13 @@ const state = {
   workerId: '',
   queueBatchId: '',
   claimedJobs: [],
+  // Continuous-claim mode: when true, after the engine finishes processing
+  // a claimed chunk, the worker AUTOMATICALLY claims the next chunk from
+  // the same batch (or the newest pending batch if queueBatchId is empty).
+  // Loops until the queue is empty or the user clicks Stop. Set by the
+  // worker UI's "Connect & start working" button.
+  continuousClaim: false,
+  continuousChunkSize: 5,
 };
 
 // Side panel: clicking the extension icon opens the panel (Chrome 114+).
@@ -166,10 +174,14 @@ const coldStart = (async () => {
     STORAGE_KEY_WORKER_ID,
     STORAGE_KEY_QUEUE_BATCH_ID,
     STORAGE_KEY_CLAIMED_JOBS,
+    'adbrainContinuousClaim',
+    'adbrainContinuousChunkSize',
   ]);
   if (typeof data[STORAGE_KEY_WORKER_ID] === 'string')      state.workerId = data[STORAGE_KEY_WORKER_ID];
   if (typeof data[STORAGE_KEY_QUEUE_BATCH_ID] === 'string') state.queueBatchId = data[STORAGE_KEY_QUEUE_BATCH_ID];
   if (Array.isArray(data[STORAGE_KEY_CLAIMED_JOBS]))         state.claimedJobs = data[STORAGE_KEY_CLAIMED_JOBS];
+  if (typeof data.adbrainContinuousClaim === 'boolean')      state.continuousClaim = data.adbrainContinuousClaim;
+  if (typeof data.adbrainContinuousChunkSize === 'number')   state.continuousChunkSize = data.adbrainContinuousChunkSize;
   if (Array.isArray(data[STORAGE_KEY_LAST_REPORT]))   state.report = data[STORAGE_KEY_LAST_REPORT];
   if (data[STORAGE_KEY_LAST_BATCH])                   state.batchId = data[STORAGE_KEY_LAST_BATCH];
   if (data[STORAGE_KEY_LAST_STATUS])                  state.lastStatus = data[STORAGE_KEY_LAST_STATUS];
@@ -667,6 +679,65 @@ async function _handleStartInner(msg) {
       }
       await persistReport();
       broadcast({ action: 'discoveryDone', totalKeywords: state.report.length, stopped, doneProducts: state.doneProducts.length });
+      // CONTINUOUS-CLAIM AUTO-LOOP — when the worker is in continuous
+      // mode and the engine finishes without the user stopping it, claim
+      // the next chunk from the same batch (or the newest pending batch
+      // if queueBatchId is empty) and start the engine on it. Loops until
+      // the queue is empty. Adds a small cooldown so workers don't
+      // hammer Supabase if the queue churns rapidly.
+      if (state.continuousClaim && state.workerId && !stopped) {
+        try {
+          // Pick batch: prefer the one we were just working on; fall back
+          // to whatever batch is newest with pending jobs (the manager
+          // may have uploaded a new batch while we were processing the
+          // previous one).
+          let nextBatch = state.queueBatchId;
+          if (!nextBatch) {
+            nextBatch = await getActiveBatchId();
+          }
+          if (nextBatch) {
+            pushLog(`Continuous mode: claiming next chunk from batch ${nextBatch}…`, 'ok');
+            // Small cooldown so we don't immediately re-fire if Supabase
+            // is briefly inconsistent.
+            await new Promise(r => setTimeout(r, 3000));
+            const jobs = await claimJobs({
+              workerId: state.workerId,
+              batchId:  nextBatch,
+              limit:    state.continuousChunkSize || 5,
+            }).catch(() => []);
+            if (jobs.length > 0) {
+              state.queueBatchId = nextBatch;
+              state.claimedJobs  = jobs.map(j => ({ id: j.id, productUrl: j.product_url }));
+              await chrome.storage.local.set({
+                [STORAGE_KEY_QUEUE_BATCH_ID]: nextBatch,
+                [STORAGE_KEY_CLAIMED_JOBS]:   state.claimedJobs,
+              }).catch(() => {});
+              const products = jobs.map(j => ({
+                url: j.product_url, sku: j.sku,
+                productName: j.product_name, priority: j.priority,
+                handles: j.handles ? String(j.handles).split('|').filter(Boolean) : [],
+                brands:  j.brands  ? String(j.brands).split('|').filter(Boolean)  : [],
+              }));
+              pushLog(`Continuous mode: claimed ${jobs.length} more job(s) — restarting engine`, 'ok');
+              // Reset state.running so handleStart can re-enter, then
+              // re-fire handleStart. Don't await — let it run async.
+              setTimeout(() => handleStart({ products, ...(runOpts || {}) }).catch(e => {
+                pushLog(`Continuous-claim re-start failed: ${e.message}`, 'err');
+              }), 100);
+            } else {
+              pushLog(`Continuous mode: no more pending jobs in batch ${nextBatch} — stopping`, 'ok');
+              state.continuousClaim = false;
+              await chrome.storage.local.set({ adbrainContinuousClaim: false }).catch(() => {});
+            }
+          } else {
+            pushLog(`Continuous mode: no batches with pending work — stopping`, 'ok');
+            state.continuousClaim = false;
+            await chrome.storage.local.set({ adbrainContinuousClaim: false }).catch(() => {});
+          }
+        } catch (e) {
+          pushLog(`Continuous-claim error: ${e.message}`, 'err');
+        }
+      }
     } catch (err) {
       state.report = Array.from(reportMap.values());
       if (err.code === CAPTCHA_PAUSE_ERROR) {
@@ -769,6 +840,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // Clear the run-intent flag so the watchdog / onStartup hooks don't
     // immediately re-launch the run after the user asked us to stop.
     setRunIntent(false).catch(() => {});
+    // Also turn OFF continuous-claim mode — Stop should mean "stop for
+    // real", not "stop this chunk and immediately claim another one".
+    state.continuousClaim = false;
+    chrome.storage.local.set({ adbrainContinuousClaim: false }).catch(() => {});
     sendResponse({ ok: true });
     return false;
   }
@@ -873,11 +948,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         state.workerId     = workerId;
         state.queueBatchId = batchId;
         state.claimedJobs  = jobs.map(j => ({ id: j.id, productUrl: j.product_url }));
+        // Manual claim → explicitly turn OFF continuous mode. A "Both"
+        // user who previously hit "Connect & start working" still has
+        // state.continuousClaim=true; we don't want the manual one-shot
+        // claim to silently auto-loop afterwards.
+        state.continuousClaim = false;
         try {
           await chrome.storage.local.set({
             [STORAGE_KEY_WORKER_ID]:      workerId,
             [STORAGE_KEY_QUEUE_BATCH_ID]: batchId,
             [STORAGE_KEY_CLAIMED_JOBS]:   state.claimedJobs,
+            adbrainContinuousClaim:       false,
           });
         } catch (e) {
           // Storage failed — release our claims so another worker can pick
@@ -932,6 +1013,79 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
+  // Worker one-button connect: auto-detect the newest pending batch,
+  // claim a chunk, start the engine, and enable continuous-claim so the
+  // worker keeps pulling chunks until the queue is empty or the user
+  // hits Stop. Replaces the manual Batch-ID-paste + Chunk-size + Claim
+  // flow for the common case where a worker just wants to "go".
+  if (action === 'jobs:autoConnectWorker') {
+    (async () => {
+      try {
+        const workerId = (msg.workerId || state.workerId || '').trim();
+        if (!workerId) throw new Error('Set a Worker ID first.');
+        const chunkSize = Math.max(1, Math.min(50, Number(msg.chunkSize) || 5));
+        const explicitBatch = (msg.batchId || '').trim();
+        const batchId = explicitBatch || (await getActiveBatchId());
+        if (!batchId) {
+          sendResponse({ ok: false, error: 'No batches with pending work found. Ask the manager to upload a batch first.' });
+          return;
+        }
+        // Mark this run as continuous BEFORE starting so the engine's
+        // finish handler picks it up.
+        state.continuousClaim = true;
+        state.continuousChunkSize = chunkSize;
+        state.workerId = workerId;
+        await chrome.storage.local.set({
+          [STORAGE_KEY_WORKER_ID]: workerId,
+          adbrainContinuousClaim: true,
+          adbrainContinuousChunkSize: chunkSize,
+        }).catch(() => {});
+        // Release any stale claims from offline workers first.
+        await releaseStaleJobs(10).catch(() => null);
+        // Claim a chunk and start the engine (re-uses the existing
+        // claimAndStart code path).
+        const jobs = await claimJobs({ workerId, batchId, limit: chunkSize });
+        if (jobs.length === 0) {
+          // Nothing to claim right now — clear continuous flag so we
+          // don't infinite-loop, and report back.
+          state.continuousClaim = false;
+          await chrome.storage.local.set({ adbrainContinuousClaim: false }).catch(() => {});
+          sendResponse({ ok: true, claimed: 0, batchId, message: 'No pending jobs in this batch right now.' });
+          return;
+        }
+        state.queueBatchId = batchId;
+        state.claimedJobs  = jobs.map(j => ({ id: j.id, productUrl: j.product_url }));
+        await chrome.storage.local.set({
+          [STORAGE_KEY_QUEUE_BATCH_ID]: batchId,
+          [STORAGE_KEY_CLAIMED_JOBS]:   state.claimedJobs,
+        }).catch(() => {});
+        await setRunIntent(true);
+        pushLog(`Auto-connect: claimed ${jobs.length} job(s) from batch "${batchId}" — continuous mode ON`, 'ok');
+        const products = jobs.map(j => ({
+          url: j.product_url, sku: j.sku,
+          productName: j.product_name, priority: j.priority,
+          handles: j.handles ? String(j.handles).split('|').filter(Boolean) : [],
+          brands:  j.brands  ? String(j.brands).split('|').filter(Boolean)  : [],
+        }));
+        const startResult = await handleStart({ products, ...(msg.runOpts || {}) });
+        sendResponse({ ok: true, claimed: jobs.length, batchId, startResult });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message });
+      }
+    })();
+    return true;
+  }
+  // Worker explicitly turns OFF continuous mode (without stopping the
+  // current engine run).
+  if (action === 'jobs:stopContinuous') {
+    (async () => {
+      state.continuousClaim = false;
+      await chrome.storage.local.set({ adbrainContinuousClaim: false }).catch(() => {});
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
   // Manager UI — re-queue a single failed job by id.
   if (action === 'jobs:requeue') {
     (async () => {

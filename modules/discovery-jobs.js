@@ -407,6 +407,26 @@ export async function getActiveWorkers(batchId) {
     .sort((a, b) => (b.inFlight + b.doneCount) - (a.inFlight + a.doneCount));
 }
 
+// WORKER UI: pick the newest batch that still has pending work, so workers
+// don't have to type a Batch ID at all. Returns the batch_id string or
+// null if every batch is fully claimed/done/failed. Used by the
+// one-button worker flow ("Connect & start working").
+export async function getActiveBatchId() {
+  const { base, headers } = await _supabaseHeaders();
+  // Query: get distinct batch_id values that have at least one pending
+  // job, ordered by created_at desc (newest first), limit 1.
+  const url = `${base}/rest/v1/${JOBS_TABLE}`
+    + `?status=eq.pending`
+    + `&select=batch_id,created_at`
+    + `&order=created_at.desc`
+    + `&limit=1`;
+  const resp = await fetch(url, { method: 'GET', headers });
+  if (!resp.ok) return null;
+  const rows = await resp.json().catch(() => []);
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  return rows[0].batch_id || null;
+}
+
 // MANAGER UI: list failed jobs for a batch — surface which PC failed which
 // product and why, so the manager can re-queue / debug / blame the right
 // thing. Capped at 50 rows to keep the panel readable.
