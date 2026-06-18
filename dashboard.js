@@ -92,15 +92,16 @@ function renderBatchOverview(summary) {
   const pct = focus.total > 0 ? Math.round((focus.done / focus.total) * 100) : 0;
   $('batchSubLabel').textContent = state.batchId
     ? `batch ${state.batchId}`
-    : `${summary.length} batch(es)`;
+    : `${summary.length} batch${summary.length === 1 ? '' : 'es'}`;
   wrap.innerHTML = `
-    <div>
-      <div class="batch-progress-row">
-        <span><span class="pct">${pct}%</span> <span class="frac">complete</span></span>
-        <span class="frac">${focus.done} / ${focus.total}</span>
+    <div class="batch-row">
+      <div>
+        <span class="batch-pct">${pct}%</span>
+        <span class="batch-pct-label">complete</span>
       </div>
-      <div class="progress-bar"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
+      <div class="batch-frac"><strong>${focus.done}</strong> / ${focus.total}</div>
     </div>
+    <div class="progress-bar"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
     <div class="stat-grid">
       <div class="stat-tile pending"><div class="stat-tile-value">${focus.pending}</div><div class="stat-tile-label">pending</div></div>
       <div class="stat-tile claimed"><div class="stat-tile-value">${focus.claimed}</div><div class="stat-tile-label">in flight</div></div>
@@ -114,7 +115,11 @@ function renderBatchOverview(summary) {
 function renderWorkerGrid(workers, perProduct) {
   const wrap = $('workerGrid');
   if (!workers || workers.length === 0) {
-    wrap.innerHTML = `<div class="empty" style="grid-column: 1/-1;">No workers active.</div>`;
+    wrap.innerHTML = `<div class="empty" style="grid-column: 1/-1;">
+      <div class="empty-icon">🤖</div>
+      <strong>No workers active</strong>
+      Workers will appear here once they claim jobs from the queue.
+    </div>`;
     $('workerCountLabel').textContent = '0 workers';
     return;
   }
@@ -134,40 +139,40 @@ function renderWorkerGrid(workers, perProduct) {
     const done = w.done_count ?? w.doneCount ?? 0;
     const failed = w.failed_count ?? w.failedCount ?? 0;
     const avgS = w.avg_secs_per_product;
-    const avgLabel = avgS ? `${Math.round(avgS)}s avg` : '—';
+    const avgLabel = avgS ? `${Math.round(avgS)}s avg per product` : 'no completion data yet';
     const currentList = currentByWorker.get(w.worker_id) || currentByWorker.get(w.worker) || [];
     let currentHtml;
     if (currentList.length === 0) {
-      currentHtml = `<div class="worker-current idle">Idle</div>`;
+      currentHtml = `<div class="worker-current idle">▸ Idle</div>`;
     } else {
       const top = currentList[0];
       const name = top.product_name || top.sku || top.product_url || '(unnamed)';
-      const more = currentList.length > 1 ? ` <span style="color:var(--muted)">+${currentList.length - 1} more</span>` : '';
+      const more = currentList.length > 1 ? `  <span style="color:var(--text-3)">+${currentList.length - 1} more</span>` : '';
       currentHtml = `<div class="worker-current" title="${esc(name)}">▸ ${esc(name.slice(0, 60))}${more}</div>`;
     }
     return `
-      <div class="worker-card" data-worker-id="${esc(w.worker_id || w.worker)}">
+      <div class="worker-card ${dotCls}" data-worker-id="${esc(w.worker_id || w.worker)}">
         <div class="worker-head">
           <span class="worker-dot ${dotCls}"></span>
           <span class="worker-name">${esc(w.worker_id || w.worker)}</span>
           <span class="worker-hb">${fmtAgo(w.last_heartbeat || w.lastHeartbeat)}</span>
         </div>
         <div class="worker-stats">
-          <div><div class="worker-stat-v done">${done}</div><div class="worker-stat-l">done</div></div>
-          <div><div class="worker-stat-v flight">${inFlight}</div><div class="worker-stat-l">in flight</div></div>
-          <div><div class="worker-stat-v failed">${failed}</div><div class="worker-stat-l">failed</div></div>
+          <div class="worker-stat"><div class="worker-stat-v done">${done}</div><div class="worker-stat-l">done</div></div>
+          <div class="worker-stat"><div class="worker-stat-v flight">${inFlight}</div><div class="worker-stat-l">in flight</div></div>
+          <div class="worker-stat"><div class="worker-stat-v failed">${failed}</div><div class="worker-stat-l">failed</div></div>
         </div>
         ${currentHtml}
-        <div style="margin-top: 6px; font-size: 10px; color: var(--muted);">avg: ${avgLabel}</div>
+        <div class="worker-meta">${avgLabel}</div>
         <div class="worker-controls">
-          <button data-action="stop-worker" data-worker="${esc(w.worker_id || w.worker)}">Stop</button>
-          <button data-action="pause-worker" data-worker="${esc(w.worker_id || w.worker)}">Pause</button>
+          <button data-action="stop-worker" data-worker="${esc(w.worker_id || w.worker)}">⏹ Stop</button>
+          <button data-action="pause-worker" data-worker="${esc(w.worker_id || w.worker)}">⏸ Pause</button>
         </div>
       </div>
     `;
   }).join('');
   wrap.innerHTML = cards;
-  $('workerCountLabel').textContent = `${workers.length} worker(s)`;
+  $('workerCountLabel').textContent = `${workers.length} worker${workers.length === 1 ? '' : 's'}`;
 
   // Wire per-worker buttons.
   wrap.querySelectorAll('button[data-action="stop-worker"]').forEach(btn => {
@@ -182,7 +187,11 @@ function renderWorkerGrid(workers, perProduct) {
 function renderFailed(failed) {
   const wrap = $('failedList');
   if (!failed || failed.length === 0) {
-    wrap.innerHTML = `<div class="empty">No failures.</div>`;
+    wrap.innerHTML = `<div class="empty">
+      <div class="empty-icon">✓</div>
+      <strong>All clear</strong>
+      No failed jobs to triage.
+    </div>`;
     $('failedCountLabel').textContent = '0';
     return;
   }
@@ -196,11 +205,11 @@ function renderFailed(failed) {
         <div class="name">${esc(name)}</div>
         <div class="meta">
           worker: <strong>${esc(worker)}</strong>
-          · attempts: ${f.attempts || 0}
-          · reason: ${esc(reason)}
+          · attempts: <strong>${f.attempts || 0}</strong>
+          · reason: <strong>${esc(reason)}</strong>
         </div>
         <div class="actions">
-          <button data-action="requeue" data-job-id="${f.id}">Re-queue</button>
+          <button data-action="requeue" data-job-id="${f.id}">↻ Re-queue</button>
         </div>
       </div>
     `;
@@ -209,8 +218,8 @@ function renderFailed(failed) {
     btn.addEventListener('click', async () => {
       btn.disabled = true; btn.textContent = '…';
       const resp = await rpc('jobs:requeue', { jobId: btn.dataset.jobId });
-      btn.textContent = resp?.ok ? '✓' : '×';
-      setTimeout(refreshAll, 400);
+      btn.textContent = resp?.ok ? '✓ Queued' : '× Failed';
+      setTimeout(refreshAll, 600);
     });
   });
 }
@@ -223,7 +232,11 @@ function renderLog() {
     entries = entries.filter(e => e.level === state.level);
   }
   if (entries.length === 0) {
-    wrap.innerHTML = `<div class="empty">No activity for the selected filters.</div>`;
+    wrap.innerHTML = `<div class="empty">
+      <div class="empty-icon">📭</div>
+      <strong>No activity</strong>
+      Try a different filter or wait for workers to emit events.
+    </div>`;
     $('logCountLabel').textContent = '0';
     return;
   }
@@ -295,11 +308,22 @@ async function refreshAll() {
   $('lastRefresh').textContent = `refreshing…`;
   const summaryResp = await rpc('jobs:summary', { batchId: state.batchId });
   if (!summaryResp?.ok) {
-    $('lastRefresh').textContent = 'error';
-    document.body.insertAdjacentHTML('afterbegin',
-      `<div class="err-banner">Dashboard refresh failed: ${esc(summaryResp?.error || 'unknown')}. Check the extension's Settings → Connection card has valid Supabase URL + service_role key.</div>`);
+    $('lastRefresh').textContent = '⚠ error';
+    // Replace any existing error banner so they don't pile up.
+    document.querySelectorAll('.err-banner').forEach(el => el.remove());
+    document.body.insertAdjacentHTML('afterbegin', `
+      <div class="err-banner">
+        <span class="err-banner-icon">⚠</span>
+        <div>
+          <strong>Dashboard refresh failed:</strong> ${esc(summaryResp?.error || 'unknown')}<br>
+          Check that the extension's Connection card (Queue tab → 🔌) has a valid Supabase URL + service_role key, and that <code>NOTIFY pgrst, 'reload schema';</code> has been run.
+        </div>
+      </div>
+    `);
     return;
   }
+  // Clear any previous error banner on a successful refresh.
+  document.querySelectorAll('.err-banner').forEach(el => el.remove());
   renderBatchSelect(summaryResp.summary);
   renderBatchOverview(summaryResp.summary);
 
