@@ -229,4 +229,79 @@ from public.adbrain_discovery_jobs
 group by batch_id
 order by batch_id desc;
 
+-- ============================================================================
+-- OPERATIONS DASHBOARD (Option C) — activity log + command bus + stats
+-- ============================================================================
+-- Activity log: each worker pushes recent engine events (per-product progress,
+-- KP failures, CAPTCHA hits, match counts, etc.) to this table. The manager
+-- dashboard polls it every 5s to render a unified live activity feed across
+-- every worker PC, with filters by worker/level/source.
+create table if not exists public.adbrain_activity_log (
+  id            bigserial primary key,
+  batch_id      text,                       -- which batch this event belongs to
+  worker_id     text,                       -- which PC emitted it
+  level         text default 'info',        -- 'info' | 'ok' | 'warn' | 'err'
+  source        text,                       -- 'engine' | 'kp' | 'r1' | 'r2' | 'rs' | 'serp' | 'amazon' | ...
+  message       text not null,              -- human-readable line
+  product_url   text,                       -- optional: which product the event is about
+  sku           text,                       -- optional: SKU for fast filtering
+  ts            timestamptz default now()
+);
+create index if not exists adbrain_activity_log_batch_ts_idx
+  on public.adbrain_activity_log (batch_id, ts desc);
+create index if not exists adbrain_activity_log_worker_ts_idx
+  on public.adbrain_activity_log (worker_id, ts desc);
+-- Retention: keep last 7 days. The manager dashboard never asks for older.
+-- Run this periodically (Supabase cron) or manually:
+--   delete from public.adbrain_activity_log where ts < now() - interval '7 days';
+
+-- Worker commands: manager pushes "stop", "pause", "set_pacing" etc. here.
+-- Each worker polls every 30s for unacknowledged commands matching its
+-- worker_id (or worker_id=null for broadcast). The worker honors the command,
+-- then marks it acknowledged so it doesn't fire again.
+create table if not exists public.adbrain_worker_commands (
+  id              bigserial primary key,
+  worker_id       text,                     -- null = broadcast to all workers
+  command         text not null,            -- 'stop' | 'pause' | 'resume' | 'set_pacing' | 'set_continuous' | 'release_claims'
+  payload         jsonb,                    -- command-specific args
+  created_at      timestamptz default now(),
+  created_by      text,                     -- manager PC id (optional)
+  acknowledged_at timestamptz,
+  acknowledged_by text                      -- which worker_id acknowledged
+);
+create index if not exists adbrain_worker_commands_pending_idx
+  on public.adbrain_worker_commands (worker_id, acknowledged_at)
+  where acknowledged_at is null;
+
+-- Per-worker stats view — aggregates throughput, success/fail counts, and
+-- the worker's last heartbeat. Powers the per-worker grid on the dashboard.
+create or replace view public.adbrain_worker_stats as
+select
+  claimed_by                                                     as worker_id,
+  batch_id,
+  count(*)                                                       as total_touched,
+  count(*) filter (where status='done')                          as done_count,
+  count(*) filter (where status='failed')                        as failed_count,
+  count(*) filter (where status='claimed')                       as in_flight,
+  max(heartbeat_at)                                              as last_heartbeat,
+  -- Average seconds per completed product (claimed_at → done_at).
+  avg(extract(epoch from (done_at - claimed_at)))
+    filter (where status='done' and claimed_at is not null and done_at is not null)
+                                                                 as avg_secs_per_product
+from public.adbrain_discovery_jobs
+where claimed_by is not null
+group by claimed_by, batch_id;
+
+-- Per-product status view — flat lookup the dashboard uses for the
+-- "which worker is on which SKU right now" grid.
+create or replace view public.adbrain_per_product_status as
+select
+  id, batch_id, sku, product_url, product_name,
+  status, claimed_by, claimed_at, heartbeat_at, done_at,
+  failed_reason, attempts
+from public.adbrain_discovery_jobs;
+
+-- Refresh the schema cache so the dashboard's new endpoints work IMMEDIATELY.
+NOTIFY pgrst, 'reload schema';
+
 

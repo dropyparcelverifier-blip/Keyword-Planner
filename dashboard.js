@@ -1,0 +1,378 @@
+// dashboard.js — Operations Dashboard for AdBrain Discovery
+//
+// Full-page view that polls Supabase via the background service worker
+// (which holds the service_role key) and renders:
+//   - Top: batch selector + status appbar (last refresh, controls)
+//   - Left: batch progress + 4-tile stat grid + worker fleet grid
+//   - Right: failed jobs (top 50) + live activity log with level filters
+//
+// All data comes through the same chrome.runtime.sendMessage handlers the
+// side-panel popup uses. The dashboard is a separate Chrome tab opened
+// from the popup's "Open Dashboard" button. Polling cadence: 5s while the
+// tab is visible, paused when hidden (visibilitychange).
+
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  batchId: '',            // empty = aggregate across all batches
+  level: 'all',           // log level filter
+  lastLogTs: null,        // ISO ts of newest log entry we've already shown
+  logs: [],               // in-memory log buffer (capped at 500)
+  refreshTimer: null,
+  refreshIntervalMs: 5000,
+  isVisible: true,
+  managerId: '',          // set from chrome.storage adbrainWorkerId or a fallback
+};
+
+const REFRESH_MS = 5000;
+const LOG_CAP = 500;
+
+// ───────────── Util ─────────────
+const esc = (s) => String(s == null ? '' : s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+function fmtTime(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch { return '—'; }
+}
+function fmtAgo(iso) {
+  if (!iso) return '—';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (isNaN(ms) || ms < 0) return '—';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.round(h / 24);
+  return `${d}d ago`;
+}
+function workerDotClass(lastHb) {
+  if (!lastHb) return 'stale';
+  const ms = Date.now() - new Date(lastHb).getTime();
+  if (ms < 90 * 1000) return 'fresh';
+  if (ms < 5 * 60 * 1000) return 'amber';
+  return 'stale';
+}
+function rpc(action, payload = {}) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ action, ...payload }, (resp) => resolve(resp || { ok: false, error: 'no response' }));
+  });
+}
+
+// ───────────── Render: batch overview ─────────────
+function renderBatchOverview(summary) {
+  const wrap = $('batchOverview');
+  if (!summary || summary.length === 0) {
+    wrap.innerHTML = `<div class="empty">No batches yet.</div>`;
+    $('batchSubLabel').textContent = '—';
+    return;
+  }
+  // Pick the focused batch (or aggregate across all).
+  let focus;
+  if (state.batchId) {
+    focus = summary.find(b => String(b.batch_id) === String(state.batchId));
+    if (!focus) {
+      wrap.innerHTML = `<div class="empty">Batch ${esc(state.batchId)} not found.</div>`;
+      return;
+    }
+  } else {
+    // Aggregate across all visible batches.
+    focus = summary.reduce((acc, b) => ({
+      batch_id: 'ALL',
+      total: acc.total + (b.total || 0),
+      pending: acc.pending + (b.pending || 0),
+      claimed: acc.claimed + (b.claimed || 0),
+      done: acc.done + (b.done || 0),
+      failed: acc.failed + (b.failed || 0),
+    }), { total: 0, pending: 0, claimed: 0, done: 0, failed: 0 });
+  }
+  const pct = focus.total > 0 ? Math.round((focus.done / focus.total) * 100) : 0;
+  $('batchSubLabel').textContent = state.batchId
+    ? `batch ${state.batchId}`
+    : `${summary.length} batch(es)`;
+  wrap.innerHTML = `
+    <div>
+      <div class="batch-progress-row">
+        <span><span class="pct">${pct}%</span> <span class="frac">complete</span></span>
+        <span class="frac">${focus.done} / ${focus.total}</span>
+      </div>
+      <div class="progress-bar"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
+    </div>
+    <div class="stat-grid">
+      <div class="stat-tile pending"><div class="stat-tile-value">${focus.pending}</div><div class="stat-tile-label">pending</div></div>
+      <div class="stat-tile claimed"><div class="stat-tile-value">${focus.claimed}</div><div class="stat-tile-label">in flight</div></div>
+      <div class="stat-tile done"   ><div class="stat-tile-value">${focus.done}</div>   <div class="stat-tile-label">done</div></div>
+      <div class="stat-tile failed" ><div class="stat-tile-value">${focus.failed}</div> <div class="stat-tile-label">failed</div></div>
+    </div>
+  `;
+}
+
+// ───────────── Render: worker grid ─────────────
+function renderWorkerGrid(workers, perProduct) {
+  const wrap = $('workerGrid');
+  if (!workers || workers.length === 0) {
+    wrap.innerHTML = `<div class="empty" style="grid-column: 1/-1;">No workers active.</div>`;
+    $('workerCountLabel').textContent = '0 workers';
+    return;
+  }
+  // Index per-product by worker for "currently processing" labels.
+  const currentByWorker = new Map();
+  if (Array.isArray(perProduct)) {
+    for (const p of perProduct) {
+      if (p.status !== 'claimed' || !p.claimed_by) continue;
+      const cur = currentByWorker.get(p.claimed_by) || [];
+      cur.push(p);
+      currentByWorker.set(p.claimed_by, cur);
+    }
+  }
+  const cards = workers.map(w => {
+    const dotCls = workerDotClass(w.last_heartbeat || w.lastHeartbeat);
+    const inFlight = w.in_flight ?? w.inFlight ?? 0;
+    const done = w.done_count ?? w.doneCount ?? 0;
+    const failed = w.failed_count ?? w.failedCount ?? 0;
+    const avgS = w.avg_secs_per_product;
+    const avgLabel = avgS ? `${Math.round(avgS)}s avg` : '—';
+    const currentList = currentByWorker.get(w.worker_id) || currentByWorker.get(w.worker) || [];
+    let currentHtml;
+    if (currentList.length === 0) {
+      currentHtml = `<div class="worker-current idle">Idle</div>`;
+    } else {
+      const top = currentList[0];
+      const name = top.product_name || top.sku || top.product_url || '(unnamed)';
+      const more = currentList.length > 1 ? ` <span style="color:var(--muted)">+${currentList.length - 1} more</span>` : '';
+      currentHtml = `<div class="worker-current" title="${esc(name)}">▸ ${esc(name.slice(0, 60))}${more}</div>`;
+    }
+    return `
+      <div class="worker-card" data-worker-id="${esc(w.worker_id || w.worker)}">
+        <div class="worker-head">
+          <span class="worker-dot ${dotCls}"></span>
+          <span class="worker-name">${esc(w.worker_id || w.worker)}</span>
+          <span class="worker-hb">${fmtAgo(w.last_heartbeat || w.lastHeartbeat)}</span>
+        </div>
+        <div class="worker-stats">
+          <div><div class="worker-stat-v done">${done}</div><div class="worker-stat-l">done</div></div>
+          <div><div class="worker-stat-v flight">${inFlight}</div><div class="worker-stat-l">in flight</div></div>
+          <div><div class="worker-stat-v failed">${failed}</div><div class="worker-stat-l">failed</div></div>
+        </div>
+        ${currentHtml}
+        <div style="margin-top: 6px; font-size: 10px; color: var(--muted);">avg: ${avgLabel}</div>
+        <div class="worker-controls">
+          <button data-action="stop-worker" data-worker="${esc(w.worker_id || w.worker)}">Stop</button>
+          <button data-action="pause-worker" data-worker="${esc(w.worker_id || w.worker)}">Pause</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+  wrap.innerHTML = cards;
+  $('workerCountLabel').textContent = `${workers.length} worker(s)`;
+
+  // Wire per-worker buttons.
+  wrap.querySelectorAll('button[data-action="stop-worker"]').forEach(btn => {
+    btn.addEventListener('click', () => sendCommand(btn.dataset.worker, 'stop'));
+  });
+  wrap.querySelectorAll('button[data-action="pause-worker"]').forEach(btn => {
+    btn.addEventListener('click', () => sendCommand(btn.dataset.worker, 'pause'));
+  });
+}
+
+// ───────────── Render: failed jobs ─────────────
+function renderFailed(failed) {
+  const wrap = $('failedList');
+  if (!failed || failed.length === 0) {
+    wrap.innerHTML = `<div class="empty">No failures.</div>`;
+    $('failedCountLabel').textContent = '0';
+    return;
+  }
+  $('failedCountLabel').textContent = String(failed.length);
+  wrap.innerHTML = failed.map(f => {
+    const name = f.product_name || f.sku || f.product_url || '(unnamed)';
+    const reason = f.failed_reason || 'no reason recorded';
+    const worker = f.claimed_by || '(unknown)';
+    return `
+      <div class="failed-row">
+        <div class="name">${esc(name)}</div>
+        <div class="meta">
+          worker: <strong>${esc(worker)}</strong>
+          · attempts: ${f.attempts || 0}
+          · reason: ${esc(reason)}
+        </div>
+        <div class="actions">
+          <button data-action="requeue" data-job-id="${f.id}">Re-queue</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+  wrap.querySelectorAll('button[data-action="requeue"]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; btn.textContent = '…';
+      const resp = await rpc('jobs:requeue', { jobId: btn.dataset.jobId });
+      btn.textContent = resp?.ok ? '✓' : '×';
+      setTimeout(refreshAll, 400);
+    });
+  });
+}
+
+// ───────────── Render: activity log ─────────────
+function renderLog() {
+  const wrap = $('logList');
+  let entries = state.logs;
+  if (state.level !== 'all') {
+    entries = entries.filter(e => e.level === state.level);
+  }
+  if (entries.length === 0) {
+    wrap.innerHTML = `<div class="empty">No activity for the selected filters.</div>`;
+    $('logCountLabel').textContent = '0';
+    return;
+  }
+  // Newest first; cap at 200 visible lines for perf.
+  const slice = entries.slice(0, 200);
+  $('logCountLabel').textContent = `${entries.length} line(s)`;
+  wrap.innerHTML = slice.map(e => {
+    const levelClass = `level-${e.level || 'info'}`;
+    return `
+      <div class="log-line ${levelClass}">
+        <span class="ts">${fmtTime(e.ts)}</span>
+        <span class="worker">${esc(e.worker_id || '—')}</span>
+        <span class="src">${esc((e.source || 'engine').slice(0, 8))}</span>
+        <span class="msg">${esc(e.message || '')}</span>
+      </div>
+    `;
+  }).join('');
+}
+
+function mergeLogs(newEntries) {
+  if (!Array.isArray(newEntries) || newEntries.length === 0) return;
+  // Newest first in the array as returned by PostgREST (order=ts.desc).
+  // Prepend to in-memory buffer and dedupe by id.
+  const seenIds = new Set(state.logs.map(e => e.id));
+  for (const e of newEntries) {
+    if (seenIds.has(e.id)) continue;
+    state.logs.unshift(e);
+    seenIds.add(e.id);
+  }
+  // Track newest ts so incremental polling fetches only new.
+  if (newEntries.length > 0) {
+    const newest = newEntries.reduce((a, b) => (a.ts > b.ts ? a : b));
+    if (!state.lastLogTs || newest.ts > state.lastLogTs) {
+      state.lastLogTs = newest.ts;
+    }
+  }
+  // Cap.
+  if (state.logs.length > LOG_CAP) state.logs.length = LOG_CAP;
+}
+
+// ───────────── Batch select ─────────────
+function renderBatchSelect(summary) {
+  const sel = $('batchSelect');
+  const cur = state.batchId;
+  // Build option list. Keep the currently-selected even if it's not in
+  // summary (just-uploaded etc.) so the user doesn't lose focus.
+  const ids = new Set();
+  summary?.forEach(b => ids.add(String(b.batch_id)));
+  if (cur) ids.add(String(cur));
+  const opts = [`<option value="">All batches</option>`]
+    .concat(Array.from(ids).sort().reverse().map(id =>
+      `<option value="${esc(id)}" ${String(id) === String(cur) ? 'selected' : ''}>${esc(id)}</option>`));
+  sel.innerHTML = opts.join('');
+}
+
+// ───────────── Commands ─────────────
+async function sendCommand(workerId, command, payload) {
+  // workerId === null/undefined = broadcast.
+  const resp = await rpc('dashboard:sendCommand', { workerId, command, payload });
+  if (!resp?.ok) {
+    alert(`Command failed: ${resp?.error || 'unknown'}`);
+    return;
+  }
+  refreshAll();
+}
+
+// ───────────── Refresh pipeline ─────────────
+async function refreshAll() {
+  $('lastRefresh').textContent = `refreshing…`;
+  const summaryResp = await rpc('jobs:summary', { batchId: state.batchId });
+  if (!summaryResp?.ok) {
+    $('lastRefresh').textContent = 'error';
+    document.body.insertAdjacentHTML('afterbegin',
+      `<div class="err-banner">Dashboard refresh failed: ${esc(summaryResp?.error || 'unknown')}. Check the extension's Settings → Connection card has valid Supabase URL + service_role key.</div>`);
+    return;
+  }
+  renderBatchSelect(summaryResp.summary);
+  renderBatchOverview(summaryResp.summary);
+
+  // Worker stats: prefer the per-batch view if a batch is focused; else
+  // fall back to the legacy workers list which includes done counts.
+  let workers = [];
+  if (state.batchId) {
+    const ws = await rpc('dashboard:workerStats', { batchId: state.batchId });
+    workers = (ws?.ok ? ws.stats : null) || summaryResp.workers || [];
+  } else {
+    workers = summaryResp.workers || [];
+  }
+
+  // Per-product status for the "current" indicator.
+  let perProduct = [];
+  if (state.batchId) {
+    const pp = await rpc('dashboard:perProduct', { batchId: state.batchId });
+    perProduct = pp?.ok ? pp.rows : [];
+  }
+  renderWorkerGrid(workers, perProduct);
+  renderFailed(summaryResp.failed);
+
+  // Activity log: incremental fetch since lastLogTs (or full if first load).
+  const logResp = await rpc('dashboard:fetchLog', {
+    batchId: state.batchId,
+    sinceTs: state.lastLogTs,
+    limit: 200,
+  });
+  if (logResp?.ok && Array.isArray(logResp.entries)) {
+    mergeLogs(logResp.entries);
+  }
+  renderLog();
+  $('lastRefresh').textContent = `refreshed ${fmtTime(new Date().toISOString())}`;
+}
+
+// ───────────── Wire up controls ─────────────
+$('batchSelect').addEventListener('change', () => {
+  state.batchId = $('batchSelect').value;
+  state.logs = [];           // reset log on batch change
+  state.lastLogTs = null;
+  refreshAll();
+});
+$('refreshBtn').addEventListener('click', refreshAll);
+$('releaseStaleBtn').addEventListener('click', async () => {
+  const resp = await rpc('jobs:releaseStale', { staleMinutes: 10 });
+  if (resp?.ok) refreshAll();
+  else alert(`Release failed: ${resp?.error || 'unknown'}`);
+});
+$('stopAllBtn').addEventListener('click', async () => {
+  if (!confirm('Stop all worker PCs? Each worker will finish its current product, then halt.')) return;
+  await sendCommand(null, 'stop');  // broadcast
+});
+document.querySelectorAll('.log-filter').forEach(f => {
+  f.addEventListener('click', () => {
+    document.querySelectorAll('.log-filter').forEach(x => x.classList.remove('active'));
+    f.classList.add('active');
+    state.level = f.dataset.level;
+    renderLog();
+  });
+});
+
+// Visibility-based polling: pause polling when the tab is hidden so we
+// don't waste Supabase quota on backgrounded dashboards.
+document.addEventListener('visibilitychange', () => {
+  state.isVisible = !document.hidden;
+  if (state.isVisible) refreshAll();
+});
+
+// Kick off.
+function start() {
+  refreshAll();
+  state.refreshTimer = setInterval(() => {
+    if (state.isVisible) refreshAll();
+  }, REFRESH_MS);
+}
+start();
