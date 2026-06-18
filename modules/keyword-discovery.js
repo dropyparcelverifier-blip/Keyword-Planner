@@ -2890,7 +2890,24 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         { productUrl: cleanUrl });
       const kpKeywords = (kpResult?.ok ? (kpResult.keywords || []) : []).filter(Boolean);
       if (!kpResult?.ok) {
-        onProgress?.({ currentProduct: productName, currentSource: 'kp', currentAction: `Keyword Planner failed: ${kpResult.error}`, logKind: 'err' });
+        onProgress?.({
+          currentProduct: productName,
+          currentSource: 'kp',
+          currentAction: `⚠ KP FAILED: ${kpResult.error}. Engine will continue with PAA + autosuggest only (likely < 30 keywords, 2-3 min total). Common fix: re-login to Google Ads in this profile + check the KP URL in Settings.`,
+          logKind: 'err',
+        });
+      } else if (kpKeywords.length === 0) {
+        // KP succeeded (HTTP 200) but returned zero ideas. This happens
+        // when the seed is too long/specific, when Google has no data
+        // for it, or when the KP UI changed and the scraper missed
+        // results. Engine continues, but the user needs to know this
+        // product will be keyword-poor.
+        onProgress?.({
+          currentProduct: productName,
+          currentSource: 'kp',
+          currentAction: `⚠ KP returned 0 ideas for "${kpSeeds.join(', ')}". Engine will fall back to PAA + autosuggest only. If this happens on every product, check: (1) KP URL is current, (2) Google Ads session is active, (3) seed is short enough.`,
+          logKind: 'warn',
+        });
       } else {
         onProgress?.({ currentProduct: productName, currentSource: 'kp', currentAction: `KP returned ${kpKeywords.length} ideas`, logKind: 'ok' });
       }
@@ -3937,6 +3954,32 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       const kpPicks = [...highSignalKp, ...lowSignalKp].slice(0, MAX_R1_KP_SERP_SEEDS);
       for (const r of kpPicks) round1Seeds.push(r);
 
+      // FALLBACK SEED: if KP returned zero AND there are zero PAA questions
+      // (worst case — engine has nothing to cycle), seed R1 with the product
+      // name itself + a few obvious variants. Without this fallback, the
+      // engine bails after the one product SERP load and finishes in 2-3 min
+      // with almost no keywords. This rescues the run instead of silently
+      // producing nothing.
+      if (round1Seeds.length === 0 && productName) {
+        const fallbackSeeds = [
+          productName,
+          `${productName} review`,
+          `${productName} price`,
+          `${productName} best`,
+        ];
+        for (const fs of fallbackSeeds) {
+          if (report.size >= productCap) break;
+          const r = addRow(fs, 'fallback_no_kp', '');
+          if (r) round1Seeds.push(r);
+        }
+        onProgress?.({
+          currentProduct: productName,
+          currentSource: 'round1',
+          currentAction: `⚠ KP + PAA both empty — using ${round1Seeds.length} fallback seed(s) derived from product name. Yield will be low (~10-30 kw). Check KP URL / Google Ads login if this happens on every product.`,
+          logKind: 'warn',
+        });
+      }
+
       onProgress?.({
         currentProduct: productName,
         currentSource: 'round1',
@@ -4657,17 +4700,22 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // The exported CSV size always matches report.size; the previous
       // line only mentioned productRows.length, which made users think
       // the export was wrong when in fact the log was incomplete.
+      // Health check: warn if this product generated very few keywords.
+      // Typical product: 50-200 keywords. < 20 = something went wrong.
+      const productHealth = productRows.length < 20
+        ? ` ⚠ LOW YIELD (${productRows.length} kw) — likely KP failed or all filtered. Check earlier KP log line for this product.`
+        : '';
       onProgress?.({
         currentProduct: productName,
         currentSource: 'done',
         currentAction: stoppedMidProduct
-          ? `Product PARTIAL (${productsDone}/${productsTotal}) — ${productRows.length} new keywords this product (${kwWithMatches} with image matches, ${totalMatchedThumbs} total matched thumbs); will re-process on Resume; report total = ${report.size}${r2DegradedNote}`
-          : `Product complete (${productsDone}/${productsTotal}) — ${productRows.length} new keywords this product (${kwWithMatches} with image matches, ${totalMatchedThumbs} total matched thumbs); report total = ${report.size}${r2DegradedNote}`,
+          ? `Product PARTIAL (${productsDone}/${productsTotal}) — ${productRows.length} new keywords this product (${kwWithMatches} with image matches, ${totalMatchedThumbs} total matched thumbs); will re-process on Resume; report total = ${report.size}${r2DegradedNote}${productHealth}`
+          : `Product complete (${productsDone}/${productsTotal}) — ${productRows.length} new keywords this product (${kwWithMatches} with image matches, ${totalMatchedThumbs} total matched thumbs); report total = ${report.size}${r2DegradedNote}${productHealth}`,
         keywordCount: report.size,
         productKeywordCount: productRows.length,
         productMatchCount: kwWithMatches,
         productsDone, productsTotal,
-        logKind: r2DegradedSeeds > 0 ? 'err' : 'ok',
+        logKind: (r2DegradedSeeds > 0 || productRows.length < 20) ? 'warn' : 'ok',
       });
       // Tag every row from this product with the run status so the export
       // can surface degraded products at the row level.
