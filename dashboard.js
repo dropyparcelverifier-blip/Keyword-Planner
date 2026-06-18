@@ -442,6 +442,27 @@ async function refreshAll() {
   refreshWorkerFilter();
   renderLog();
   $('lastRefresh').textContent = `refreshed ${fmtTime(new Date().toISOString())}`;
+  // Connection-health pill — green if Supabase reachable, amber for
+  // pending push backlog, red on auth/network failure. Click to recheck.
+  rpc('jobs:checkConnection').then(hr => {
+    const el = $('connHealth');
+    if (!el) return;
+    if (hr?.ok && hr.health?.ok) {
+      const lat = hr.health.latencyMs ? `${hr.health.latencyMs}ms` : 'ok';
+      const pending = hr.pendingPushCount > 0 ? ` · ${hr.pendingPushCount} queued` : '';
+      el.textContent = `● ${lat}${pending}`;
+      el.style.background = pending ? 'var(--warn-soft)' : 'var(--success-soft)';
+      el.style.color = pending ? 'var(--warn)' : 'var(--success)';
+      el.style.borderColor = pending ? 'var(--warn)' : 'var(--success)';
+      el.title = pending ? `${hr.pendingPushCount} push(es) queued for retry — click to recheck` : `Supabase reachable in ${hr.health.latencyMs}ms — click to recheck`;
+    } else {
+      el.textContent = `⚠ ${hr?.health?.error || 'offline'}`;
+      el.style.background = 'var(--danger-soft)';
+      el.style.color = 'var(--danger)';
+      el.style.borderColor = 'var(--danger)';
+      el.title = `Connection problem: ${hr?.health?.error || 'unknown'} — click to recheck`;
+    }
+  });
 }
 
 // ───────────── Wire up controls ─────────────
@@ -511,6 +532,15 @@ $('refreshIntervalSelect').addEventListener('change', () => {
 $('logWorkerFilter').addEventListener('change', () => {
   state.workerFilter = $('logWorkerFilter').value;
   renderLog();
+});
+
+// Click the connection-health pill to force an immediate recheck.
+$('connHealth').addEventListener('click', () => {
+  $('connHealth').textContent = '⋯ checking';
+  $('connHealth').style.background = '';
+  $('connHealth').style.color = '';
+  $('connHealth').style.borderColor = '';
+  refreshAll();
 });
 document.querySelectorAll('.log-filter').forEach(f => {
   f.addEventListener('click', () => {

@@ -1290,15 +1290,27 @@ function mgrCheckCreds() {
     const card = $('mgrCredsCard');
     const status = $('mgrCredsStatus');
     const haveAll = resp.hasServiceKey && resp.hasSupabaseUrl;
-    // The card now ALWAYS stays visible — the setup-code helper inside it
-    // is useful even after credentials are set (manager generates the
-    // code from saved creds). The header status line just reflects state.
     if (card) card.style.display = '';
     if (haveAll) {
-      if (status) {
-        status.textContent = '✓ Connected to Supabase. Generate a setup code below to share with other PCs.';
-        status.style.color = 'var(--success)';
-      }
+      // Run a real connection check — credentials present doesn't mean
+      // reachable. Could be wrong key, stale schema cache, network down,
+      // etc. Show the live health alongside the basic creds-present
+      // status so the user knows whether queue calls will actually work.
+      chrome.runtime.sendMessage({ action: 'jobs:checkConnection' }, (hr) => {
+        if (!status) return;
+        if (hr?.ok && hr.health?.ok) {
+          const lat = hr.health.latencyMs ? ` (${hr.health.latencyMs}ms)` : '';
+          const pending = (hr.pendingPushCount && hr.pendingPushCount > 0)
+            ? ` · ${hr.pendingPushCount} push(es) queued for retry`
+            : '';
+          status.textContent = `✓ Connected${lat}${pending}`;
+          status.style.color = 'var(--success)';
+        } else {
+          const err = hr?.health?.error || hr?.error || 'unreachable';
+          status.textContent = `⚠ Connection problem: ${err}`;
+          status.style.color = 'var(--warn)';
+        }
+      });
     } else {
       if (status) {
         const missing = [];

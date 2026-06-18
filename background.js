@@ -157,6 +157,17 @@ const state = {
   // worker UI's "Connect & start working" button.
   continuousClaim: false,
   continuousChunkSize: 5,
+  // Connection-health snapshot. Populated by pingConnectionHealth (every
+  // 60s alarm + on demand). The popup + dashboard show this so the user
+  // knows whether Supabase is reachable from THIS PC. ok=false = creds
+  // wrong, network down, schema cache stale, etc. — anything that would
+  // make the queue + auto-push fail silently.
+  connectionHealth: {
+    ok: null,           // null = never checked
+    latencyMs: null,
+    lastCheckedAt: null,
+    error: null,
+  },
 };
 
 // Side panel: clicking the extension icon opens the panel (Chrome 114+).
@@ -189,11 +200,21 @@ const coldStart = (async () => {
     'adbrainContinuousClaim',
     'adbrainContinuousChunkSize',
     'adbrainActivityBuffer',
+    'adbrainPendingPushes',
   ]);
   // Restore activity buffer from before SW death so we don't lose recent
   // events that hadn't been pushed to Supabase yet.
   if (Array.isArray(data.adbrainActivityBuffer)) {
     _activityBuffer.push(...data.adbrainActivityBuffer);
+  }
+  // Restore pending-push queue so SW death mid-push doesn't lose data.
+  // Re-trying on cold start is essential for the "batch shows done but
+  // no data in Supabase" bug class.
+  if (Array.isArray(data[PENDING_PUSH_STORAGE_KEY])) {
+    _pendingPushes.push(...data[PENDING_PUSH_STORAGE_KEY]);
+    if (_pendingPushes.length > 0) {
+      pushLog(`Restored ${_pendingPushes.length} pending push(es) from previous session — will retry`, 'ok');
+    }
   }
   if (typeof data[STORAGE_KEY_WORKER_ID] === 'string')      state.workerId = data[STORAGE_KEY_WORKER_ID];
   if (typeof data[STORAGE_KEY_QUEUE_BATCH_ID] === 'string') state.queueBatchId = data[STORAGE_KEY_QUEUE_BATCH_ID];
@@ -396,6 +417,94 @@ const COMMAND_POLL_ALARM = 'adbrain-command-poll';
 try {
   chrome.alarms.create(COMMAND_POLL_ALARM, { periodInMinutes: 0.5, delayInMinutes: 0.1 });
 } catch {}
+// Pending-push retry alarm — drains the persistent push queue. Catches
+// auto-pushes that failed during a previous SW lifetime so data
+// eventually reaches Supabase even after browser crashes.
+const PENDING_PUSH_ALARM = 'adbrain-pending-push';
+try {
+  chrome.alarms.create(PENDING_PUSH_ALARM, { periodInMinutes: 0.5, delayInMinutes: 0.2 });
+} catch {}
+// Supabase connection-health ping — pings Supabase every 60s and updates
+// state.connectionHealth so the popup + dashboard can show whether we
+// can actually reach the database. Catches stale credentials, network
+// outage, schema-cache problems before the user notices via downstream
+// errors. Result stored in state.connectionHealth = { ok, latencyMs,
+// lastCheckedAt, error }.
+const HEALTH_PING_ALARM = 'adbrain-health-ping';
+try {
+  chrome.alarms.create(HEALTH_PING_ALARM, { periodInMinutes: 1, delayInMinutes: 0.3 });
+} catch {}
+
+// Pending-push queue for keyword rows that haven't reached Supabase yet.
+// Each entry: { productUrl, batchId, rows[], attempts, lastError, ts }.
+// Persisted to chrome.storage so SW death + watchdog wake doesn't lose
+// data mid-push. Drained by flushPendingPushes (called on alarm + on
+// successful auto-push to catch retries). Prevents the entire class of
+// "batch shows done but no data" bugs from the audit.
+const _pendingPushes = [];
+const PENDING_PUSH_CAP = 50;       // skip if queue blows up (avoids runaway)
+const PENDING_PUSH_STORAGE_KEY = 'adbrainPendingPushes';
+const PENDING_PUSH_MAX_ATTEMPTS = 5;
+let _pendingPushPersistTimer = null;
+
+function _persistPendingPushes() {
+  if (_pendingPushPersistTimer) clearTimeout(_pendingPushPersistTimer);
+  _pendingPushPersistTimer = setTimeout(() => {
+    chrome.storage.local.set({ [PENDING_PUSH_STORAGE_KEY]: _pendingPushes.slice(-PENDING_PUSH_CAP) }).catch(() => {});
+    _pendingPushPersistTimer = null;
+  }, 1500);
+}
+
+function enqueuePendingPush(productUrl, rows, batchId) {
+  if (!productUrl || !Array.isArray(rows) || rows.length === 0) return;
+  // Dedupe — if the same product is already in the queue, replace its
+  // rows (most recent state wins).
+  const existingIdx = _pendingPushes.findIndex(p => p.productUrl === productUrl);
+  const entry = {
+    productUrl,
+    batchId: batchId || state.batchId || null,
+    rows: rows.slice(),
+    attempts: existingIdx >= 0 ? _pendingPushes[existingIdx].attempts : 0,
+    lastError: null,
+    ts: new Date().toISOString(),
+  };
+  if (existingIdx >= 0) _pendingPushes[existingIdx] = entry;
+  else _pendingPushes.push(entry);
+  if (_pendingPushes.length > PENDING_PUSH_CAP) {
+    _pendingPushes.splice(0, _pendingPushes.length - PENDING_PUSH_CAP);
+  }
+  _persistPendingPushes();
+}
+
+async function flushPendingPushes() {
+  if (_pendingPushes.length === 0) return;
+  // Process one entry per tick — if Supabase is rate-limited we don't
+  // want to hammer it 50 times in a row.
+  const entry = _pendingPushes[0];
+  if (entry.attempts >= PENDING_PUSH_MAX_ATTEMPTS) {
+    pushLog(`Push retry exhausted for ${entry.productUrl} after ${entry.attempts} attempts — dropping ${entry.rows.length} row(s). Last error: ${entry.lastError || 'unknown'}`, 'err');
+    _pendingPushes.shift();
+    _persistPendingPushes();
+    return;
+  }
+  entry.attempts++;
+  try {
+    const r = await pushToAdBrain(entry.rows);
+    if (r.failed > 0) {
+      entry.lastError = `${r.failed}/${r.success + r.failed} rows failed`;
+      pushLog(`Push retry ${entry.attempts}/${PENDING_PUSH_MAX_ATTEMPTS} for ${entry.productUrl}: ${entry.lastError} — will retry`, 'err');
+      _persistPendingPushes();
+      return;  // leave at head of queue for next tick
+    }
+    pushLog(`✓ Push retry succeeded: ${r.success} row(s) for ${entry.productUrl}`, 'ok');
+    _pendingPushes.shift();
+    _persistPendingPushes();
+  } catch (e) {
+    entry.lastError = e.message;
+    pushLog(`Push retry ${entry.attempts}/${PENDING_PUSH_MAX_ATTEMPTS} for ${entry.productUrl} threw: ${e.message}`, 'err');
+    _persistPendingPushes();
+  }
+}
 
 // In-memory activity log buffer. Drained every 30s by the alarm AND
 // immediately on high-impact events (errors, product done/failed). Capped
@@ -453,6 +562,54 @@ async function flushActivityBuffer() {
     }
   } catch {
     _activityBuffer.unshift(...slice.slice(0, 100));
+  }
+}
+
+// Ping Supabase with a tiny query (HEAD on the jobs table) to verify
+// connectivity + auth + schema cache. Updates state.connectionHealth.
+// Cheap — should complete in 100-300ms over a healthy connection.
+async function pingConnectionHealth() {
+  try {
+    const data = await chrome.storage.local.get(['adbrainServiceKey', 'adbrainSupabaseUrl']);
+    const url = (data.adbrainSupabaseUrl || '').trim();
+    const key = (data.adbrainServiceKey || '').trim();
+    if (!url || !key) {
+      state.connectionHealth = {
+        ok: false, latencyMs: null,
+        lastCheckedAt: new Date().toISOString(),
+        error: 'No Supabase credentials configured',
+      };
+      return;
+    }
+    const t0 = Date.now();
+    // HEAD on jobs table — returns headers but no body. Fast + cheap.
+    const resp = await fetch(`${url.replace(/\/+$/, '')}/rest/v1/adbrain_discovery_jobs?select=id&limit=1`, {
+      method: 'HEAD',
+      headers: {
+        'apikey': key,
+        'Authorization': `Bearer ${key}`,
+      },
+    });
+    const latencyMs = Date.now() - t0;
+    if (resp.ok) {
+      state.connectionHealth = {
+        ok: true, latencyMs,
+        lastCheckedAt: new Date().toISOString(),
+        error: null,
+      };
+    } else {
+      state.connectionHealth = {
+        ok: false, latencyMs,
+        lastCheckedAt: new Date().toISOString(),
+        error: `HTTP ${resp.status}${resp.status === 404 ? ' — table not found (run schema?)' : resp.status === 401 ? ' — bad service_role key' : ''}`,
+      };
+    }
+  } catch (e) {
+    state.connectionHealth = {
+      ok: false, latencyMs: null,
+      lastCheckedAt: new Date().toISOString(),
+      error: `Network: ${e.message}`,
+    };
   }
 }
 
@@ -523,6 +680,8 @@ chrome.alarms?.onAlarm.addListener((alarm) => {
   if (alarm.name === HEARTBEAT_ALARM)       return void tickHeartbeat();
   if (alarm.name === DASHBOARD_PUSH_ALARM)  return void flushActivityBuffer();
   if (alarm.name === COMMAND_POLL_ALARM)    return void pollWorkerCommands();
+  if (alarm.name === PENDING_PUSH_ALARM)    return void flushPendingPushes();
+  if (alarm.name === HEALTH_PING_ALARM)     return void pingConnectionHealth();
 });
 
 // Chrome itself just started — wake immediately and resume if intent flag set.
@@ -801,27 +960,59 @@ async function _handleStartInner(msg) {
             // data only goes to Supabase via the manual "Push to AdBrain"
             // button. In distributed mode, every worker must push as it
             // goes — that's how the centralized download works at all.
+            //
+            // Reliability: any rows that fail to land on the first try
+            // (transient HTTP 5xx, network blip, SW death mid-push) get
+            // queued into _pendingPushes, which a separate alarm retries
+            // up to PENDING_PUSH_MAX_ATTEMPTS times — surviving SW kill
+            // via chrome.storage persistence. Result: data eventually
+            // reaches Supabase OR the manager sees a clear "retry
+            // exhausted" log line. Either way no silent loss.
             if (state.workerId) {
               const productRows = state.report.filter(r => r.productUrl === cleanUrl);
-              if (productRows.length > 0) {
+              if (productRows.length === 0) {
+                // No rows generated for this product — log so the
+                // manager isn't left wondering why the batch says
+                // "done" but Supabase has nothing for it. Common reasons:
+                // KP returned 0 ideas, all candidates failed the
+                // relevance filter, the page was non-product, etc.
+                emitProgress({
+                  currentAction: `Product ${cleanUrl} completed with 0 keyword rows generated — nothing to push. Check KP / relevance filter / SERP.`,
+                  logKind: 'warn',
+                });
+              } else {
                 try {
                   const r = await pushToAdBrain(productRows);
-                  emitProgress({
-                    currentAction: `Auto-pushed ${r.success || productRows.length} row(s) for ${cleanUrl} to Supabase`,
-                    logKind: 'ok',
-                  });
-                  // Advance lastPushedCount so the manual "Push" button
-                  // doesn't re-push these rows.
-                  state.lastPushedCount = Math.max(
-                    state.lastPushedCount,
-                    state.report.length
-                  );
-                  await persistPushed();
+                  if (r.failed > 0) {
+                    // Don't advance lastPushedCount and DO queue the
+                    // failed product for retry. Previously the success
+                    // count was used to advance the cursor, silently
+                    // discarding the failed rows.
+                    emitProgress({
+                      currentAction: `Auto-push partial for ${cleanUrl}: ${r.success}/${productRows.length} landed, ${r.failed} queued for retry`,
+                      logKind: 'warn',
+                    });
+                    enqueuePendingPush(cleanUrl, productRows, state.queueBatchId);
+                  } else {
+                    emitProgress({
+                      currentAction: `✓ Auto-pushed ${r.success} row(s) for ${cleanUrl} to Supabase`,
+                      logKind: 'ok',
+                    });
+                    // Advance lastPushedCount ONLY on full success.
+                    state.lastPushedCount = Math.max(
+                      state.lastPushedCount,
+                      state.report.length
+                    );
+                    await persistPushed();
+                  }
                 } catch (e) {
+                  // Network/auth failure on the whole push. Queue for
+                  // retry — pendingPushAlarm will pick it up.
                   emitProgress({
-                    currentAction: `Auto-push to Supabase failed for ${cleanUrl}: ${e.message} — manager won't see these rows in the centralized download until you click "Push to AdBrain" from this PC.`,
+                    currentAction: `Auto-push failed for ${cleanUrl} (${e.message}) — queued for retry. Dashboard will receive the data once Supabase is reachable.`,
                     logKind: 'err',
                   });
+                  enqueuePendingPush(cleanUrl, productRows, state.queueBatchId);
                 }
               }
             }
@@ -836,6 +1027,33 @@ async function _handleStartInner(msg) {
             if (!state.doneProducts.includes(cleanUrl)) {
               state.doneProducts.push(cleanUrl);
               await persistDone();
+            }
+            // Push ANY partial rows the engine accumulated before the
+            // failure. Without this, the rows sit orphaned in state.report
+            // — the dashboard's centralized download misses them and
+            // they're invisible until the user notices and clicks the
+            // manual Push button. Pushing partials gives the manager
+            // visibility into what was discovered before the abort.
+            if (state.workerId) {
+              const partialRows = state.report.filter(r => r.productUrl === cleanUrl);
+              if (partialRows.length > 0) {
+                try {
+                  const r = await pushToAdBrain(partialRows);
+                  if (r.failed > 0) {
+                    enqueuePendingPush(cleanUrl, partialRows, state.queueBatchId);
+                  }
+                  emitProgress({
+                    currentAction: `Pushed ${r.success}/${partialRows.length} partial row(s) for failed product ${cleanUrl}`,
+                    logKind: 'warn',
+                  });
+                } catch (e) {
+                  enqueuePendingPush(cleanUrl, partialRows, state.queueBatchId);
+                  emitProgress({
+                    currentAction: `Queued ${partialRows.length} partial row(s) for failed product ${cleanUrl} (push threw: ${e.message})`,
+                    logKind: 'err',
+                  });
+                }
+              }
             }
             if (state.workerId && state.queueBatchId) {
               try {
@@ -1043,6 +1261,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         queueBatchId: state.queueBatchId,
         claimedJobs: state.claimedJobs,
         continuousClaim: state.continuousClaim,
+        connectionHealth: state.connectionHealth,
+        pendingPushCount: _pendingPushes.length,
       });
     });
     return true;
@@ -1250,6 +1470,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const result = await saveWorkerConfig(updates, msg.managerId || state.workerId || 'manager');
         sendResponse({ ok: true, config: result });
       } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
+  // On-demand connection health check (popup + dashboard "Refresh
+  // connection" button). Fires pingConnectionHealth and returns the
+  // fresh result inline so the UI shows the up-to-date status.
+  if (action === 'jobs:checkConnection') {
+    (async () => {
+      await pingConnectionHealth();
+      sendResponse({ ok: true, health: state.connectionHealth, pendingPushCount: _pendingPushes.length });
     })();
     return true;
   }
