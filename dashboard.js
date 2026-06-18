@@ -16,15 +16,16 @@ const $ = (id) => document.getElementById(id);
 const state = {
   batchId: '',            // empty = aggregate across all batches
   level: 'all',           // log level filter
+  workerFilter: '',       // empty = all workers
   lastLogTs: null,        // ISO ts of newest log entry we've already shown
   logs: [],               // in-memory log buffer (capped at 500)
+  knownWorkers: new Set(),// populated from worker stats + log entries
   refreshTimer: null,
   refreshIntervalMs: 5000,
   isVisible: true,
   managerId: '',          // set from chrome.storage adbrainWorkerId or a fallback
 };
 
-const REFRESH_MS = 5000;
 const LOG_CAP = 500;
 
 // ───────────── Util ─────────────
@@ -231,6 +232,9 @@ function renderLog() {
   if (state.level !== 'all') {
     entries = entries.filter(e => e.level === state.level);
   }
+  if (state.workerFilter) {
+    entries = entries.filter(e => e.worker_id === state.workerFilter);
+  }
   if (entries.length === 0) {
     wrap.innerHTML = `<div class="empty">
       <div class="empty-icon">📭</div>
@@ -265,6 +269,8 @@ function mergeLogs(newEntries) {
     if (seenIds.has(e.id)) continue;
     state.logs.unshift(e);
     seenIds.add(e.id);
+    // Track worker names for the filter dropdown.
+    if (e.worker_id) state.knownWorkers.add(e.worker_id);
   }
   // Track newest ts so incremental polling fetches only new.
   if (newEntries.length > 0) {
@@ -275,6 +281,18 @@ function mergeLogs(newEntries) {
   }
   // Cap.
   if (state.logs.length > LOG_CAP) state.logs.length = LOG_CAP;
+}
+
+// Refresh the worker filter dropdown (used by both the activity log
+// filter and the per-batch summary's worker section). Keeps the
+// currently-selected worker if it still exists in the set.
+function refreshWorkerFilter() {
+  const sel = $('logWorkerFilter');
+  if (!sel) return;
+  const cur = state.workerFilter;
+  const sorted = Array.from(state.knownWorkers).sort();
+  sel.innerHTML = `<option value="">all workers</option>`
+    + sorted.map(w => `<option value="${esc(w)}" ${w === cur ? 'selected' : ''}>${esc(w)}</option>`).join('');
 }
 
 // ───────────── Batch select ─────────────
@@ -290,6 +308,55 @@ function renderBatchSelect(summary) {
     .concat(Array.from(ids).sort().reverse().map(id =>
       `<option value="${esc(id)}" ${String(id) === String(cur) ? 'selected' : ''}>${esc(id)}</option>`));
   sel.innerHTML = opts.join('');
+}
+
+// ───────────── Manager config panel ─────────────
+// Show what's in adbrain_worker_config so the manager can see what
+// settings every worker will pick up on its next claim. Pulls from
+// the same fetchWorkerConfig endpoint workers use.
+function renderConfigPanel(cfg) {
+  const wrap = $('configPanel');
+  const status = $('configStatus');
+  if (!cfg || !cfg.updated_at) {
+    if (status) status.textContent = '—';
+    wrap.innerHTML = `<div class="empty" style="padding: 16px 8px;">
+      <div class="empty-icon" style="font-size: 24px;">📦</div>
+      <strong>No config pushed yet</strong>
+      Workers will use their local Settings defaults until a manager pushes from the Settings tab.
+    </div>`;
+    return;
+  }
+  const ago = fmtAgo(cfg.updated_at);
+  if (status) status.textContent = `last push ${ago}`;
+  const pills = [];
+  const addPill = (key, val) => {
+    if (val === null || val === undefined || val === '') return;
+    pills.push(`
+      <div class="config-pill">
+        <div class="config-pill-key">${esc(key)}</div>
+        <div class="config-pill-val" title="${esc(String(val))}">${esc(String(val).slice(0, 40))}</div>
+      </div>
+    `);
+  };
+  addPill('KP URL',          cfg.kp_url ? cfg.kp_url.slice(0, 40) + '…' : null);
+  addPill('Max KP/product',  cfg.kp_max_per_product);
+  addPill('Match profile',   cfg.match_profile);
+  addPill('CLIP override',   cfg.clip_threshold_override != null ? Number(cfg.clip_threshold_override).toFixed(2) : null);
+  addPill('Max img-match rows', cfg.max_image_match_rows);
+  addPill('Search delay',    (cfg.search_delay_min_ms != null && cfg.search_delay_max_ms != null) ? `${Math.round(cfg.search_delay_min_ms/1000)}–${Math.round(cfg.search_delay_max_ms/1000)}s` : null);
+  addPill('Product delay',   (cfg.product_delay_min_ms != null && cfg.product_delay_max_ms != null) ? `${Math.round(cfg.product_delay_min_ms/1000)}–${Math.round(cfg.product_delay_max_ms/1000)}s` : null);
+  addPill('Chunk size',      cfg.chunk_size);
+  addPill('Chunk rest',      (cfg.chunk_rest_min_ms != null && cfg.chunk_rest_max_ms != null) ? `${Math.round(cfg.chunk_rest_min_ms/60000)}–${Math.round(cfg.chunk_rest_max_ms/60000)}min` : null);
+  addPill('Keyword cap',     cfg.cap);
+  addPill('Auto-export',     cfg.auto_export != null ? (cfg.auto_export ? 'on' : 'off') : null);
+  if (pills.length === 0) {
+    wrap.innerHTML = `<div class="empty" style="padding: 12px 8px;">
+      Config row exists but all fields are empty. Push from Settings tab.
+    </div>`;
+    return;
+  }
+  pills.push(`<div class="config-meta">Pushed ${ago} by <strong style="color:var(--text-1);">${esc(cfg.updated_by || 'unknown')}</strong></div>`);
+  wrap.innerHTML = pills.join('');
 }
 
 // ───────────── Commands ─────────────
@@ -355,6 +422,16 @@ async function refreshAll() {
   if (logResp?.ok && Array.isArray(logResp.entries)) {
     mergeLogs(logResp.entries);
   }
+  // Manager config panel — what's pushed to workers.
+  const cfgResp = await rpc('jobs:fetchWorkerConfig');
+  if (cfgResp?.ok) renderConfigPanel(cfgResp.config);
+  // Add worker IDs from the stats so the filter dropdown has them
+  // before activity logs arrive.
+  for (const w of workers) {
+    const name = w.worker_id || w.worker;
+    if (name) state.knownWorkers.add(name);
+  }
+  refreshWorkerFilter();
   renderLog();
   $('lastRefresh').textContent = `refreshed ${fmtTime(new Date().toISOString())}`;
 }
@@ -376,6 +453,49 @@ $('stopAllBtn').addEventListener('click', async () => {
   if (!confirm('Stop all worker PCs? Each worker will finish its current product, then halt.')) return;
   await sendCommand(null, 'stop');  // broadcast
 });
+
+// Bulk re-queue every failed job in the current batch back to pending.
+// Useful when a manager wants to retry all failures at once (e.g.,
+// after fixing a network problem or sleeping through a CAPTCHA storm).
+$('requeueAllBtn').addEventListener('click', async () => {
+  // Pull the failed list from the most recent refresh's render. The
+  // failed-rows DOM has the job IDs in data-job-id attributes.
+  const btns = document.querySelectorAll('#failedList button[data-action="requeue"]');
+  if (btns.length === 0) { alert('No failed jobs to re-queue.'); return; }
+  if (!confirm(`Re-queue all ${btns.length} failed job(s) back to pending?`)) return;
+  $('requeueAllBtn').disabled = true;
+  $('requeueAllBtn').textContent = `↻ Re-queuing 0/${btns.length}…`;
+  let done = 0;
+  for (const btn of btns) {
+    const resp = await rpc('jobs:requeue', { jobId: btn.dataset.jobId });
+    done++;
+    $('requeueAllBtn').textContent = `↻ Re-queuing ${done}/${btns.length}…`;
+    if (!resp?.ok) console.warn('requeue failed:', btn.dataset.jobId, resp);
+  }
+  $('requeueAllBtn').disabled = false;
+  $('requeueAllBtn').textContent = '↻ Re-queue all failed';
+  refreshAll();
+});
+
+// Auto-refresh interval selector.
+$('refreshIntervalSelect').addEventListener('change', () => {
+  const ms = parseInt($('refreshIntervalSelect').value, 10) || 0;
+  state.refreshIntervalMs = ms;
+  if (state.refreshTimer) { clearInterval(state.refreshTimer); state.refreshTimer = null; }
+  if (ms > 0) {
+    state.refreshTimer = setInterval(() => {
+      if (state.isVisible) refreshAll();
+    }, ms);
+  }
+  // Persist user preference.
+  try { localStorage.setItem('adbrainDashRefreshMs', String(ms)); } catch {}
+});
+
+// Activity log: filter by worker.
+$('logWorkerFilter').addEventListener('change', () => {
+  state.workerFilter = $('logWorkerFilter').value;
+  renderLog();
+});
 document.querySelectorAll('.log-filter').forEach(f => {
   f.addEventListener('click', () => {
     document.querySelectorAll('.log-filter').forEach(x => x.classList.remove('active'));
@@ -394,9 +514,19 @@ document.addEventListener('visibilitychange', () => {
 
 // Kick off.
 function start() {
+  // Restore user's saved refresh interval preference.
+  try {
+    const saved = parseInt(localStorage.getItem('adbrainDashRefreshMs'), 10);
+    if (saved >= 0 && [0, 5000, 10000, 30000, 60000].includes(saved)) {
+      state.refreshIntervalMs = saved;
+      $('refreshIntervalSelect').value = String(saved);
+    }
+  } catch {}
   refreshAll();
-  state.refreshTimer = setInterval(() => {
-    if (state.isVisible) refreshAll();
-  }, REFRESH_MS);
+  if (state.refreshIntervalMs > 0) {
+    state.refreshTimer = setInterval(() => {
+      if (state.isVisible) refreshAll();
+    }, state.refreshIntervalMs);
+  }
 }
 start();

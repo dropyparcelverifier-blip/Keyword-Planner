@@ -759,12 +759,14 @@ chrome.runtime.onMessage.addListener((msg) => {
     const p = msg.payload || {};
     // Keep the worker-live block fresh on every progress tick. The
     // current action line is the most useful single signal of what
-    // the engine is doing right now.
+    // the engine is doing right now. Also push to the mini-log so the
+    // worker sees recent history at a glance.
     if (p.currentAction) {
       const act = $('workerLiveAction');
       if (act) act.textContent = p.currentAction.length > 100
         ? p.currentAction.slice(0, 100) + '…'
         : p.currentAction;
+      pushWorkerMiniLogLine(p.currentAction, p.logKind);
     }
     if (p.currentProduct !== undefined) $('currentProduct').textContent = p.currentProduct || '—';
     if (p.currentSource !== undefined) $('currentSource').textContent = p.currentSource || '—';
@@ -1621,6 +1623,27 @@ $('mgrWorkerId')?.addEventListener('input', () => {
     chrome.runtime.sendMessage({ action: 'jobs:setWorkerId', workerId: id });
   }, 400);
 });
+
+// Worker mini-log — last 6 events shown inside the worker live status
+// block so the user has visibility without opening the full activity
+// log via the Dashboard. Capped ring buffer; updated on every
+// discoveryProgress event with currentAction.
+const _workerMiniLog = [];
+const WORKER_MINI_LOG_CAP = 6;
+function pushWorkerMiniLogLine(action, kind) {
+  if (!action) return;
+  const now = new Date();
+  const t = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
+  _workerMiniLog.unshift({ t, msg: action.slice(0, 200), kind: kind || 'info' });
+  if (_workerMiniLog.length > WORKER_MINI_LOG_CAP) _workerMiniLog.length = WORKER_MINI_LOG_CAP;
+  const wrap = $('workerMiniLog');
+  if (!wrap) return;
+  wrap.innerHTML = _workerMiniLog.map(e => {
+    const kindCls = e.kind === 'ok' ? 'ok' : e.kind === 'err' ? 'err' : e.kind === 'warn' ? 'warn' : '';
+    const safe = String(e.msg).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    return `<div class="worker-mini-log-line ${kindCls}"><span class="t">${e.t}</span><span class="m">${safe}</span></div>`;
+  }).join('');
+}
 
 // Worker live-status update — tracks engine state and updates the
 // worker live block in real time. Driven by discoveryProgress events
