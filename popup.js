@@ -405,8 +405,38 @@ $('saveSettings').addEventListener('click', () => {
       [STORAGE_KEY_CHUNK_REST_MAX]:    parseInt($('chunkRestMax').value, 10) || 10,
     },
     () => {
-      $('settingsSaved').textContent = 'Saved.';
-      setTimeout(() => { $('settingsSaved').textContent = ''; }, 2000);
+      $('settingsSaved').textContent = 'Saved locally — pushing to workers…';
+      // AUTO-PUSH to workers immediately so the manager doesn't have to
+      // remember to click a separate Push button. Each Save Settings
+      // click both writes to local chrome.storage AND PATCHes
+      // adbrain_worker_config so every worker picks up the new values
+      // on their next chunk claim.
+      const updates = {
+        kp_url:               $('kpUrl').value.trim() || null,
+        kp_max_per_product:   parseInt($('kpMaxPerProduct').value, 10) || null,
+        match_profile:        $('matchProfile').value || null,
+        clip_threshold_override: ($('matchProfile').value === 'custom')
+          ? Math.max(0.5, Math.min(0.95, (parseInt($('clipThreshold').value, 10) || 72) / 100))
+          : null,
+        max_image_match_rows: Math.max(0, parseInt($('maxImageMatchRows').value, 10) || 0),
+        search_delay_min_ms:  (parseInt($('searchDelayMin').value, 10) || 5)  * 1000,
+        search_delay_max_ms:  (parseInt($('searchDelayMax').value, 10) || 12) * 1000,
+        product_delay_min_ms: (parseInt($('productDelayMin').value, 10) || 15) * 1000,
+        product_delay_max_ms: (parseInt($('productDelayMax').value, 10) || 35) * 1000,
+        chunk_size:           parseInt($('chunkSize').value, 10) || 8,
+        chunk_rest_min_ms:    (parseInt($('chunkRestMin').value, 10) || 5)  * 60 * 1000,
+        chunk_rest_max_ms:    (parseInt($('chunkRestMax').value, 10) || 10) * 60 * 1000,
+        cap:                  parseInt($('capInput')?.value, 10) || null,
+        auto_export:          !!$('autoExport').checked,
+      };
+      chrome.runtime.sendMessage({ action: 'jobs:saveWorkerConfig', updates }, (resp) => {
+        if (resp?.ok) {
+          $('settingsSaved').textContent = '✓ Saved + pushed to all workers';
+        } else {
+          $('settingsSaved').textContent = `Saved locally (push to workers failed: ${resp?.error || 'check Connection'})`;
+        }
+        setTimeout(() => { $('settingsSaved').textContent = ''; }, 3500);
+      });
     }
   );
 });

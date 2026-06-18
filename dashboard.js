@@ -166,8 +166,9 @@ function renderWorkerGrid(workers, perProduct) {
         ${currentHtml}
         <div class="worker-meta">${avgLabel}</div>
         <div class="worker-controls">
-          <button data-action="stop-worker" data-worker="${esc(w.worker_id || w.worker)}">⏹ Stop</button>
-          <button data-action="pause-worker" data-worker="${esc(w.worker_id || w.worker)}">⏸ Pause</button>
+          <button data-action="stop-worker"    data-worker="${esc(w.worker_id || w.worker)}" title="Halt after current product">⏹ Stop</button>
+          <button data-action="resume-worker"  data-worker="${esc(w.worker_id || w.worker)}" title="Resume auto-claim loop">▶ Resume</button>
+          <button data-action="release-worker" data-worker="${esc(w.worker_id || w.worker)}" title="Release this worker's claims back to queue">⏏ Release</button>
         </div>
       </div>
     `;
@@ -175,12 +176,19 @@ function renderWorkerGrid(workers, perProduct) {
   wrap.innerHTML = cards;
   $('workerCountLabel').textContent = `${workers.length} worker${workers.length === 1 ? '' : 's'}`;
 
-  // Wire per-worker buttons.
+  // Wire per-worker remote-control buttons.
   wrap.querySelectorAll('button[data-action="stop-worker"]').forEach(btn => {
     btn.addEventListener('click', () => sendCommand(btn.dataset.worker, 'stop'));
   });
-  wrap.querySelectorAll('button[data-action="pause-worker"]').forEach(btn => {
-    btn.addEventListener('click', () => sendCommand(btn.dataset.worker, 'pause'));
+  wrap.querySelectorAll('button[data-action="resume-worker"]').forEach(btn => {
+    btn.addEventListener('click', () => sendCommand(btn.dataset.worker, 'resume'));
+  });
+  wrap.querySelectorAll('button[data-action="release-worker"]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (confirm(`Release ${btn.dataset.worker}'s in-flight claims back to the pending pool?`)) {
+        sendCommand(btn.dataset.worker, 'release_claims');
+      }
+    });
   });
 }
 
@@ -452,6 +460,14 @@ $('releaseStaleBtn').addEventListener('click', async () => {
 $('stopAllBtn').addEventListener('click', async () => {
   if (!confirm('Stop all worker PCs? Each worker will finish its current product, then halt.')) return;
   await sendCommand(null, 'stop');  // broadcast
+});
+// Resume all — broadcast a resume command. Workers that received an
+// earlier Stop / Pause will re-claim and continue. Workers that are
+// already running ignore the command. Useful for "okay everybody go
+// again now" after a coordinated pause.
+$('resumeAllBtn').addEventListener('click', async () => {
+  if (!confirm('Resume all worker PCs? Each idle worker will re-claim from the queue and start processing.')) return;
+  await sendCommand(null, 'resume');
 });
 
 // Bulk re-queue every failed job in the current batch back to pending.
