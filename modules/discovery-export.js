@@ -286,14 +286,27 @@ export async function exportSingleProductCSV(rows, _batchId) {
   return filename;
 }
 
+// Windows reserved device names — these CANNOT be used as folder or file
+// names on Windows. Chrome.downloads silently fails or routes the file
+// to the wrong place if the path contains one. Lowercased for matching.
+const _WIN_RESERVED = new Set([
+  'con', 'prn', 'aux', 'nul',
+  'com1','com2','com3','com4','com5','com6','com7','com8','com9',
+  'lpt1','lpt2','lpt3','lpt4','lpt5','lpt6','lpt7','lpt8','lpt9',
+]);
+
 // Build a Chrome-Downloads-safe folder name from an arbitrary batch ID.
 // Strips path-traversal characters and anything that isn't filename-safe
 // on Windows/macOS/Linux. Keeps it readable for the user.
 function _safeFolder(name) {
-  return String(name || 'batch')
+  let safe = String(name || 'batch')
     .replace(/[^a-z0-9_\-]+/gi, '_')
     .replace(/^_+|_+$/g, '')
     .slice(0, 80) || 'batch';
+  // If the sanitised name matches a Windows reserved device name, prefix
+  // an underscore so Windows treats it as a normal folder.
+  if (_WIN_RESERVED.has(safe.toLowerCase())) safe = '_' + safe;
+  return safe;
 }
 
 // One file per product. Chrome triggers one download per call; we pace them

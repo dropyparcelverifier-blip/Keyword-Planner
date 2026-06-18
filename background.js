@@ -578,20 +578,40 @@ async function _handleStartInner(msg) {
             // Distributed mode: mark this job done in the shared queue
             // and drop it from this worker's claim list. Other workers
             // can now see it as done; heartbeat skips it on the next tick.
-            if (state.workerId && state.queueBatchId && state.claimedJobs.length > 0) {
-              const idx = state.claimedJobs.findIndex(j => j.productUrl === cleanUrl);
-              if (idx >= 0) {
-                try {
-                  await markJobDone({
-                    workerId: state.workerId,
-                    batchId:  state.queueBatchId,
-                    productUrl: cleanUrl,
-                  });
-                } catch (e) {
-                  pushLog(`jobs:markDone warning: ${e.message}`, 'err');
+            //
+            // Don't gate on claimedJobs.length > 0 — if the worker crashed
+            // and resumed without persisting claimedJobs, the in-flight
+            // row is still claimed in the DB and we need to attempt the
+            // PATCH anyway. The PATCH is WHERE claimed_by=workerId so it's
+            // safe (no-op if the row was reclaimed by another PC).
+            if (state.workerId && state.queueBatchId) {
+              try {
+                const r = await markJobDone({
+                  workerId: state.workerId,
+                  batchId:  state.queueBatchId,
+                  productUrl: cleanUrl,
+                });
+                // Only remove from claimedJobs AFTER the DB PATCH
+                // succeeds. Otherwise a network failure would leave the
+                // row 'claimed' in the DB but missing from our heartbeat
+                // list, so it'd go stale → get reclaimed by another
+                // worker → double-processing.
+                if (r && !r.error) {
+                  const idx = state.claimedJobs.findIndex(j => j.productUrl === cleanUrl);
+                  if (idx >= 0) {
+                    state.claimedJobs.splice(idx, 1);
+                    await chrome.storage.local.set({ [STORAGE_KEY_CLAIMED_JOBS]: state.claimedJobs }).catch(() => {});
+                  }
+                } else if (r && r.error) {
+                  pushLog(`jobs:markDone retry-needed: ${r.error} — keeping in claim list so heartbeat keeps it locked`, 'err');
                 }
-                state.claimedJobs.splice(idx, 1);
-                await chrome.storage.local.set({ [STORAGE_KEY_CLAIMED_JOBS]: state.claimedJobs });
+              } catch (e) {
+                // Network/auth failure — keep the job in claimedJobs so
+                // heartbeat continues refreshing the lock. The next
+                // onProductDone won't fire for this URL, so this is a
+                // permanent leak unless the user manually triggers a
+                // re-mark — log loudly.
+                pushLog(`jobs:markDone failed (will retry on heartbeat): ${e.message}`, 'err');
               }
             }
             if (runOpts.autoExport) {
@@ -843,15 +863,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
         // Persist worker identity + current claims so the heartbeat alarm
-        // can find them after an SW restart.
+        // can find them after an SW restart. If storage.set fails (quota
+        // exceeded, profile lock), fail the claim — otherwise the engine
+        // would start with in-memory claims that wouldn't survive an SW
+        // teardown, and after 10 min of no heartbeat the jobs would be
+        // released and reclaimed by another worker → double-processing.
         state.workerId     = workerId;
         state.queueBatchId = batchId;
         state.claimedJobs  = jobs.map(j => ({ id: j.id, productUrl: j.product_url }));
-        await chrome.storage.local.set({
-          [STORAGE_KEY_WORKER_ID]:      workerId,
-          [STORAGE_KEY_QUEUE_BATCH_ID]: batchId,
-          [STORAGE_KEY_CLAIMED_JOBS]:   state.claimedJobs,
-        });
+        try {
+          await chrome.storage.local.set({
+            [STORAGE_KEY_WORKER_ID]:      workerId,
+            [STORAGE_KEY_QUEUE_BATCH_ID]: batchId,
+            [STORAGE_KEY_CLAIMED_JOBS]:   state.claimedJobs,
+          });
+        } catch (e) {
+          // Storage failed — release our claims so another worker can pick
+          // them up (rather than letting them sit locked for 10 min).
+          pushLog(`Storage persist failed (${e.message}) — releasing claims and aborting`, 'err');
+          await releaseStaleJobs(0).catch(() => {});  // 0 minutes = release ALL claims (will only hit those still 'claimed')
+          state.claimedJobs = [];
+          throw new Error(`Could not persist claim list: ${e.message}`);
+        }
+        // Set runIntent BEFORE awaiting handleStart so a crash during the
+        // first product still triggers auto-resume via the watchdog. The
+        // main startDiscovery handler sets this inside handleStart's body;
+        // claim-and-start bypasses some of that path so we set it here.
+        await setRunIntent(true);
         pushLog(`Claimed ${jobs.length} job(s) from queue (batch ${batchId}, worker ${workerId})`, 'ok');
         // Hand the claimed rows to handleStart as if the user had loaded
         // them from a file. Shape matches what popup.js sends on Start.
@@ -952,7 +990,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         updates[STORAGE_KEY_SERVICE_KEY] = msg.serviceKey.trim();
       }
       if (typeof msg.supabaseUrl === 'string' && msg.supabaseUrl.trim()) {
-        updates[STORAGE_KEY_SUPABASE_URL] = msg.supabaseUrl.trim().replace(/\/+$/, '');
+        // Normalise the URL so a user pasting any of these forms ends up
+        // with the same canonical base:
+        //   https://xyz.supabase.co
+        //   https://xyz.supabase.co/
+        //   https://xyz.supabase.co/rest/v1
+        //   https://xyz.supabase.co/rest/v1/
+        // Previously we only stripped trailing slashes, so the last two
+        // would land as base="https://xyz.supabase.co/rest/v1" and the
+        // PostgREST calls would compose ".../rest/v1/rest/v1/<table>" →
+        // 404. Now we parse the URL and strip the entire path.
+        const raw = msg.supabaseUrl.trim();
+        let normalized;
+        try {
+          const u = new URL(raw);
+          normalized = `${u.protocol}//${u.host}`;
+        } catch {
+          // If URL() rejects (no protocol, etc.), fall back to a regex
+          // strip of any path/query so we don't store garbage.
+          normalized = raw.replace(/\/+$/, '').replace(/^(https?:\/\/[^/]+)\/.*$/, '$1');
+        }
+        updates[STORAGE_KEY_SUPABASE_URL] = normalized;
       }
       if (Object.keys(updates).length === 0) {
         sendResponse({ ok: false, error: 'nothing to save' });
