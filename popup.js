@@ -1368,10 +1368,17 @@ $('mgrReleaseBtn')?.addEventListener('click', () => {
   });
 });
 
-// Persist worker ID on blur — workers configure once.
-$('mgrWorkerId')?.addEventListener('change', () => {
+// Persist worker ID on every keystroke (debounced 400ms). The previous
+// 'change' event only fired on blur — if the user typed an ID and
+// immediately clicked "Claim & start" the new value never got persisted,
+// and on next popup open the input pre-filled from the OLD stored value.
+let _mgrWorkerIdTimer = null;
+$('mgrWorkerId')?.addEventListener('input', () => {
   const id = $('mgrWorkerId').value.trim();
-  chrome.runtime.sendMessage({ action: 'jobs:setWorkerId', workerId: id });
+  if (_mgrWorkerIdTimer) clearTimeout(_mgrWorkerIdTimer);
+  _mgrWorkerIdTimer = setTimeout(() => {
+    chrome.runtime.sendMessage({ action: 'jobs:setWorkerId', workerId: id });
+  }, 400);
 });
 
 // Claim a chunk and hand it to the engine.
@@ -1389,6 +1396,11 @@ $('mgrClaimBtn')?.addEventListener('click', () => {
     $('mgrClaimResult').style.color = 'var(--danger)';
     return;
   }
+  // Force-persist the Worker ID right now, in case the user typed it
+  // and clicked Claim before the debounced 'input' handler ran. Without
+  // this, a fresh popup open would pre-fill the OLD stored ID and the
+  // user would silently use the wrong identity.
+  chrome.runtime.sendMessage({ action: 'jobs:setWorkerId', workerId });
   $('mgrClaimResult').textContent = 'Claiming…';
   $('mgrClaimResult').style.color = 'var(--muted)';
   // Snapshot the same runOpts the Run tab would use so the engine runs
