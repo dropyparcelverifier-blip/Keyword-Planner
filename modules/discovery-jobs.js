@@ -191,6 +191,97 @@ export async function getJobSummary() {
   return resp.json();
 }
 
+// MANAGER UI: pull every discovered-keyword row for a batch back from
+// Supabase so the manager PC can generate the per-SKU CSVs locally.
+// Solves the "CSVs are scattered across worker PCs' Downloads folders"
+// problem — the manager runs this once and gets one .csv per SKU for
+// the whole batch, regardless of which worker processed each SKU.
+//
+// Paginated via PostgREST's Range header (default cap is 1000 rows).
+// Converts snake_case columns back to the camelCase shape that toCSV/
+// fileSlug/etc expect, mirroring the inverse of pushToAdBrain's mapping.
+export async function fetchBatchReportFromSupabase(batchId, onProgress) {
+  if (!batchId) throw new Error('Batch ID required.');
+  const { base, headers } = await _supabaseHeaders();
+  const PAGE = 1000;
+  let from = 0;
+  const out = [];
+  for (;;) {
+    const url = `${base}/rest/v1/adbrain_discovered_keywords`
+      + `?batch_id=eq.${encodeURIComponent(batchId)}`
+      + `&select=*&order=product_url.asc,id.asc`;
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: { ...headers, 'Range-Unit': 'items', 'Range': `${from}-${from + PAGE - 1}` },
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      throw new Error(`Fetch failed (HTTP ${resp.status}): ${text.slice(0, 200)}`);
+    }
+    const page = await resp.json();
+    if (!Array.isArray(page) || page.length === 0) break;
+    out.push(...page);
+    onProgress?.({ fetched: out.length });
+    if (page.length < PAGE) break;
+    from += PAGE;
+  }
+  // Convert snake_case Supabase columns into the camelCase row shape
+  // that modules/discovery-export.js (toCSV, groupByProduct, fileSlug,
+  // rowsForExport) expects. This is the inverse of the mapping in
+  // pushToAdBrain — keep them in sync if columns change.
+  return out.map(r => ({
+    batchId:               r.batch_id,
+    sku:                   r.sku,
+    keyword:               r.keyword,
+    source:                r.source,
+    parentKeyword:         r.parent_keyword,
+    productName:           r.product_name,
+    productUrl:            r.product_url,
+    productImage:          r.product_image,
+    priority:              r.priority,
+    adRating:              r.ad_rating,
+    frequency:             r.frequency,
+    intent:                r.intent,
+    topic:                 r.topic,
+    funnel:                r.funnel,
+    imageCount:            r.image_count,
+    imageCountUnverified:  r.image_count_unverified,
+    totalThumbs:           r.total_thumbs,
+    visibilityPct:         r.visibility_pct,
+    matchSources:          r.match_sources,
+    thumbsCaptured:        r.thumbs_captured,
+    match_confidence_avg:  r.match_confidence_avg,
+    match_confidence_max:  r.match_confidence_max,
+    match_confidence_min:  r.match_confidence_min,
+    totalSellers:          r.total_sellers,
+    seller_type:           r.seller_type,
+    adsOnSerp:             r.ads_on_serp,
+    sellers_on_serp:       r.sellers_on_serp,
+    seller_titles:         r.seller_titles,
+    serp_url:              r.serp_url,
+    kpMonthlySearches:     r.kp_monthly_searches,
+    kpCompetition:         r.kp_competition,
+    kpBidLow:              r.kp_bid_low,
+    kpBidHigh:             r.kp_bid_high,
+    autosuggestCount:      r.autosuggest_count,
+    autosuggestions:       r.autosuggestions,
+    amazonSuggestCount:    r.amazon_suggest_count,
+    amazonRank:            r.amazon_rank,
+    amazonPrice:           r.amazon_price,
+    amazonRating:          r.amazon_rating,
+    amazonReviews:         r.amazon_reviews,
+    amazonTitle:           r.amazon_title,
+    amazonCompetitors:     r.amazon_competitors,
+    amazonTotalResults:    r.amazon_total_results,
+    topMatchSeller:        r.top_match_seller,
+    topMatchPrice:         r.top_match_price,
+    topMatchThumbnail:     r.top_match_thumbnail,
+    matched_thumbnails:    r.matched_thumbnails,
+    matched_sellers:       r.matched_sellers,
+    matched_prices:        r.matched_prices,
+  }));
+}
+
 // MANAGER UI: per-batch detail — list current claims (claimed_by + count)
 // so the user can see "PC-A is on 5 jobs, PC-B is on 3".
 export async function getActiveWorkers(batchId) {
