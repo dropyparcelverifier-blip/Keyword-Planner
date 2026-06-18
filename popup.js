@@ -1364,9 +1364,23 @@ $('mgrUploadBtn')?.addEventListener('click', () => {
     (resp) => {
       $('mgrUploadBtn').disabled = false;
       if (!resp?.ok) { setQResult(r, `Upload failed: ${resp?.error || 'unknown'}`, 'error'); return; }
+      // PostgREST returned ok but inserted 0 rows — usually means RLS is
+      // blocking writes or the schema cache is stale. Surface this clearly
+      // instead of showing a falsely-cheerful "✓ Uploaded 0/N".
+      const errLine = (resp.errors && resp.errors.length > 0)
+        ? `\nErrors: ${resp.errors.slice(0, 2).join(' | ')}`
+        : '';
+      if (resp.uploaded === 0 && resp.total > 0) {
+        setQResult(r,
+          `Upload returned 0 inserted rows out of ${resp.total}. Check Supabase RLS policies on adbrain_discovery_jobs, OR run "NOTIFY pgrst, 'reload schema';" in SQL editor if you just created the table.${errLine}`,
+          'error');
+        return;
+      }
+      const partial = resp.uploaded < resp.total ? ` (${resp.total - resp.uploaded} skipped — see errors below)` : '';
+      const kind = resp.uploaded < resp.total ? 'warn' : 'success';
       setQResult(r,
-        `✓ Uploaded ${resp.uploaded}/${resp.total} into batch "${resp.batchId}". Share this Batch ID with worker PCs.`,
-        'success');
+        `✓ Uploaded ${resp.uploaded}/${resp.total} into batch "${resp.batchId}"${partial}. Share this Batch ID with worker PCs.${errLine}`,
+        kind);
       // Pre-fill the claim + download section's batch ID so single-PC manager+worker is one click.
       if (!$('mgrClaimBatchId').value)    $('mgrClaimBatchId').value    = resp.batchId;
       if (!$('mgrBatchId').value)         $('mgrBatchId').value         = resp.batchId;
@@ -1383,7 +1397,7 @@ $('mgrUploadBtn')?.addEventListener('click', () => {
 function _esc(s) {
   return String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
 }
-function mgrRenderSummary(summary, workers) {
+function mgrRenderSummary(summary, workers, failed) {
   const wrap = $('mgrSummary');
   if (!wrap) return;
   if (!Array.isArray(summary) || summary.length === 0) {
@@ -1412,29 +1426,104 @@ function mgrRenderSummary(summary, workers) {
   }).join('');
   wrap.innerHTML = rows;
 
+  // Per-worker breakdown — now shows BOTH done count and in-flight count
+  // per PC so the manager can see who's actually contributing vs who's
+  // sitting idle. Coloured heartbeat dot indicates freshness.
   const wWrap = $('mgrWorkers');
-  if (!wWrap) return;
-  if (!Array.isArray(workers) || workers.length === 0) {
-    wWrap.innerHTML = '';
-    return;
+  if (wWrap) {
+    if (!Array.isArray(workers) || workers.length === 0) {
+      wWrap.innerHTML = '';
+    } else {
+      const wRows = workers.map(w => {
+        const ago = w.lastHeartbeat ? Math.round((Date.now() - new Date(w.lastHeartbeat).getTime()) / 1000) : null;
+        const hb = ago === null ? '—'
+                 : ago < 60 ? `${ago}s` : `${Math.round(ago / 60)}m`;
+        const hbColor = ago === null ? 'var(--muted)' : (ago < 90 ? '#22c55e' : (ago < 300 ? '#f59e0b' : '#ef4444'));
+        // Backwards compat: old worker shape had `count`, new shape has
+        // `inFlight` + `doneCount` + `failedCount`. Support both.
+        const inFlight = (typeof w.inFlight === 'number') ? w.inFlight : (w.count || 0);
+        const doneCount = w.doneCount || 0;
+        const failedCount = w.failedCount || 0;
+        const failedBadge = failedCount > 0
+          ? ` · <span style="color:#ef4444;">${failedCount} failed</span>`
+          : '';
+        return `
+          <div style="display:flex; justify-content:space-between; align-items:center; padding:7px 10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; margin-bottom:4px; font-size:11px;">
+            <span><span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${hbColor}; margin-right:6px; vertical-align:middle;"></span><strong style="color:var(--text);">${_esc(w.worker)}</strong></span>
+            <span style="color:var(--muted);">
+              <strong style="color:var(--text);">${doneCount}</strong> done ·
+              <strong style="color:var(--text);">${inFlight}</strong> in flight${failedBadge} ·
+              ${hb}
+            </span>
+          </div>
+        `;
+      }).join('');
+      wWrap.innerHTML = `<div style="font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.4px; margin:8px 0 6px;">Per-worker progress</div>${wRows}`;
+    }
   }
-  const wRows = workers.map(w => {
-    const ago = w.lastHeartbeat ? Math.round((Date.now() - new Date(w.lastHeartbeat).getTime()) / 1000) : null;
-    const hb = ago === null ? 'no heartbeat yet'
-             : ago < 60 ? `${ago}s ago` : `${Math.round(ago / 60)} min ago`;
-    const hbColor = ago === null ? 'var(--muted)' : (ago < 90 ? '#22c55e' : (ago < 300 ? '#f59e0b' : '#ef4444'));
-    return `
-      <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; margin-bottom:4px; font-size:11px;">
-        <span><span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${hbColor}; margin-right:6px;"></span><strong style="color:var(--text);">${_esc(w.worker)}</strong></span>
-        <span style="color:var(--muted);">${w.count} job(s) · ${hb}</span>
-      </div>
-    `;
-  }).join('');
-  wWrap.innerHTML = `<div style="font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.4px; margin:8px 0 6px;">Active workers</div>${wRows}`;
+
+  // Failed-jobs panel — surfaces which PC failed which product and why,
+  // with a Re-queue button per row so the manager can retry transient
+  // errors (CAPTCHA, KP timeout, network) without re-uploading the file.
+  const fWrap = $('mgrFailed');
+  if (fWrap) {
+    if (!Array.isArray(failed) || failed.length === 0) {
+      fWrap.innerHTML = '';
+    } else {
+      const fRows = failed.map(f => {
+        const name = f.product_name || f.sku || f.product_url || '(unnamed)';
+        const reason = f.failed_reason || 'no reason recorded';
+        const worker = f.claimed_by || '(unknown)';
+        return `
+          <div style="padding:8px 10px; background:rgba(239,68,68,0.04); border:1px solid rgba(239,68,68,0.25); border-left:3px solid #ef4444; border-radius:6px; margin-bottom:4px; font-size:11px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+              <div style="flex:1; min-width:0;">
+                <div style="font-weight:600; color:var(--text); word-break:break-word;">${_esc(name)}</div>
+                <div style="color:var(--muted); margin-top:3px; font-size:10px;">
+                  worker: <strong style="color:var(--text);">${_esc(worker)}</strong>
+                  · attempts: ${f.attempts || 0}
+                  · reason: <span style="color:var(--text);">${_esc(reason)}</span>
+                </div>
+              </div>
+              <button class="secondary mgr-requeue-btn" data-job-id="${f.id}" style="padding:4px 10px; font-size:10px; flex-shrink:0;">Re-queue</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+      const headerNote = failed.length === 50
+        ? ` (showing newest 50)`
+        : ` (${failed.length})`;
+      fWrap.innerHTML = `<div style="font-size:10px; color:#ef4444; text-transform:uppercase; letter-spacing:0.4px; margin:12px 0 6px;">Failed jobs${headerNote}</div>${fRows}`;
+      // Wire up the per-row re-queue buttons.
+      fWrap.querySelectorAll('.mgr-requeue-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.dataset.jobId;
+          btn.disabled = true;
+          btn.textContent = 'Re-queuing…';
+          chrome.runtime.sendMessage({ action: 'jobs:requeue', jobId: id }, (resp) => {
+            if (resp?.ok) {
+              btn.textContent = '✓ Queued';
+              setTimeout(mgrRefreshSummary, 400);
+            } else {
+              btn.disabled = false;
+              btn.textContent = 'Re-queue';
+              alert(`Re-queue failed: ${resp?.error || 'unknown'}`);
+            }
+          });
+        });
+      });
+    }
+  }
 }
 
 function mgrRefreshSummary() {
-  const batchId = ($('mgrClaimBatchId').value || $('mgrBatchId').value || '').trim();
+  // Prefer the most specific batch ID the user has typed — claim section
+  // takes priority over upload/download since claim is the worker's
+  // primary focus and most-recently-touched.
+  const batchId = ($('mgrClaimBatchId').value
+    || $('mgrDownloadBatchId').value
+    || $('mgrBatchId').value
+    || '').trim();
   chrome.runtime.sendMessage(
     { action: 'jobs:summary', batchId },
     (resp) => {
@@ -1444,7 +1533,7 @@ function mgrRefreshSummary() {
         return;
       }
       $('mgrSummary').style.color = '';
-      mgrRenderSummary(resp.summary, resp.workers);
+      mgrRenderSummary(resp.summary, resp.workers, resp.failed);
     }
   );
 }

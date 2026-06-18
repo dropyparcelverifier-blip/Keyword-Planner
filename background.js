@@ -12,6 +12,8 @@ import {
   releaseStaleJobs,
   getJobSummary,
   getActiveWorkers,
+  getFailedJobs,
+  requeueJob,
   fetchBatchReportFromSupabase,
 } from './modules/discovery-jobs.js';
 import {
@@ -917,8 +919,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const summary = await getJobSummary();
         const focusBatch = msg.batchId;
         let workers = [];
-        if (focusBatch) workers = await getActiveWorkers(focusBatch).catch(() => []);
-        sendResponse({ ok: true, summary, workers });
+        let failed  = [];
+        if (focusBatch) {
+          // Fetch worker breakdown + failed list in parallel.
+          [workers, failed] = await Promise.all([
+            getActiveWorkers(focusBatch).catch(() => []),
+            getFailedJobs(focusBatch, 50).catch(() => []),
+          ]);
+        }
+        sendResponse({ ok: true, summary, workers, failed });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
+  // Manager UI — re-queue a single failed job by id.
+  if (action === 'jobs:requeue') {
+    (async () => {
+      try {
+        const result = await requeueJob(msg.jobId);
+        sendResponse({ ok: !!result.updated, ...result });
       } catch (e) { sendResponse({ ok: false, error: e.message }); }
     })();
     return true;

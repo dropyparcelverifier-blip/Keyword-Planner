@@ -61,9 +61,15 @@ export async function uploadJobsToManager(products, batchId) {
   if (rows.length === 0) throw new Error('No valid product URLs in upload.');
 
   // Upsert on the (batch_id, product_url) unique constraint. on_conflict
-  // tells PostgREST which columns to use; ignore_duplicates=false makes it
-  // UPDATE (so re-upload refreshes priority/handles/brands on existing rows
-  // without resetting status — workers won't lose their claims).
+  // tells PostgREST which columns to use; resolution=merge-duplicates
+  // makes it UPDATE existing rows (so re-upload refreshes priority/
+  // handles/brands without resetting status — workers won't lose their
+  // claims). return=representation makes PostgREST return the actual
+  // rows inserted/updated so we can count them accurately. Previously
+  // we used return=minimal and assumed slice.length on HTTP 200, which
+  // produced false-success "Uploaded N/M" messages when the API
+  // succeeded but actually inserted 0 rows (e.g. due to RLS / type
+  // mismatch — which surfaced in the UI as "✓ Uploaded 0/2").
   const url = `${base}/rest/v1/${JOBS_TABLE}?on_conflict=batch_id,product_url`;
   const BATCH = 100;
   let inserted = 0;
@@ -72,15 +78,25 @@ export async function uploadJobsToManager(products, batchId) {
     const slice = rows.slice(i, i + BATCH);
     const resp = await fetch(url, {
       method: 'POST',
-      headers: { ...headers, 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      headers: { ...headers, 'Prefer': 'resolution=merge-duplicates,return=representation' },
       body: JSON.stringify(slice),
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      errors.push(`HTTP ${resp.status}: ${text.slice(0, 200)}`);
+      errors.push(`HTTP ${resp.status}: ${text.slice(0, 300)}`);
       continue;
     }
-    inserted += slice.length;
+    // Count actual returned rows — not the slice length. If PostgREST
+    // ignored the rows (RLS, duplicate keys with different semantics,
+    // etc.) we'll see < slice.length and can surface the discrepancy.
+    try {
+      const returned = await resp.json();
+      inserted += Array.isArray(returned) ? returned.length : 0;
+    } catch {
+      // If the body isn't JSON for some reason, fall back to assuming
+      // success — but only when HTTP was 200/201.
+      inserted += slice.length;
+    }
   }
   return { uploaded: inserted, total: rows.length, batchId, errors };
 }
@@ -180,15 +196,73 @@ export async function releaseStaleJobs(staleMinutes = 10) {
 
 // MANAGER UI: pull batch summary (counts by status, per batch). Used by the
 // Manager tab's live status panel.
+//
+// First-try path: PostgREST view `adbrain_discovery_job_summary`. This is
+// efficient because the DB does the aggregation. But on a freshly-migrated
+// project PostgREST's schema cache may not include the view yet, returning
+// a 404 PGRST205. When that happens we fall back to querying the table
+// directly and aggregating in JS — same result, slightly more bandwidth,
+// always works.
 export async function getJobSummary() {
   const { base, headers } = await _supabaseHeaders();
-  const url = `${base}/rest/v1/${JOBS_SUMMARY_VIEW}?order=batch_id.desc&limit=20`;
-  const resp = await fetch(url, { method: 'GET', headers });
+  // Path 1: the view
+  try {
+    const url = `${base}/rest/v1/${JOBS_SUMMARY_VIEW}?order=batch_id.desc&limit=20`;
+    const resp = await fetch(url, { method: 'GET', headers });
+    if (resp.ok) return resp.json();
+    // 404 with PGRST205 = view not in schema cache. Try the fallback.
+    const text = await resp.text().catch(() => '');
+    if (resp.status !== 404 && !text.includes('PGRST205')) {
+      throw new Error(`Summary fetch failed (HTTP ${resp.status}): ${text.slice(0, 200)}`);
+    }
+    // fall through to fallback
+  } catch (e) {
+    // Network error: also fall through.
+  }
+  // Path 2: aggregate from the table directly. Fetch up to 10k rows per
+  // call (PostgREST default cap is 1000 so use Range). For a typical
+  // multi-PC run with < 500 jobs/batch this is one round trip.
+  const tableUrl = `${base}/rest/v1/${JOBS_TABLE}?select=batch_id,status,claimed_by,done_at`;
+  const resp = await fetch(tableUrl, {
+    method: 'GET',
+    headers: { ...headers, 'Range-Unit': 'items', 'Range': '0-9999' },
+  });
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
-    throw new Error(`Summary fetch failed (HTTP ${resp.status}): ${text.slice(0, 200)}`);
+    throw new Error(`Summary fallback fetch failed (HTTP ${resp.status}): ${text.slice(0, 200)}`);
   }
-  return resp.json();
+  const rows = await resp.json();
+  return _aggregateJobsByBatch(rows);
+}
+
+// Fallback aggregator — replicates the view's GROUP BY batch_id +
+// counts-per-status + active-worker count, in JS.
+function _aggregateJobsByBatch(rows) {
+  const byBatch = new Map();
+  for (const r of rows) {
+    const b = r.batch_id;
+    if (!byBatch.has(b)) {
+      byBatch.set(b, {
+        batch_id: b, total: 0, pending: 0, claimed: 0, done: 0, failed: 0,
+        active_workers: new Set(), last_done_at: null,
+      });
+    }
+    const agg = byBatch.get(b);
+    agg.total++;
+    if (r.status === 'pending') agg.pending++;
+    else if (r.status === 'claimed') {
+      agg.claimed++;
+      if (r.claimed_by) agg.active_workers.add(r.claimed_by);
+    }
+    else if (r.status === 'done')   agg.done++;
+    else if (r.status === 'failed') agg.failed++;
+    if (r.done_at && (!agg.last_done_at || r.done_at > agg.last_done_at)) {
+      agg.last_done_at = r.done_at;
+    }
+  }
+  return Array.from(byBatch.values())
+    .map(b => ({ ...b, active_workers: b.active_workers.size }))
+    .sort((a, b) => String(b.batch_id).localeCompare(String(a.batch_id)));
 }
 
 // MANAGER UI: pull every discovered-keyword row for a batch back from
@@ -283,26 +357,77 @@ export async function fetchBatchReportFromSupabase(batchId, onProgress) {
 }
 
 // MANAGER UI: per-batch detail — list current claims (claimed_by + count)
-// so the user can see "PC-A is on 5 jobs, PC-B is on 3".
+// AND each worker's lifetime done count for the batch, so the manager
+// sees "PC-A: 5 in flight, 12 done" instead of just the in-flight count.
+// Used by the live-status panel's per-worker breakdown.
 export async function getActiveWorkers(batchId) {
   const { base, headers } = await _supabaseHeaders();
   const url = `${base}/rest/v1/${JOBS_TABLE}`
     + `?batch_id=eq.${encodeURIComponent(batchId)}`
-    + `&status=eq.claimed`
-    + `&select=claimed_by,heartbeat_at`;
-  const resp = await fetch(url, { method: 'GET', headers });
+    + `&select=claimed_by,heartbeat_at,status`;
+  const resp = await fetch(url, {
+    method: 'GET',
+    headers: { ...headers, 'Range-Unit': 'items', 'Range': '0-9999' },
+  });
   if (!resp.ok) return [];
   const rows = await resp.json().catch(() => []);
-  // Group by worker.
   const byWorker = new Map();
   for (const r of rows) {
+    // Skip pending rows — they don't have a worker attribution yet.
+    if (!r.claimed_by && r.status !== 'done' && r.status !== 'failed') continue;
     const w = r.claimed_by || '(unknown)';
-    const cur = byWorker.get(w) || { worker: w, count: 0, lastHeartbeat: null };
-    cur.count++;
-    if (r.heartbeat_at && (!cur.lastHeartbeat || r.heartbeat_at > cur.lastHeartbeat)) {
-      cur.lastHeartbeat = r.heartbeat_at;
-    }
+    const cur = byWorker.get(w) || {
+      worker: w, inFlight: 0, doneCount: 0, failedCount: 0, lastHeartbeat: null,
+    };
+    if (r.status === 'claimed') {
+      cur.inFlight++;
+      if (r.heartbeat_at && (!cur.lastHeartbeat || r.heartbeat_at > cur.lastHeartbeat)) {
+        cur.lastHeartbeat = r.heartbeat_at;
+      }
+    } else if (r.status === 'done')   cur.doneCount++;
+    else if (r.status === 'failed') cur.failedCount++;
     byWorker.set(w, cur);
   }
-  return Array.from(byWorker.values()).sort((a, b) => b.count - a.count);
+  return Array.from(byWorker.values())
+    .sort((a, b) => (b.inFlight + b.doneCount) - (a.inFlight + a.doneCount));
+}
+
+// MANAGER UI: list failed jobs for a batch — surface which PC failed which
+// product and why, so the manager can re-queue / debug / blame the right
+// thing. Capped at 50 rows to keep the panel readable.
+export async function getFailedJobs(batchId, limit = 50) {
+  if (!batchId) return [];
+  const { base, headers } = await _supabaseHeaders();
+  const url = `${base}/rest/v1/${JOBS_TABLE}`
+    + `?batch_id=eq.${encodeURIComponent(batchId)}`
+    + `&status=eq.failed`
+    + `&select=id,sku,product_name,product_url,claimed_by,failed_reason,attempts,claimed_at`
+    + `&order=claimed_at.desc.nullslast`
+    + `&limit=${Math.max(1, Math.min(500, limit))}`;
+  const resp = await fetch(url, { method: 'GET', headers });
+  if (!resp.ok) return [];
+  return resp.json().catch(() => []);
+}
+
+// MANAGER UI: re-queue a failed job. Sets status back to 'pending' and
+// clears the claim/failure fields so any worker can pick it up again.
+// Useful when a worker hits a transient error (network, CAPTCHA, KP
+// timeout) and the manager wants to retry without re-uploading.
+export async function requeueJob(jobId) {
+  if (!jobId) return { updated: 0, error: 'job id required' };
+  const { base, headers } = await _supabaseHeaders();
+  const url = `${base}/rest/v1/${JOBS_TABLE}?id=eq.${Number(jobId)}`;
+  const resp = await fetch(url, {
+    method: 'PATCH',
+    headers: { ...headers, 'Prefer': 'return=minimal' },
+    body: JSON.stringify({
+      status: 'pending', claimed_by: null, claimed_at: null,
+      heartbeat_at: null, failed_reason: null,
+    }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    return { updated: 0, error: `HTTP ${resp.status}: ${text.slice(0, 120)}` };
+  }
+  return { updated: 1 };
 }
