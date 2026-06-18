@@ -157,6 +157,14 @@ const state = {
   // worker UI's "Connect & start working" button.
   continuousClaim: false,
   continuousChunkSize: 5,
+  // workerArmed: persistent flag set when the worker clicks "Connect &
+  // start working" for the FIRST time on this PC. Once armed, the worker
+  // keeps polling the queue every 30s — claiming and processing new
+  // batches the moment the manager uploads them. No more "manager
+  // uploaded but workers don't move until someone clicks Connect again."
+  // Cleared by Stop (user explicitly opted out). Survives engine
+  // completion, browser restart, and SW death.
+  workerArmed: false,
   // Connection-health snapshot. Populated by pingConnectionHealth (every
   // 60s alarm + on demand). The popup + dashboard show this so the user
   // knows whether Supabase is reachable from THIS PC. ok=false = creds
@@ -201,6 +209,7 @@ const coldStart = (async () => {
     'adbrainContinuousChunkSize',
     'adbrainActivityBuffer',
     'adbrainPendingPushes',
+    'adbrainWorkerArmed',
   ]);
   // Restore activity buffer from before SW death so we don't lose recent
   // events that hadn't been pushed to Supabase yet.
@@ -221,6 +230,7 @@ const coldStart = (async () => {
   if (Array.isArray(data[STORAGE_KEY_CLAIMED_JOBS]))         state.claimedJobs = data[STORAGE_KEY_CLAIMED_JOBS];
   if (typeof data.adbrainContinuousClaim === 'boolean')      state.continuousClaim = data.adbrainContinuousClaim;
   if (typeof data.adbrainContinuousChunkSize === 'number')   state.continuousChunkSize = data.adbrainContinuousChunkSize;
+  if (typeof data.adbrainWorkerArmed === 'boolean')          state.workerArmed = data.adbrainWorkerArmed;
   if (Array.isArray(data[STORAGE_KEY_LAST_REPORT]))   state.report = data[STORAGE_KEY_LAST_REPORT];
   if (data[STORAGE_KEY_LAST_BATCH])                   state.batchId = data[STORAGE_KEY_LAST_BATCH];
   if (data[STORAGE_KEY_LAST_STATUS])                  state.lastStatus = data[STORAGE_KEY_LAST_STATUS];
@@ -434,6 +444,42 @@ const HEALTH_PING_ALARM = 'adbrain-health-ping';
 try {
   chrome.alarms.create(HEALTH_PING_ALARM, { periodInMinutes: 1, delayInMinutes: 0.3 });
 } catch {}
+// Worker auto-poll alarm — fires every 30s. When the worker is "armed"
+// (user clicked Connect at least once) AND not currently running AND
+// has credentials, scans the queue for the newest batch with pending
+// work. If found, auto-fires the autoConnectWorker flow so the worker
+// starts processing without any user click. This is what makes the
+// worker truly "set and forget": once armed, it picks up every new
+// batch the manager uploads, automatically, until the user clicks Stop.
+const WORKER_AUTOPOLL_ALARM = 'adbrain-worker-autopoll';
+try {
+  chrome.alarms.create(WORKER_AUTOPOLL_ALARM, { periodInMinutes: 0.5, delayInMinutes: 0.4 });
+} catch {}
+
+async function workerAutoPollTick() {
+  try {
+    await coldStart;
+    // Only run if armed + has identity + not currently running.
+    if (!state.workerArmed) return;
+    if (!state.workerId) return;
+    if (state.running) return;
+    if (state.starting) return;
+    if (state.resumeInFlight) return;
+    // Check if there's a batch with pending work.
+    const batchId = await getActiveBatchId();
+    if (!batchId) return;  // nothing to do
+    // Found work — fire autoConnectWorker. Don't await; the handler
+    // returns response via callback channel, and we don't need it here.
+    pushLog(`Worker auto-poll: found pending batch "${batchId}" — claiming`, 'ok');
+    chrome.runtime.sendMessage({
+      action: 'jobs:autoConnectWorker',
+      workerId: state.workerId,
+      chunkSize: state.continuousChunkSize || 5,
+    }, () => { /* fire and forget */ });
+  } catch (e) {
+    pushLog(`Worker auto-poll error: ${e.message}`, 'err');
+  }
+}
 
 // Pending-push queue for keyword rows that haven't reached Supabase yet.
 // Each entry: { productUrl, batchId, rows[], attempts, lastError, ts }.
@@ -632,6 +678,13 @@ async function pollWorkerCommands() {
           // requires engine-level pause primitives that don't exist yet.
           state.stopRequested = true;
           bufferActivity({ level: 'warn', source: 'cmd', message: `Pause command received — halting (no resumable pause primitive yet).` });
+        } else if (c.command === 'wake') {
+          // Manager broadcast "wake up and check for work". Re-arms
+          // the worker and triggers an immediate auto-poll tick.
+          state.workerArmed = true;
+          await chrome.storage.local.set({ adbrainWorkerArmed: true }).catch(() => {});
+          bufferActivity({ level: 'ok', source: 'cmd', message: `Wake command received — re-armed; will auto-claim next chunk.` });
+          setTimeout(() => workerAutoPollTick().catch(() => {}), 200);
         } else if (c.command === 'resume') {
           // Re-enable continuous-claim and kick off a fresh auto-connect
           // cycle so this worker starts pulling jobs again. No-op if
@@ -682,6 +735,7 @@ chrome.alarms?.onAlarm.addListener((alarm) => {
   if (alarm.name === COMMAND_POLL_ALARM)    return void pollWorkerCommands();
   if (alarm.name === PENDING_PUSH_ALARM)    return void flushPendingPushes();
   if (alarm.name === HEALTH_PING_ALARM)     return void pingConnectionHealth();
+  if (alarm.name === WORKER_AUTOPOLL_ALARM) return void workerAutoPollTick();
 });
 
 // Chrome itself just started — wake immediately and resume if intent flag set.
@@ -1274,6 +1328,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         queueBatchId: state.queueBatchId,
         claimedJobs: state.claimedJobs,
         continuousClaim: state.continuousClaim,
+        workerArmed: state.workerArmed,
         connectionHealth: state.connectionHealth,
         pendingPushCount: _pendingPushes.length,
       });
@@ -1300,10 +1355,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // Clear the run-intent flag so the watchdog / onStartup hooks don't
     // immediately re-launch the run after the user asked us to stop.
     setRunIntent(false).catch(() => {});
-    // Also turn OFF continuous-claim mode — Stop should mean "stop for
-    // real", not "stop this chunk and immediately claim another one".
+    // Also turn OFF continuous-claim mode AND disarm the worker so the
+    // auto-poll alarm doesn't immediately re-fire. Stop must mean
+    // "stop for real" — the worker now requires another explicit
+    // Connect click to start polling again.
     state.continuousClaim = false;
-    chrome.storage.local.set({ adbrainContinuousClaim: false }).catch(() => {});
+    state.workerArmed = false;
+    chrome.storage.local.set({
+      adbrainContinuousClaim: false,
+      adbrainWorkerArmed: false,
+    }).catch(() => {});
     sendResponse({ ok: true });
     return false;
   }
@@ -1523,15 +1584,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: false, error: 'No batches with pending work found. Ask the manager to upload a batch first.' });
           return;
         }
-        // Mark this run as continuous BEFORE starting so the engine's
-        // finish handler picks it up.
+        // Mark this run as continuous AND armed BEFORE starting. The
+        // armed flag persists across browser restart + engine completion
+        // so the worker auto-resumes pulling work from any new batch
+        // the manager uploads — without the user needing to click
+        // Connect again on each PC.
         state.continuousClaim = true;
         state.continuousChunkSize = chunkSize;
         state.workerId = workerId;
+        state.workerArmed = true;
         await chrome.storage.local.set({
           [STORAGE_KEY_WORKER_ID]: workerId,
           adbrainContinuousClaim: true,
           adbrainContinuousChunkSize: chunkSize,
+          adbrainWorkerArmed: true,
         }).catch(() => {});
         // Release any stale claims from offline workers first.
         await releaseStaleJobs(10).catch(() => null);

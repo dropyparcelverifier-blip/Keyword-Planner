@@ -1747,6 +1747,7 @@ function updateWorkerLiveStatus(state) {
   const stopActions = $('workerStopActions');
   if (!live) return;
   const running = !!state?.running;
+  const armed = !!state?.workerArmed;
   if (running) {
     live.style.display = 'block';
     if (connectActions) connectActions.style.display = 'none';
@@ -1762,6 +1763,25 @@ function updateWorkerLiveStatus(state) {
       : (state.doneProducts?.length || 0);
     $('workerLiveFlight').textContent = state.claimedJobs?.length || 0;
     $('workerLiveTotal').textContent = state.reportSize || 0;
+  } else if (armed) {
+    // Worker is armed but idle — show "waiting for work" state so the
+    // user knows the PC is correctly configured and will auto-pick up
+    // any new batch the manager uploads. Updates every 30s via the
+    // auto-poll alarm.
+    live.style.display = 'block';
+    if (connectActions) connectActions.style.display = 'none';
+    if (stopActions) stopActions.style.display = 'flex';
+    const dot = $('workerLiveDot');
+    if (dot) { dot.classList.remove('err'); dot.classList.add('idle'); }
+    $('workerLiveStatusText').textContent = '✓ Armed — waiting for work';
+    $('workerLiveBatch').textContent = 'auto-poll every 30s';
+    $('workerLiveDone').textContent = (typeof state.doneProducts === 'number')
+      ? state.doneProducts
+      : (state.doneProducts?.length || 0);
+    $('workerLiveFlight').textContent = '0';
+    $('workerLiveTotal').textContent = state.reportSize || 0;
+    const act = $('workerLiveAction');
+    if (act) act.textContent = 'Checking the queue every 30s. The moment the manager uploads a new batch, this PC will auto-claim and start. Click Stop to disarm.';
   } else {
     live.style.display = 'none';
     if (connectActions) connectActions.style.display = 'flex';

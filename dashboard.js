@@ -482,6 +482,15 @@ $('stopAllBtn').addEventListener('click', async () => {
   if (!confirm('Stop all worker PCs? Each worker will finish its current product, then halt.')) return;
   await sendCommand(null, 'stop');  // broadcast
 });
+// Wake all — broadcast an instant "check for work" command to every
+// worker. Workers that are armed but idle (waiting for the next
+// auto-poll tick) immediately claim and start. Useful right after the
+// manager uploads a new batch — no need to wait 30s for the poll.
+$('wakeAllBtn').addEventListener('click', async () => {
+  await sendCommand(null, 'wake');
+  alert('Wake signal sent to all armed workers. They\'ll claim within ~30s.');
+});
+
 // Resume all — broadcast a resume command. Workers that received an
 // earlier Stop / Pause will re-claim and continue. Workers that are
 // already running ignore the command. Useful for "okay everybody go
