@@ -1125,7 +1125,21 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   // this, brand-domain SERP listings get flagged brand=✗ when the
   // keyword query happens to include the brand word.
   const sellerDomain = String(ctx?.seller || '').toLowerCase();
-  const brandInDomain = brandAliases.some(a => sellerDomain.includes(a));
+  // Brand-in-domain check: previously `sellerDomain.includes(a)` for any
+  // alias. Short aliases like "now" (NOW Foods) or "ad" (A+D Ointment)
+  // would falsely match unrelated domains via plain substring — e.g.
+  // `nowblog.com`, `nownews.com`, `addtocart.com` would all light up
+  // `brandInDomain` and inadvertently trigger the high-clip fail-tier
+  // rescue. Two-layer guard:
+  //   1. Skip aliases shorter than 4 chars — too generic to be reliable.
+  //   2. Require a word-boundary on either side (start/end of host,
+  //      hyphen, or dot) so "aquaphor" matches `aquaphorus.com` and
+  //      `shop.aquaphor.com` but NOT a longer word containing the alias.
+  const _brandDomainRe = (a) => new RegExp(`(?:^|[.\\-])${a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[.\\-]|$)`, 'i');
+  const brandInDomain = brandAliases.some(a => {
+    if (!a || a.length < 4) return false;
+    return _brandDomainRe(a).test(sellerDomain);
+  });
   const brandMentioned = brandAliases.some(a => strippedText.includes(a)) || brandInDomain;
   const anchorFound    = handleWords.some(w => strippedText.includes(w));
   // titleHasBrand: brand appears in the genuine page-title element (not the
@@ -1258,6 +1272,17 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   let identityMissing = [];
   let identityTier = 'full';
   let matchQuality = 'clean';
+  // runDownstreamVetoes — gates the sibling/wrong-form/variant/brand-mate
+  // checks below. Previously these guarded on `identityMatch` (which is
+  // only true for tier='full'), so every rescue tier (partial_clip_high,
+  // partial_text_high, partial_combined, partial_anchor_clip,
+  // partial_brand_domain_high_clip, ambiguous_brand_match) BYPASSED the
+  // vetoes — letting same-brand sibling SKUs slip through whenever a
+  // rescue tier set isMatch=true. The vetoes now run whenever the thumb
+  // is currently considered a match (isMatch=true at this point in the
+  // pipeline), regardless of which tier produced it. Only fully-rejected
+  // thumbs (isMatch=false) skip the cascade because there's nothing left
+  // to veto.
   // If the brand-absence cap fired earlier, tag the match quality so
   // the breakdown log shows it. The cap pushes total to 35; the
   // threshold check below decides whether rescue brings it back.
@@ -1367,6 +1392,20 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
         total = Math.max(0, total - 15);
         isMatch = total >= 55;
         matchQuality = 'partial_brand_domain_high_clip';
+      } else if (clipScorePct >= 70 && brandMentioned) {
+        // Graduated rescue: identity 'fail' is usually a real wrong-product
+        // signal, but a flat -30 penalty over-punishes text-poor SERP cards
+        // (Pinterest pins, image-only carousels, cropped knowledge-panel
+        // tiles) where the text was truncated even though the image IS
+        // ours. When CLIP says "very visually similar" (>= 70) AND brand
+        // is at least mentioned somewhere, apply -20 instead of -30. The
+        // downstream sibling / variant / wrong-form vetoes still run on
+        // every isMatch=true thumb, so a sibling SKU image that happens
+        // to land here is still caught — this rescue only saves the
+        // genuine same-product-text-poor case.
+        total = Math.max(0, total - 20);
+        isMatch = total >= 55;
+        matchQuality = 'partial_clip_text_poor';
       } else {
         total = Math.max(0, total - 30);
         isMatch = total >= 55;
@@ -1380,7 +1419,7 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   // Hard veto, same justification as identity: this isn't a different
   // size of the same product, it's a different formulation entirely.
   let productLineModifier = null;
-  if (identityMatch && typeof productContext?.checkProductLineModifier === 'function') {
+  if (isMatch && typeof productContext?.checkProductLineModifier === 'function') {
     productLineModifier = productContext.checkProductLineModifier(originalText);
     if (productLineModifier) {
       isMatch = false;
@@ -1402,7 +1441,7 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   //
   // Only runs when identity AND product-line both passed.
   let variantConflicts = [];
-  if (identityMatch && !productLineModifier && typeof productContext?.checkVariantConflict === 'function') {
+  if (isMatch && !productLineModifier && typeof productContext?.checkVariantConflict === 'function') {
     variantConflicts = productContext.checkVariantConflict(originalText) || [];
     if (variantConflicts.length > 0) {
       isMatch = false;
@@ -1416,7 +1455,7 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   // sub-lines ("cerave AM" vs "cerave PM"). CLIP can't tell these apart
   // because the bottles look identical; text is the only defence.
   let siblingMatch = null;
-  if (identityMatch && !productLineModifier && variantConflicts.length === 0 &&
+  if (isMatch && !productLineModifier && variantConflicts.length === 0 &&
       typeof productContext?.checkSiblingProduct === 'function') {
     siblingMatch = productContext.checkSiblingProduct(originalText);
     if (siblingMatch) {
@@ -1429,7 +1468,7 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   // the SERP context names the OPPOSITE side of a product-line pair our
   // product is on (day vs night, men vs women, AM vs PM, etc.).
   let variantSlotMatch = null;
-  if (identityMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch &&
+  if (isMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch &&
       typeof productContext?.checkVariantSlot === 'function') {
     variantSlotMatch = productContext.checkVariantSlot(originalText);
     if (variantSlotMatch) {
@@ -1442,7 +1481,7 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   // than ours ("titanium black" product, context says "titanium violet").
   // Cosmetics, apparel, electronics, footwear, hair color, nail polish.
   let colorConflictMatch = null;
-  if (identityMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch &&
+  if (isMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch &&
       typeof productContext?.checkColorConflict === 'function') {
     colorConflictMatch = productContext.checkColorConflict(originalText);
     if (colorConflictMatch) {
@@ -1454,7 +1493,7 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   // fires when our product is a cosmetics-style SKU; the gate is inside
   // checkNameSwap (returns null for non-cosmetics products).
   let nameSwapMatch = null;
-  if (identityMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch && !colorConflictMatch &&
+  if (isMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch && !colorConflictMatch &&
       typeof productContext?.checkNameSwap === 'function') {
     nameSwapMatch = productContext.checkNameSwap(originalText);
     if (nameSwapMatch) {
@@ -1471,7 +1510,7 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   // which case the image could equally be any sibling, so we can't claim
   // it for this specific SKU.
   let siblingAmbiguity = null;
-  if (identityMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch && !colorConflictMatch && !nameSwapMatch &&
+  if (isMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch && !colorConflictMatch && !nameSwapMatch &&
       typeof productContext?.checkSiblingAmbiguity === 'function') {
     siblingAmbiguity = productContext.checkSiblingAmbiguity(originalText);
     if (siblingAmbiguity) {
@@ -1485,7 +1524,7 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   // same family ("vegan", "algae"). Per attribute-families.js, silent
   // product → no veto. Hard-veto on hit.
   let attrFamilyMatch = null;
-  if (identityMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch && !colorConflictMatch && !nameSwapMatch && !siblingAmbiguity &&
+  if (isMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch && !colorConflictMatch && !nameSwapMatch && !siblingAmbiguity &&
       typeof productContext?.checkAttributeFamily === 'function') {
     attrFamilyMatch = productContext.checkAttributeFamily(originalText);
     if (attrFamilyMatch) {
@@ -1501,7 +1540,7 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   // captioned "Aquaphor Baby Healing Ointment" — "baby" is in our
   // brand-mate exclusion set.
   let brandMateMatch = null;
-  if (identityMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch && !colorConflictMatch && !nameSwapMatch && !siblingAmbiguity && !attrFamilyMatch &&
+  if (isMatch && !productLineModifier && variantConflicts.length === 0 && !siblingMatch && !variantSlotMatch && !colorConflictMatch && !nameSwapMatch && !siblingAmbiguity && !attrFamilyMatch &&
       typeof productContext?.checkBrandMate === 'function') {
     brandMateMatch = productContext.checkBrandMate(originalText);
     if (brandMateMatch) {
@@ -1510,15 +1549,27 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   }
 
   // Pack-variant tagging — runs AFTER every veto layer. If we still have a
-  // clean match (matchQuality === 'clean', isMatch true), check whether the
-  // SERP listing says "Pack of 3" / "Twin Pack" / "3-Pack" / "Set of 2" /
-  // "60 count" etc. When it does, re-tag the match as 'pack_variant_N' so
-  // the CSV row shows it's a bundle of our SKU, not the single unit. Still
-  // counts toward image_count because it IS our product — just packaged as
-  // a multipack at retail.
-  if (isMatch && matchQuality === 'clean') {
+  // CONFIRMED match (clean OR any partial_* rescue tier), check whether
+  // the SERP listing says "Pack of 3" / "Twin Pack" / "3-Pack" / "Set of
+  // 2" / "60 count" etc. Skip ambiguous_brand_match / no_brand_lowclip
+  // because those are NOT counted toward image_count — tagging them as
+  // pack variants would be misleading.
+  //
+  // Previously this was gated on matchQuality === 'clean' only, so pack-
+  // of-N listings that landed in a partial-rescue tier (partial_clip_high,
+  // etc.) were never tagged — leading to pack_variant_count = 0 even
+  // when packs were clearly present. Now tagging runs across all confirmed
+  // tiers; the original tier label is preserved as a suffix so the CSV
+  // shows BOTH the rescue tier and the pack status
+  // (e.g. "pack_variant_3|partial_clip_high").
+  const _ambiguousQ = matchQuality === 'ambiguous_brand_match' || matchQuality === 'no_brand_lowclip';
+  if (isMatch && !_ambiguousQ) {
     const pack = detectPackIndicator(originalText);
-    if (pack) matchQuality = pack.label;
+    if (pack) {
+      matchQuality = (matchQuality && matchQuality !== 'clean')
+        ? `${pack.label}|${matchQuality}`
+        : pack.label;
+    }
   }
 
   return {
@@ -2350,7 +2401,16 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           const otherTokens = tokensByIdx.get(otherIdx) || new Set();
           for (const t of otherTokens) {
             if (ourTokens.has(t)) continue;
-            if ((groupTokenFreq.get(t) || 0) >= broadCutoff) continue;
+            // Broad-token guard: only skip a sibling token as "brand-broad"
+            // when WE (the focal product) also share it. The previous logic
+            // skipped any token meeting the broad cutoff regardless of our
+            // membership — meaning a token in 5/6 siblings but NOT in our
+            // SKU still got filtered as broad and never made it into our
+            // veto list, letting sibling SERPs slip through. Since we
+            // already skip tokens we share (line above), this added check
+            // is redundant and should be removed: any sibling token we
+            // don't share IS a discriminator, regardless of frequency.
+            // (groupTokenFreq is kept for the diagnostic log line below.)
             exclusions.add(t);
           }
         }
