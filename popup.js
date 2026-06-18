@@ -1566,6 +1566,40 @@ $('mgrWorkerId')?.addEventListener('input', () => {
   }, 400);
 });
 
+// One-button worker connect — auto-detects the newest pending batch
+// and starts a continuous-claim loop. Replaces the manual Batch ID +
+// chunk size + Claim button workflow for the common worker case.
+$('mgrAutoConnectBtn')?.addEventListener('click', () => {
+  const r = $('mgrAutoConnectResult');
+  const workerId = $('mgrWorkerId').value.trim();
+  if (!workerId) { setQResult(r, 'Set a Worker ID first.', 'error'); return; }
+  // Force-persist Worker ID before sending in case debounce hasn't fired.
+  chrome.runtime.sendMessage({ action: 'jobs:setWorkerId', workerId });
+  setQResult(r, 'Connecting — finding latest batch…', 'info');
+  $('mgrAutoConnectBtn').disabled = true;
+  const runOpts = (typeof readRunOpts === 'function') ? readRunOpts() : {};
+  chrome.runtime.sendMessage(
+    { action: 'jobs:autoConnectWorker', workerId, chunkSize: 5, runOpts },
+    (resp) => {
+      $('mgrAutoConnectBtn').disabled = false;
+      if (!resp?.ok) {
+        setQResult(r, `Connect failed: ${resp?.error || 'unknown'}`, 'error');
+        return;
+      }
+      if (resp.claimed === 0) {
+        setQResult(r,
+          `No pending jobs in batch "${resp.batchId}" right now. Manager hasn't uploaded anything yet, or another worker grabbed everything.`,
+          'warn');
+        return;
+      }
+      setQResult(r,
+        `✓ Connected to batch "${resp.batchId}". Claimed ${resp.claimed} job(s) — engine starting. Will auto-claim more when this chunk finishes.`,
+        'success');
+      mgrRefreshSummary();
+    }
+  );
+});
+
 // Claim a chunk and hand it to the engine.
 $('mgrClaimBtn')?.addEventListener('click', () => {
   const r = $('mgrClaimResult');

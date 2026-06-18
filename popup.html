@@ -1580,21 +1580,43 @@
       <div id="mgrReleaseResult" class="queue-card-result"></div>
     </div>
 
-    <!-- Worker: claim a chunk of pending jobs and start the engine on
-         them. The engine flow is identical to a local-file run; only
-         the source of products differs. -->
+    <!-- Worker: one-button auto-connect. Detects the newest pending
+         batch, claims a chunk, starts the engine, and keeps pulling
+         chunks until the queue is empty (continuous mode). No Batch
+         ID or chunk size to configure — the worker just sets its ID
+         once and clicks Connect. The "Both" role still shows the
+         manual claim controls below for fine-grained control. -->
     <div class="queue-card" data-show-when="worker,both">
       <div class="queue-card-head">
         <span class="queue-card-icon">⚡</span>
         <div class="queue-card-title-wrap">
-          <div class="queue-card-title">Claim &amp; run work</div>
-          <div class="queue-card-sub">Lock a chunk of jobs to this PC and start the engine on them.</div>
+          <div class="queue-card-title">Connect &amp; start working</div>
+          <div class="queue-card-sub">Auto-claim chunks from the newest batch the manager uploaded. Keeps pulling until the queue is empty.</div>
         </div>
       </div>
       <div class="qc-row">
         <label class="label">Worker ID for this PC</label>
         <input type="text" id="mgrWorkerId" placeholder="e.g. PC-A, Office, Home" />
         <div class="hint">Must be unique across your PCs. Used for heartbeat locking and the live-status breakdown.</div>
+      </div>
+      <div class="queue-card-action">
+        <button id="mgrAutoConnectBtn">Connect &amp; start working</button>
+      </div>
+      <div id="mgrAutoConnectResult" class="queue-card-result"></div>
+    </div>
+
+    <!-- Advanced claim controls — hidden for plain worker role, shown
+         for "Both" and managers who want fine-grained control. Lets
+         the user pick a specific Batch ID and chunk size, useful for
+         testing or when multiple batches exist and the worker needs to
+         pull from a specific one. -->
+    <div class="queue-card" data-show-when="both">
+      <div class="queue-card-head">
+        <span class="queue-card-icon">🔧</span>
+        <div class="queue-card-title-wrap">
+          <div class="queue-card-title">Advanced: manual claim</div>
+          <div class="queue-card-sub">Pick a specific Batch ID + chunk size. Use when multiple batches exist or for one-shot testing.</div>
+        </div>
       </div>
       <div class="qc-row">
         <label class="label">Batch to pull from</label>
@@ -1606,7 +1628,7 @@
         <div class="hint">5 is a balanced default. When the chunk finishes, click again for the next.</div>
       </div>
       <div class="queue-card-action">
-        <button id="mgrClaimBtn">Claim &amp; start on this PC</button>
+        <button class="secondary" id="mgrClaimBtn">Claim once (no auto-loop)</button>
       </div>
       <div id="mgrClaimResult" class="queue-card-result"></div>
     </div>
