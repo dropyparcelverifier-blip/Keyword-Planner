@@ -432,6 +432,49 @@
   .stat-tile.failed  { border-color: rgba(248,113,113,0.20); background: linear-gradient(180deg, rgba(248,113,113,0.05), var(--bg-input)); }
 
   /* ============================================================
+     Manager config panel
+     ============================================================ */
+  .config-panel {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px;
+  }
+  .config-pill {
+    display: flex;
+    flex-direction: column;
+    padding: 8px 12px;
+    background: var(--bg-input);
+    border: 1px solid var(--line-1);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+  .config-pill-key {
+    font-size: 9px;
+    color: var(--text-3);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    margin-bottom: 3px;
+  }
+  .config-pill-val {
+    font-size: var(--fs-sm);
+    color: var(--text-1);
+    font-family: 'JetBrains Mono', monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 1.3;
+  }
+  .config-meta {
+    grid-column: 1 / -1;
+    font-size: var(--fs-xs);
+    color: var(--text-3);
+    margin-top: 4px;
+    padding-top: 8px;
+    border-top: 1px solid var(--line-1);
+  }
+
+  /* ============================================================
      Worker fleet grid
      ============================================================ */
   .worker-grid {
@@ -759,10 +802,20 @@
     <div class="appbar-status">
       <span id="lastRefresh">—</span>
       <span class="dot-sep">·</span>
-      <span id="autoRefreshLabel">auto-refresh: 5s</span>
+      <label style="display:flex; align-items:center; gap:6px; font-size: var(--fs-sm); color: var(--text-3);">
+        auto-refresh:
+        <select id="refreshIntervalSelect" style="min-width: 80px; padding: 4px 22px 4px 10px; font-size: var(--fs-xs); font-family: inherit;">
+          <option value="5000">5s</option>
+          <option value="10000">10s</option>
+          <option value="30000">30s</option>
+          <option value="60000">60s</option>
+          <option value="0">manual</option>
+        </select>
+      </label>
     </div>
     <div class="appbar-controls">
       <button id="refreshBtn">↻ Refresh</button>
+      <button id="requeueAllBtn">↻ Re-queue all failed</button>
       <button id="releaseStaleBtn">⏰ Release stale</button>
       <button id="stopAllBtn" class="danger">⏹ Stop all</button>
     </div>
@@ -783,6 +836,26 @@
               <div class="empty-icon">📋</div>
               <strong>No batches yet</strong>
               Upload a product file from the side-panel Queue tab to get started.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Manager config status: what the manager has pushed to workers,
+           when, by whom. Helps debug "why isn't this pacing value taking
+           effect?" — confirms whether the config row exists. -->
+      <div class="card">
+        <div class="card-head">
+          <span class="card-icon">⚙️</span>
+          <span class="card-title">Manager config (pushed to workers)</span>
+          <span class="card-sub" id="configStatus">—</span>
+        </div>
+        <div class="card-body tight">
+          <div id="configPanel" class="config-panel">
+            <div class="empty" style="padding: 16px 8px;">
+              <div class="empty-icon" style="font-size: 24px;">📦</div>
+              <strong>No config pushed yet</strong>
+              Workers will use their local Settings defaults until a manager pushes from the Settings tab.
             </div>
           </div>
         </div>
@@ -838,6 +911,11 @@
           <div class="log-filter" data-level="ok">OK</div>
           <div class="log-filter" data-level="warn">Warn</div>
           <div class="log-filter" data-level="err">Err</div>
+          <div style="margin-left: auto;">
+            <select id="logWorkerFilter" style="min-width: 110px; padding: 4px 22px 4px 10px; font-size: var(--fs-xs); font-family: inherit;">
+              <option value="">all workers</option>
+            </select>
+          </div>
         </div>
         <div id="logList" class="log-list">
           <div class="empty">

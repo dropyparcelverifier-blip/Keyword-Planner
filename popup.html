@@ -452,7 +452,32 @@
       word-break: break-word;
       line-height: 1.4;
       min-height: 14px;
+      margin-bottom: 8px;
     }
+    .worker-mini-log {
+      max-height: 110px;
+      overflow-y: auto;
+      font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+      font-size: 10px;
+      line-height: 1.5;
+      color: var(--muted);
+      padding: 4px 8px;
+      background: var(--bg);
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+    .worker-mini-log:empty { display: none; }
+    .worker-mini-log-line {
+      display: grid;
+      grid-template-columns: 48px 1fr;
+      gap: 6px;
+      padding: 1px 0;
+    }
+    .worker-mini-log-line .t { color: var(--muted); }
+    .worker-mini-log-line .m { color: var(--text); word-break: break-word; }
+    .worker-mini-log-line.ok   .m { color: var(--success); }
+    .worker-mini-log-line.warn .m { color: var(--warn); }
+    .worker-mini-log-line.err  .m { color: var(--danger); }
 
     /* Stat-card grid for the Live Status panel — discrete metric tiles
        instead of inline-styled divs. */
@@ -1714,6 +1739,10 @@
           <div class="wl-stat"><div class="wl-stat-v" id="workerLiveTotal">0</div><div class="wl-stat-l">kw total</div></div>
         </div>
         <div class="worker-live-action" id="workerLiveAction">Waiting for engine…</div>
+        <!-- Recent events mini-log. Shows last 6 lines so the worker
+             user has visibility into what the engine is doing without
+             opening the full activity log via the Dashboard. -->
+        <div class="worker-mini-log" id="workerMiniLog"></div>
       </div>
 
       <div class="queue-card-action" id="workerConnectActions">
