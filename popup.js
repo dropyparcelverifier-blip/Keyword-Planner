@@ -1377,9 +1377,12 @@ $('mgrUploadBtn')?.addEventListener('click', () => {
         return;
       }
       const partial = resp.uploaded < resp.total ? ` (${resp.total - resp.uploaded} skipped — see errors below)` : '';
+      const dupNote = (resp.duplicatesDropped && resp.duplicatesDropped > 0)
+        ? `\nNote: ${resp.duplicatesDropped} duplicate row(s) in your file were merged (same product URL appeared more than once).`
+        : '';
       const kind = resp.uploaded < resp.total ? 'warn' : 'success';
       setQResult(r,
-        `✓ Uploaded ${resp.uploaded}/${resp.total} into batch "${resp.batchId}"${partial}. Share this Batch ID with worker PCs.${errLine}`,
+        `✓ Uploaded ${resp.uploaded}/${resp.total} into batch "${resp.batchId}"${partial}. Share this Batch ID with worker PCs.${dupNote}${errLine}`,
         kind);
       // Pre-fill the claim + download section's batch ID so single-PC manager+worker is one click.
       if (!$('mgrClaimBatchId').value)    $('mgrClaimBatchId').value    = resp.batchId;

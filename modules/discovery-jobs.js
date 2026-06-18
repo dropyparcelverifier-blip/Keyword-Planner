@@ -47,7 +47,7 @@ export async function uploadJobsToManager(products, batchId) {
   if (!batchId) batchId = String(Date.now());
   const { base, headers } = await _supabaseHeaders();
 
-  const rows = products.map(p => ({
+  const rawRows = products.map(p => ({
     batch_id:     batchId,
     sku:          p.sku || null,
     product_url:  String(p.url || '').trim(),
@@ -58,7 +58,22 @@ export async function uploadJobsToManager(products, batchId) {
     status:       'pending',
   })).filter(r => r.product_url);
 
-  if (rows.length === 0) throw new Error('No valid product URLs in upload.');
+  if (rawRows.length === 0) throw new Error('No valid product URLs in upload.');
+
+  // Deduplicate on (batch_id, product_url) BEFORE sending. PostgREST's
+  // merge-duplicates strategy translates to `ON CONFLICT DO UPDATE`,
+  // which fails with Postgres error 21000 when the same conflict key
+  // appears twice in one INSERT statement. So if the input file has
+  // two rows with the same product_url (intentionally or by accident),
+  // the whole batch upsert blows up with HTTP 500. Keep the LAST
+  // occurrence of each key — that's what the user usually intends when
+  // they have a row appearing twice (latest value wins).
+  const dedupMap = new Map();
+  for (const r of rawRows) {
+    dedupMap.set(`${r.batch_id}|${r.product_url}`, r);
+  }
+  const rows = Array.from(dedupMap.values());
+  const dupDropped = rawRows.length - rows.length;
 
   // Upsert on the (batch_id, product_url) unique constraint. on_conflict
   // tells PostgREST which columns to use; resolution=merge-duplicates
@@ -98,7 +113,7 @@ export async function uploadJobsToManager(products, batchId) {
       inserted += slice.length;
     }
   }
-  return { uploaded: inserted, total: rows.length, batchId, errors };
+  return { uploaded: inserted, total: rows.length, batchId, errors, duplicatesDropped: dupDropped };
 }
 
 // WORKER: atomically claim up to `limit` pending jobs for this worker.
