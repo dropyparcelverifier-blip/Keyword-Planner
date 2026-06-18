@@ -1022,6 +1022,67 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // Generate a one-string setup code that bundles supabaseUrl +
+  // service_role key as base64-encoded JSON. Manager generates once,
+  // workers paste once — replaces the two-field setup with a single
+  // copy/paste. Service-role key IS exposed in the code so users must
+  // share it only over encrypted channels (warning shown in the UI).
+  if (action === 'jobs:exportSetupCode') {
+    (async () => {
+      const data = await chrome.storage.local.get([STORAGE_KEY_SERVICE_KEY, STORAGE_KEY_SUPABASE_URL]);
+      const url = (data[STORAGE_KEY_SUPABASE_URL] || '').trim();
+      const key = (data[STORAGE_KEY_SERVICE_KEY] || '').trim();
+      if (!url || !key || url.includes('YOUR-ADBRAIN-PROJECT')) {
+        sendResponse({ ok: false, error: 'Save Supabase URL + service_role key first.' });
+        return;
+      }
+      // Encode as `adb1:<base64>` so future versions can use a different
+      // prefix to identify the format. JSON wrapper carries a version
+      // field for forward-compat too.
+      const payload = JSON.stringify({ v: 1, url, key });
+      const b64 = btoa(unescape(encodeURIComponent(payload)));
+      sendResponse({ ok: true, code: `adb1:${b64}` });
+    })();
+    return true;
+  }
+  if (action === 'jobs:importSetupCode') {
+    (async () => {
+      try {
+        const raw = String(msg.code || '').trim();
+        if (!raw.startsWith('adb1:')) {
+          throw new Error('Not a valid setup code (expected to start with "adb1:").');
+        }
+        const b64 = raw.slice(5);
+        let payload;
+        try {
+          payload = JSON.parse(decodeURIComponent(escape(atob(b64))));
+        } catch {
+          throw new Error('Could not decode setup code — paste the exact string the manager generated.');
+        }
+        if (!payload || payload.v !== 1 || !payload.url || !payload.key) {
+          throw new Error('Setup code is missing required fields.');
+        }
+        // Re-use the same URL-normalisation as jobs:saveCreds so a code
+        // generated from a sloppy URL still produces a clean stored URL.
+        let normalized;
+        try {
+          const u = new URL(payload.url);
+          normalized = `${u.protocol}//${u.host}`;
+        } catch {
+          normalized = String(payload.url).replace(/\/+$/, '').replace(/^(https?:\/\/[^/]+)\/.*$/, '$1');
+        }
+        await chrome.storage.local.set({
+          [STORAGE_KEY_SUPABASE_URL]: normalized,
+          [STORAGE_KEY_SERVICE_KEY]:  String(payload.key).trim(),
+        });
+        sendResponse({ ok: true });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message });
+      }
+    })();
+    return true;
+  }
+
   // Settings tab — set/get this worker's identity.
   if (action === 'jobs:setWorkerId') {
     (async () => {

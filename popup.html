@@ -1182,6 +1182,33 @@
       </div>
       <button id="mgrSaveCredsBtn">Save credentials</button>
       <div id="mgrSaveCredsResult" class="hint" style="margin-top:8px;"></div>
+
+      <!-- One-string setup code. Manager generates it, worker pastes it.
+           Single copy/paste per worker — no separate URL + key fields.
+           Encodes both fields as base64 JSON so it's one string the
+           user can WhatsApp/Telegram/Slack to themselves. -->
+      <div class="section" style="margin-top:14px; border-top:1px solid var(--border); padding-top:12px;">
+        <div class="label" style="display:flex; justify-content:space-between; align-items:center;">
+          <span>Setup code (one-string copy/paste to other PCs)</span>
+        </div>
+        <div class="hint" style="margin: 4px 0 8px;">
+          <strong>Manager:</strong> once your creds are saved above, click "Generate setup code" → copy the string → paste it on each worker PC's "Paste setup code" field below → click Apply. Sets both fields in one shot.
+        </div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <button class="secondary" id="mgrGenerateSetupBtn">Generate setup code (from saved creds)</button>
+          <button class="secondary" id="mgrCopySetupBtn" disabled>Copy</button>
+        </div>
+        <textarea id="mgrSetupCode" rows="3" placeholder="Click Generate, then copy the code that appears here." style="width:100%; margin-top:8px; font-family:monospace; font-size:11px; padding:6px; background:var(--bg); border:1px solid var(--border); border-radius:4px; color:var(--text);"></textarea>
+
+        <div class="label" style="margin-top:12px;">Paste setup code (worker)</div>
+        <textarea id="mgrApplySetupCode" rows="3" placeholder="Paste the setup code from the manager PC here." style="width:100%; font-family:monospace; font-size:11px; padding:6px; background:var(--bg); border:1px solid var(--border); border-radius:4px; color:var(--text);"></textarea>
+        <button id="mgrApplySetupBtn" style="margin-top:6px;">Apply setup code</button>
+        <div id="mgrApplySetupResult" class="hint" style="margin-top:6px;"></div>
+
+        <div class="hint" style="margin-top:8px; padding:6px 8px; background:var(--bg); border-left:2px solid var(--warn); border-radius:0 4px 4px 0;">
+          ⚠ The setup code contains your <code>service_role</code> key — anyone with the code can read/write your Supabase project. Share it ONLY over encrypted channels (Signal/WhatsApp/Telegram secret chat). Don't paste it in public chats or emails.
+        </div>
+      </div>
     </div>
 
     <div class="settings-group" data-show-when="manager,both">

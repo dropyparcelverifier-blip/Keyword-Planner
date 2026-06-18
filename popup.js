@@ -1209,20 +1209,23 @@ function mgrCheckCreds() {
     const card = $('mgrCredsCard');
     const status = $('mgrCredsStatus');
     const haveAll = resp.hasServiceKey && resp.hasSupabaseUrl;
-    if (haveAll) {
-      // Compress the card into a one-line confirmation when set, but
-      // keep it editable in case the user wants to change keys later.
-      if (card) card.style.display = 'none';
-      if (status) status.textContent = '';
-      return;
-    }
+    // The card now ALWAYS stays visible — the setup-code helper inside it
+    // is useful even after credentials are set (manager generates the
+    // code from saved creds). The header status line just reflects state.
     if (card) card.style.display = '';
-    if (status) {
-      const missing = [];
-      if (!resp.hasSupabaseUrl) missing.push('Supabase URL');
-      if (!resp.hasServiceKey)  missing.push('service_role key');
-      status.textContent = `Missing: ${missing.join(' + ')}. Paste them below.`;
-      status.style.color = 'var(--warn)';
+    if (haveAll) {
+      if (status) {
+        status.textContent = '✓ Connected to Supabase. Generate a setup code below to share with other PCs.';
+        status.style.color = 'var(--success)';
+      }
+    } else {
+      if (status) {
+        const missing = [];
+        if (!resp.hasSupabaseUrl) missing.push('Supabase URL');
+        if (!resp.hasServiceKey)  missing.push('service_role key');
+        status.textContent = `Missing: ${missing.join(' + ')}. Paste below, OR use a setup code from another PC.`;
+        status.style.color = 'var(--warn)';
+      }
     }
     if (resp.supabaseUrl && $('mgrSupabaseUrl') && !$('mgrSupabaseUrl').value) {
       $('mgrSupabaseUrl').value = resp.supabaseUrl;
@@ -1247,6 +1250,63 @@ $('mgrSaveCredsBtn')?.addEventListener('click', () => {
     $('mgrSaveCredsResult').textContent = '✓ Saved. Settings tab also reflects these values.';
     $('mgrSaveCredsResult').style.color = 'var(--success)';
     $('mgrServiceKey').value = ''; // wipe from DOM so it doesn't lurk
+    mgrCheckCreds();
+  });
+});
+
+// ─── Setup code (one-string portable creds) ───
+// Generate: pull saved supabaseUrl + service_role from background, encode
+// as base64 JSON so it's one string the user can copy/paste to other
+// PCs. Apply: decode the string and save the contained creds. Single
+// copy/paste setup per worker — replaces the two-field paste workflow.
+const SETUP_CODE_VERSION = 1;
+
+$('mgrGenerateSetupBtn')?.addEventListener('click', () => {
+  chrome.runtime.sendMessage({ action: 'jobs:exportSetupCode' }, (resp) => {
+    if (!resp?.ok) {
+      $('mgrSetupCode').value = '';
+      $('mgrSaveCredsResult').textContent = `Generate failed: ${resp?.error || 'creds not saved yet'}`;
+      $('mgrSaveCredsResult').style.color = 'var(--danger)';
+      return;
+    }
+    $('mgrSetupCode').value = resp.code;
+    $('mgrCopySetupBtn').disabled = false;
+    $('mgrSaveCredsResult').textContent = '✓ Setup code generated — copy + paste to worker PCs.';
+    $('mgrSaveCredsResult').style.color = 'var(--success)';
+  });
+});
+
+$('mgrCopySetupBtn')?.addEventListener('click', async () => {
+  const txt = $('mgrSetupCode').value.trim();
+  if (!txt) return;
+  try {
+    await navigator.clipboard.writeText(txt);
+    $('mgrCopySetupBtn').textContent = '✓ Copied';
+    setTimeout(() => { $('mgrCopySetupBtn').textContent = 'Copy'; }, 1500);
+  } catch {
+    // Clipboard API may be blocked in some contexts — fall back to
+    // selecting the textarea so the user can manually copy.
+    $('mgrSetupCode').select();
+  }
+});
+
+$('mgrApplySetupBtn')?.addEventListener('click', () => {
+  const raw = $('mgrApplySetupCode').value.trim();
+  if (!raw) {
+    $('mgrApplySetupResult').textContent = 'Paste the setup code first.';
+    $('mgrApplySetupResult').style.color = 'var(--danger)';
+    return;
+  }
+  chrome.runtime.sendMessage({ action: 'jobs:importSetupCode', code: raw }, (resp) => {
+    if (!resp?.ok) {
+      $('mgrApplySetupResult').textContent = `Apply failed: ${resp?.error || 'invalid code'}`;
+      $('mgrApplySetupResult').style.color = 'var(--danger)';
+      return;
+    }
+    $('mgrApplySetupResult').textContent = '✓ Setup applied. You can now claim jobs from the queue.';
+    $('mgrApplySetupResult').style.color = 'var(--success)';
+    $('mgrApplySetupCode').value = '';
+    // Refresh the creds card so it disappears now that both fields are set.
     mgrCheckCreds();
   });
 });
