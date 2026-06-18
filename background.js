@@ -5,6 +5,15 @@
 import { runKeywordDiscovery, cleanProductUrl, CAPTCHA_PAUSE_ERROR } from './modules/keyword-discovery.js';
 import { toCSV, toXLSX, pushToAdBrain, exportSingleProductCSV } from './modules/discovery-export.js';
 import {
+  uploadJobsToManager,
+  claimJobs,
+  heartbeatClaims,
+  markJobDone,
+  releaseStaleJobs,
+  getJobSummary,
+  getActiveWorkers,
+} from './modules/discovery-jobs.js';
+import {
   shouldKeepKeyword,
   categorizeKeyword,
   computeAdRating,
@@ -66,10 +75,24 @@ const STORAGE_KEY_LAST_RUN_OPTS = 'adbrainLastRunOpts';
 //     stopped (or never wanted, on a fresh install).
 const STORAGE_KEY_RUN_INTENT = 'adbrainRunIntent';
 
+// Distributed-mode persistence.
+//   workerId   — this PC's identity ("PC-A" / "Office"); set in Settings.
+//   queueBatchId — which batch_id this worker is currently pulling from.
+//   claimedJobs — array of {id, productUrl} the engine is currently
+//                 processing. Heartbeat alarm refreshes heartbeat_at on
+//                 every entry; markJobDone removes the entry on completion.
+const STORAGE_KEY_WORKER_ID      = 'adbrainWorkerId';
+const STORAGE_KEY_QUEUE_BATCH_ID = 'adbrainQueueBatchId';
+const STORAGE_KEY_CLAIMED_JOBS   = 'adbrainClaimedJobs';
+
 // Watchdog alarm name. MV3 service workers can be torn down after ~30s idle
 // even mid-run; an alarm wakes the worker back up so we can detect "we
 // should be running but aren't" and re-enter handleStart().
 const WATCHDOG_ALARM = 'adbrain-watchdog';
+// Heartbeat alarm — every 60s while distributed mode is running, refresh
+// heartbeat_at on this worker's claimed jobs. Without this, other PCs
+// would treat the rows as stale (>10min) and steal them.
+const HEARTBEAT_ALARM = 'adbrain-heartbeat';
 
 const state = {
   running: false,
@@ -101,6 +124,12 @@ const state = {
   // resume cycle; concurrent tryAutoResume calls await/skip it.
   starting: false,
   resumeInFlight: null,
+  // Distributed mode — this worker's identity, the batch it's pulling from,
+  // and the list of claimed job rows (one entry per in-flight product).
+  // Empty array / null = local mode (file-driven), no Supabase coordination.
+  workerId: '',
+  queueBatchId: '',
+  claimedJobs: [],
 };
 
 // Side panel: clicking the extension icon opens the panel (Chrome 114+).
@@ -127,7 +156,13 @@ const coldStart = (async () => {
     STORAGE_KEY_LAST_PRODUCTS,
     STORAGE_KEY_LAST_RUN_OPTS,
     STORAGE_KEY_RUN_INTENT,
+    STORAGE_KEY_WORKER_ID,
+    STORAGE_KEY_QUEUE_BATCH_ID,
+    STORAGE_KEY_CLAIMED_JOBS,
   ]);
+  if (typeof data[STORAGE_KEY_WORKER_ID] === 'string')      state.workerId = data[STORAGE_KEY_WORKER_ID];
+  if (typeof data[STORAGE_KEY_QUEUE_BATCH_ID] === 'string') state.queueBatchId = data[STORAGE_KEY_QUEUE_BATCH_ID];
+  if (Array.isArray(data[STORAGE_KEY_CLAIMED_JOBS]))         state.claimedJobs = data[STORAGE_KEY_CLAIMED_JOBS];
   if (Array.isArray(data[STORAGE_KEY_LAST_REPORT]))   state.report = data[STORAGE_KEY_LAST_REPORT];
   if (data[STORAGE_KEY_LAST_BATCH])                   state.batchId = data[STORAGE_KEY_LAST_BATCH];
   if (data[STORAGE_KEY_LAST_STATUS])                  state.lastStatus = data[STORAGE_KEY_LAST_STATUS];
@@ -290,9 +325,30 @@ async function tryAutoResume(triggerLabel) {
 try {
   chrome.alarms.create(WATCHDOG_ALARM, { periodInMinutes: 1, delayInMinutes: 0.1 });
 } catch {}
+// Heartbeat alarm — fires every minute, no delay. Only does work when
+// distributed mode is active (workerId set + claimedJobs non-empty).
+// Keeping the alarm always-on lets the SW wake even when state has been
+// torn down so heartbeats don't lapse mid-product.
+try {
+  chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 1, delayInMinutes: 0.1 });
+} catch {}
+
+async function tickHeartbeat() {
+  try {
+    await coldStart;
+    if (!state.workerId) return;
+    const jobIds = state.claimedJobs.map(j => j.id).filter(Boolean);
+    if (jobIds.length === 0) return;
+    const r = await heartbeatClaims(state.workerId, jobIds);
+    if (r.error) pushLog(`Heartbeat warning: ${r.error}`, 'err');
+  } catch (e) {
+    pushLog(`Heartbeat failed: ${e.message}`, 'err');
+  }
+}
+
 chrome.alarms?.onAlarm.addListener((alarm) => {
-  if (alarm.name !== WATCHDOG_ALARM) return;
-  tryAutoResume('watchdog');
+  if (alarm.name === WATCHDOG_ALARM)  return void tryAutoResume('watchdog');
+  if (alarm.name === HEARTBEAT_ALARM) return void tickHeartbeat();
 });
 
 // Chrome itself just started — wake immediately and resume if intent flag set.
@@ -514,6 +570,25 @@ async function _handleStartInner(msg) {
               state.doneProducts.push(cleanUrl);
               await persistDone();
             }
+            // Distributed mode: mark this job done in the shared queue
+            // and drop it from this worker's claim list. Other workers
+            // can now see it as done; heartbeat skips it on the next tick.
+            if (state.workerId && state.queueBatchId && state.claimedJobs.length > 0) {
+              const idx = state.claimedJobs.findIndex(j => j.productUrl === cleanUrl);
+              if (idx >= 0) {
+                try {
+                  await markJobDone({
+                    workerId: state.workerId,
+                    batchId:  state.queueBatchId,
+                    productUrl: cleanUrl,
+                  });
+                } catch (e) {
+                  pushLog(`jobs:markDone warning: ${e.message}`, 'err');
+                }
+                state.claimedJobs.splice(idx, 1);
+                await chrome.storage.local.set({ [STORAGE_KEY_CLAIMED_JOBS]: state.claimedJobs });
+              }
+            }
             if (runOpts.autoExport) {
               const productRows = state.report.filter(r => r.productUrl === cleanUrl);
               if (productRows.length > 0) {
@@ -727,6 +802,101 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } catch (e) {
         sendResponse({ ok: false, error: e.message });
       }
+    })();
+    return true;
+  }
+
+  // ── Distributed mode ──────────────────────────────────────────────
+  // Manager uploads a parsed product list to the shared jobs table.
+  if (action === 'jobs:upload') {
+    (async () => {
+      try {
+        const result = await uploadJobsToManager(msg.products || [], msg.batchId || state.batchId || String(Date.now()));
+        sendResponse({ ok: true, ...result });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
+  // Worker claims a chunk of pending jobs from the shared queue and
+  // hands them straight to handleStart as the products list. Stores
+  // the claim rows on state so heartbeat + markJobDone can find them.
+  if (action === 'jobs:claimAndStart') {
+    (async () => {
+      try {
+        const workerId = (msg.workerId || state.workerId || '').trim();
+        const batchId  = (msg.batchId  || state.queueBatchId || '').trim();
+        const limit    = Math.max(1, Math.min(50, Number(msg.limit) || 5));
+        if (!workerId) throw new Error('Set a Worker ID in Settings first.');
+        if (!batchId)  throw new Error('Pick a batch in the Manager tab first.');
+        // Release any stale claims from crashed PCs before our claim — so
+        // we pick them up too. Cheap, idempotent, distributed cleanup.
+        const r = await releaseStaleJobs(10).catch(() => null);
+        if (r && r.released > 0) pushLog(`Released ${r.released} stale claim(s) from offline workers`, 'ok');
+        const jobs = await claimJobs({ workerId, batchId, limit });
+        if (jobs.length === 0) {
+          sendResponse({ ok: true, claimed: 0, message: 'no pending jobs in this batch' });
+          return;
+        }
+        // Persist worker identity + current claims so the heartbeat alarm
+        // can find them after an SW restart.
+        state.workerId     = workerId;
+        state.queueBatchId = batchId;
+        state.claimedJobs  = jobs.map(j => ({ id: j.id, productUrl: j.product_url }));
+        await chrome.storage.local.set({
+          [STORAGE_KEY_WORKER_ID]:      workerId,
+          [STORAGE_KEY_QUEUE_BATCH_ID]: batchId,
+          [STORAGE_KEY_CLAIMED_JOBS]:   state.claimedJobs,
+        });
+        pushLog(`Claimed ${jobs.length} job(s) from queue (batch ${batchId}, worker ${workerId})`, 'ok');
+        // Hand the claimed rows to handleStart as if the user had loaded
+        // them from a file. Shape matches what popup.js sends on Start.
+        const products = jobs.map(j => ({
+          url:         j.product_url,
+          sku:         j.sku,
+          productName: j.product_name,
+          priority:    j.priority,
+          handles:     j.handles ? String(j.handles).split('|').filter(Boolean) : [],
+          brands:      j.brands  ? String(j.brands).split('|').filter(Boolean)  : [],
+        }));
+        const startResult = await handleStart({
+          products,
+          ...(msg.runOpts || {}),
+        });
+        sendResponse({ ok: true, claimed: jobs.length, products, startResult });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
+  // Manager tab — live batch summary (counts by status, per batch).
+  if (action === 'jobs:summary') {
+    (async () => {
+      try {
+        const summary = await getJobSummary();
+        const focusBatch = msg.batchId;
+        let workers = [];
+        if (focusBatch) workers = await getActiveWorkers(focusBatch).catch(() => []);
+        sendResponse({ ok: true, summary, workers });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
+  // Manual stale release for the Manager UI's "Release stale" button.
+  if (action === 'jobs:releaseStale') {
+    (async () => {
+      try {
+        const result = await releaseStaleJobs(Number(msg.staleMinutes) || 10);
+        sendResponse({ ok: true, ...result });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
+  // Settings tab — set/get this worker's identity.
+  if (action === 'jobs:setWorkerId') {
+    (async () => {
+      const id = String(msg.workerId || '').trim();
+      state.workerId = id;
+      await chrome.storage.local.set({ [STORAGE_KEY_WORKER_ID]: id });
+      sendResponse({ ok: true, workerId: id });
     })();
     return true;
   }
