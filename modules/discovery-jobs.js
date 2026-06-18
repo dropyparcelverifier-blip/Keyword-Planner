@@ -21,6 +21,7 @@ export const ACTIVITY_LOG_TABLE = 'adbrain_activity_log';
 export const COMMANDS_TABLE = 'adbrain_worker_commands';
 export const WORKER_STATS_VIEW = 'adbrain_worker_stats';
 export const PER_PRODUCT_VIEW = 'adbrain_per_product_status';
+export const WORKER_CONFIG_TABLE = 'adbrain_worker_config';
 
 // Build the auth/headers block every PostgREST call needs.
 async function _supabaseHeaders() {
@@ -76,8 +77,56 @@ export async function uploadJobsToManager(products, batchId) {
   for (const r of rawRows) {
     dedupMap.set(`${r.batch_id}|${r.product_url}`, r);
   }
-  const rows = Array.from(dedupMap.values());
+  let rows = Array.from(dedupMap.values());
   const dupDropped = rawRows.length - rows.length;
+
+  // CROSS-BATCH DEDUP: skip product_urls that are already pending,
+  // claimed, or done in ANY other batch. The point of the queue is
+  // single-source-of-truth work assignment; re-uploading the same file
+  // (or a partial overlap with an earlier batch) shouldn't queue the
+  // same product on two batches and pay for it twice. Failed rows are
+  // NOT skipped — the manager might be re-queueing to retry.
+  let skippedActive = 0;
+  const skippedSkus = [];
+  try {
+    const urlsBatch = 50;
+    const activeUrls = new Set();
+    for (let i = 0; i < rows.length; i += urlsBatch) {
+      const slice = rows.slice(i, i + urlsBatch).map(r => r.product_url);
+      const inList = `(${slice.map(u => `"${u.replace(/"/g, '\\"')}"`).join(',')})`;
+      const checkUrl = `${base}/rest/v1/${JOBS_TABLE}`
+        + `?product_url=in.${encodeURIComponent(inList)}`
+        + `&status=in.(pending,claimed,done)`
+        + `&select=product_url,batch_id,status`;
+      const checkResp = await fetch(checkUrl, { method: 'GET', headers });
+      if (!checkResp.ok) continue;
+      const existing = await checkResp.json().catch(() => []);
+      for (const e of existing) {
+        // Don't skip rows that already exist in THIS batch — those will
+        // be upserted by the merge-duplicates POST below (and re-uploading
+        // the same Batch ID is documented as idempotent).
+        if (String(e.batch_id) === String(batchId)) continue;
+        activeUrls.add(e.product_url);
+      }
+    }
+    if (activeUrls.size > 0) {
+      const filtered = [];
+      for (const r of rows) {
+        if (activeUrls.has(r.product_url)) {
+          skippedActive++;
+          if (r.sku) skippedSkus.push(r.sku);
+        } else {
+          filtered.push(r);
+        }
+      }
+      rows = filtered;
+    }
+  } catch {
+    // If the existence check fails (network glitch), proceed with the
+    // upload anyway. The (batch_id, product_url) unique constraint will
+    // still prevent same-batch duplicates; cross-batch dupes will just
+    // both exist.
+  }
 
   // Upsert on the (batch_id, product_url) unique constraint. on_conflict
   // tells PostgREST which columns to use; resolution=merge-duplicates
@@ -117,7 +166,15 @@ export async function uploadJobsToManager(products, batchId) {
       inserted += slice.length;
     }
   }
-  return { uploaded: inserted, total: rows.length, batchId, errors, duplicatesDropped: dupDropped };
+  return {
+    uploaded: inserted,
+    total: rows.length,
+    batchId,
+    errors,
+    duplicatesDropped: dupDropped,
+    skippedActive,
+    skippedSkus: skippedSkus.slice(0, 10),
+  };
 }
 
 // WORKER: atomically claim up to `limit` pending jobs for this worker.
@@ -597,6 +654,74 @@ export async function acknowledgeCommand(commandId, workerId) {
     }),
   });
   return { updated: resp.ok ? 1 : 0 };
+}
+
+// ============================================================================
+// MANAGER-CONTROLLED WORKER CONFIG
+// ============================================================================
+
+// Fetch the global worker config row. Workers call this before each claim
+// and merge non-null fields into their local runOpts. Returns null on
+// network error so worker can fall back to local defaults gracefully.
+export async function fetchWorkerConfig() {
+  try {
+    const { base, headers } = await _supabaseHeaders();
+    const url = `${base}/rest/v1/${WORKER_CONFIG_TABLE}?id=eq.1&select=*`;
+    const resp = await fetch(url, { method: 'GET', headers });
+    if (!resp.ok) return null;
+    const rows = await resp.json().catch(() => []);
+    return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+  } catch { return null; }
+}
+
+// Save (PATCH) the global worker config. Partial updates allowed: pass
+// only the fields you want to change; nulls leave columns untouched
+// (PostgREST omits keys with undefined values in the PATCH body).
+export async function saveWorkerConfig(updates, managerId) {
+  if (!updates || typeof updates !== 'object') {
+    throw new Error('updates must be an object');
+  }
+  const { base, headers } = await _supabaseHeaders();
+  // Strip undefined keys (don't overwrite with null).
+  const body = { updated_at: new Date().toISOString(), updated_by: managerId || null };
+  for (const [k, v] of Object.entries(updates)) {
+    if (v !== undefined) body[k] = v;
+  }
+  const url = `${base}/rest/v1/${WORKER_CONFIG_TABLE}?id=eq.1`;
+  const resp = await fetch(url, {
+    method: 'PATCH',
+    headers: { ...headers, 'Prefer': 'return=representation' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`Config save failed (HTTP ${resp.status}): ${text.slice(0, 200)}`);
+  }
+  const rows = await resp.json().catch(() => []);
+  return rows[0] || null;
+}
+
+// Translate a worker_config row (snake_case Supabase shape) into the
+// camelCase runOpts shape the engine expects. Fields that are null in
+// the config are omitted so the worker's local defaults stay in effect.
+export function workerConfigToRunOpts(cfg) {
+  if (!cfg) return {};
+  const out = {};
+  if (cfg.kp_url)                  out.kpUrl                 = cfg.kp_url;
+  if (cfg.kp_max_per_product != null) out.kpMaxPerProduct    = cfg.kp_max_per_product;
+  if (cfg.match_profile)           out.matchProfile          = cfg.match_profile;
+  if (cfg.clip_threshold_override != null) out.clipThresholdOverride = Number(cfg.clip_threshold_override);
+  if (cfg.max_image_match_rows != null) out.maxImageMatchRows = cfg.max_image_match_rows;
+  if (cfg.search_delay_min_ms != null) out.searchDelayMinMs  = cfg.search_delay_min_ms;
+  if (cfg.search_delay_max_ms != null) out.searchDelayMaxMs  = cfg.search_delay_max_ms;
+  if (cfg.product_delay_min_ms != null) out.productDelayMinMs = cfg.product_delay_min_ms;
+  if (cfg.product_delay_max_ms != null) out.productDelayMaxMs = cfg.product_delay_max_ms;
+  if (cfg.chunk_size != null)      out.chunkSize             = cfg.chunk_size;
+  if (cfg.chunk_rest_min_ms != null) out.chunkRestMinMs      = cfg.chunk_rest_min_ms;
+  if (cfg.chunk_rest_max_ms != null) out.chunkRestMaxMs      = cfg.chunk_rest_max_ms;
+  if (cfg.cap != null)             out.cap                   = cfg.cap;
+  if (cfg.auto_export != null)     out.autoExport            = cfg.auto_export;
+  return out;
 }
 
 // MANAGER UI: re-queue a failed job. Sets status back to 'pending' and

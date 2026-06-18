@@ -411,6 +411,44 @@ $('saveSettings').addEventListener('click', () => {
   );
 });
 
+// Manager — push the current Settings to every worker via the shared
+// adbrain_worker_config row. Workers fetch this before each claim and
+// merge into their runOpts. Translates the popup's input field values
+// into the snake_case schema column names.
+$('pushConfigBtn')?.addEventListener('click', () => {
+  const r = $('pushConfigResult');
+  r.textContent = 'Pushing…';
+  r.style.color = 'var(--muted)';
+  const updates = {
+    kp_url:               $('kpUrl').value.trim() || null,
+    kp_max_per_product:   parseInt($('kpMaxPerProduct').value, 10) || null,
+    match_profile:        $('matchProfile').value || null,
+    clip_threshold_override: ($('matchProfile').value === 'custom')
+      ? Math.max(0.5, Math.min(0.95, (parseInt($('clipThreshold').value, 10) || 72) / 100))
+      : null,
+    max_image_match_rows: Math.max(0, parseInt($('maxImageMatchRows').value, 10) || 0),
+    search_delay_min_ms:  (parseInt($('searchDelayMin').value, 10) || 5)  * 1000,
+    search_delay_max_ms:  (parseInt($('searchDelayMax').value, 10) || 12) * 1000,
+    product_delay_min_ms: (parseInt($('productDelayMin').value, 10) || 15) * 1000,
+    product_delay_max_ms: (parseInt($('productDelayMax').value, 10) || 35) * 1000,
+    chunk_size:           parseInt($('chunkSize').value, 10) || 8,
+    chunk_rest_min_ms:    (parseInt($('chunkRestMin').value, 10) || 5)  * 60 * 1000,
+    chunk_rest_max_ms:    (parseInt($('chunkRestMax').value, 10) || 10) * 60 * 1000,
+    cap:                  parseInt($('capInput')?.value, 10) || null,
+    auto_export:          !!$('autoExport').checked,
+  };
+  chrome.runtime.sendMessage({ action: 'jobs:saveWorkerConfig', updates }, (resp) => {
+    if (!resp?.ok) {
+      r.textContent = `Push failed: ${resp?.error || 'unknown'}`;
+      r.style.color = 'var(--danger)';
+      return;
+    }
+    r.textContent = '✓ Settings pushed. Every worker will apply these on its next chunk claim.';
+    r.style.color = 'var(--success)';
+    setTimeout(() => { r.textContent = ''; }, 5000);
+  });
+});
+
 // ---- Progress bars ----
 function paintBar(elId, processed, total) {
   const fill = $(elId);
@@ -1392,9 +1430,15 @@ $('mgrUploadBtn')?.addEventListener('click', () => {
       const dupNote = (resp.duplicatesDropped && resp.duplicatesDropped > 0)
         ? `\nNote: ${resp.duplicatesDropped} duplicate row(s) in your file were merged (same product URL appeared more than once).`
         : '';
+      // Cross-batch dedup — surfaces products that were skipped because
+      // they're already in flight or done in another batch. Prevents
+      // the same product being processed by two workers in parallel.
+      const skipNote = (resp.skippedActive && resp.skippedActive > 0)
+        ? `\n⚠ ${resp.skippedActive} product(s) skipped — already pending/claimed/done in another batch${resp.skippedSkus?.length ? ` (e.g. ${resp.skippedSkus.slice(0, 3).join(', ')})` : ''}. Re-upload uses the existing rows; no duplicate work.`
+        : '';
       const kind = resp.uploaded < resp.total ? 'warn' : 'success';
       setQResult(r,
-        `✓ Uploaded ${resp.uploaded}/${resp.total} into batch "${resp.batchId}"${partial}. Share this Batch ID with worker PCs.${dupNote}${errLine}`,
+        `✓ Uploaded ${resp.uploaded}/${resp.total} into batch "${resp.batchId}"${partial}. Share this Batch ID with worker PCs.${dupNote}${skipNote}${errLine}`,
         kind);
       // Pre-fill the claim + download section's batch ID so single-PC manager+worker is one click.
       if (!$('mgrClaimBatchId').value)    $('mgrClaimBatchId').value    = resp.batchId;

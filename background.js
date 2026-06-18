@@ -24,6 +24,9 @@ import {
   sendWorkerCommand,
   fetchPendingCommands,
   acknowledgeCommand,
+  fetchWorkerConfig,
+  saveWorkerConfig,
+  workerConfigToRunOpts,
 } from './modules/discovery-jobs.js';
 import {
   STORAGE_KEY_SERVICE_KEY,
@@ -1189,6 +1192,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
+  // Manager pushes settings to all workers via the shared config table.
+  // Workers fetch this row before each claim and merge the non-null fields
+  // into their local runOpts. Change once, take effect on every PC.
+  if (action === 'jobs:saveWorkerConfig') {
+    (async () => {
+      try {
+        const updates = msg.updates || {};
+        const result = await saveWorkerConfig(updates, msg.managerId || state.workerId || 'manager');
+        sendResponse({ ok: true, config: result });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
+  if (action === 'jobs:fetchWorkerConfig') {
+    (async () => {
+      try {
+        const cfg = await fetchWorkerConfig();
+        sendResponse({ ok: true, config: cfg });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
+
   // Worker one-button connect: auto-detect the newest pending batch,
   // claim a chunk, start the engine, and enable continuous-claim so the
   // worker keeps pulling chunks until the queue is empty or the user
@@ -1218,6 +1244,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }).catch(() => {});
         // Release any stale claims from offline workers first.
         await releaseStaleJobs(10).catch(() => null);
+        // Fetch the manager's pushed config (KP URL, pacing, profile,
+        // caps) BEFORE claiming so the engine starts with the central
+        // settings. Worker's local Settings tab is now a fallback only.
+        let centralConfig = null;
+        try { centralConfig = await fetchWorkerConfig(); } catch {}
+        const centralRunOpts = centralConfig ? workerConfigToRunOpts(centralConfig) : {};
+        if (centralRunOpts.kpUrl) {
+          // Mirror the central KP URL into chrome.storage so the KP
+          // content script (which reads from storage) picks it up.
+          await chrome.storage.local.set({ [STORAGE_KEY_KP_URL]: centralRunOpts.kpUrl }).catch(() => {});
+        }
         // Claim a chunk and start the engine (re-uses the existing
         // claimAndStart code path).
         const jobs = await claimJobs({ workerId, batchId, limit: chunkSize });
@@ -1236,15 +1273,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           [STORAGE_KEY_CLAIMED_JOBS]:   state.claimedJobs,
         }).catch(() => {});
         await setRunIntent(true);
-        pushLog(`Auto-connect: claimed ${jobs.length} job(s) from batch "${batchId}" — continuous mode ON`, 'ok');
+        // Log what came from the manager's pushed config so the worker
+        // log shows who's in charge of pacing / profile / KP URL.
+        const centralKeys = Object.keys(centralRunOpts);
+        const centralNote = centralKeys.length > 0
+          ? ` · applied ${centralKeys.length} setting(s) from manager: ${centralKeys.slice(0, 6).join(', ')}`
+          : '';
+        pushLog(`Auto-connect: claimed ${jobs.length} job(s) from batch "${batchId}" — continuous mode ON${centralNote}`, 'ok');
         const products = jobs.map(j => ({
           url: j.product_url, sku: j.sku,
           productName: j.product_name, priority: j.priority,
           handles: j.handles ? String(j.handles).split('|').filter(Boolean) : [],
           brands:  j.brands  ? String(j.brands).split('|').filter(Boolean)  : [],
         }));
-        const startResult = await handleStart({ products, ...(msg.runOpts || {}) });
-        sendResponse({ ok: true, claimed: jobs.length, batchId, startResult });
+        // Merge order: manager's central config WINS over the caller's
+        // runOpts (the worker's local Settings tab values), which still
+        // beat hard-coded defaults. So the manager truly controls every
+        // worker; local settings are only a fallback when the manager
+        // hasn't pushed a value for a given field.
+        const mergedRunOpts = { ...(msg.runOpts || {}), ...centralRunOpts };
+        const startResult = await handleStart({ products, ...mergedRunOpts });
+        sendResponse({ ok: true, claimed: jobs.length, batchId, startResult, centralConfig: !!centralConfig });
       } catch (e) {
         sendResponse({ ok: false, error: e.message });
       }

@@ -1946,8 +1946,24 @@
       </div>
     </div>
     <div class="section">
-      <button id="saveSettings" style="width: 100%;">Save Settings</button>
+      <button id="saveSettings" style="width: 100%;">Save Settings (locally on this PC)</button>
       <div class="file-info" id="settingsSaved"></div>
+    </div>
+
+    <!-- Manager-only: push current Settings to every worker PC via the
+         shared adbrain_worker_config table. Each worker fetches this
+         before its next claim and merges into its runOpts — change
+         once at the manager, every PC picks it up automatically. -->
+    <div class="settings-group" style="margin-top: 24px;">
+      <div class="settings-group-title">🎯 Manager — push to all workers</div>
+      <div class="settings-group-sub">Save these Settings to the central config table. Every worker PC fetches it before claiming its next chunk.</div>
+    </div>
+    <div class="section">
+      <div class="hint" style="margin-bottom: 10px;">
+        Pushes: KP URL, Max KP per product, Pacing (search/product/chunk delays), Chunk size, Match profile, CLIP threshold override, Per-keyword cap, Auto-export. Workers use these instead of their local Settings until you clear the central row in Supabase.
+      </div>
+      <button id="pushConfigBtn" style="width: 100%;">Push current Settings to all workers</button>
+      <div id="pushConfigResult" class="file-info"></div>
     </div>
 
     <!-- ─────── Group 5: Reset ─────── -->
