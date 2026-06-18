@@ -1169,7 +1169,7 @@
       <div class="section">
         <label class="label">Batch to download</label>
         <input type="text" id="mgrDownloadBatchId" placeholder="paste a Batch ID from the status above" />
-        <div class="hint">Pulls every row in <code>adbrain_discovered_keywords</code> with that batch_id from Supabase, then generates one CSV per SKU locally. Runs on THIS PC even if other workers processed the products.</div>
+        <div class="hint">Pulls every row in <code>adbrain_discovered_keywords</code> with that batch_id from Supabase, then generates one CSV per SKU locally into <code>Downloads/adbrain_&lt;batchId&gt;/</code>. Each batch gets its own folder so multiple batches don't intermingle. Runs on THIS PC even if other workers processed the products.</div>
       </div>
       <button id="mgrDownloadBtn">Download all CSVs from Supabase</button>
       <div id="mgrDownloadResult" class="hint" style="margin-top:8px;"></div>

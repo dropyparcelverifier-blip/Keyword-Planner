@@ -286,30 +286,67 @@ export async function exportSingleProductCSV(rows, _batchId) {
   return filename;
 }
 
+// Build a Chrome-Downloads-safe folder name from an arbitrary batch ID.
+// Strips path-traversal characters and anything that isn't filename-safe
+// on Windows/macOS/Linux. Keeps it readable for the user.
+function _safeFolder(name) {
+  return String(name || 'batch')
+    .replace(/[^a-z0-9_\-]+/gi, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80) || 'batch';
+}
+
 // One file per product. Chrome triggers one download per call; we pace them
 // so the browser doesn't drop the batch.
-export async function toCSV(report, batchId) {
+//
+// opts.folder: if set, every file is nested under that subfolder of the
+// Downloads root — Chrome auto-creates the folder. Used by the central
+// "Download all CSVs from Supabase" flow so a 23-SKU batch lands as
+// Downloads/adbrain_batch_<id>/{sku}.csv instead of 23 loose files at
+// the Downloads root.
+export async function toCSV(report, batchId, opts = {}) {
   if (!report || report.length === 0) throw new Error('Report is empty.');
   const groups = groupByProduct(report);
   const filenames = [];
+  const folder = opts.folder ? _safeFolder(opts.folder) : '';
   for (const [, rows] of groups) {
     const slug = fileSlug(rows[0].sku, rows[0].productName);
-    const filename = `${slug}_${batchId || Date.now()}.csv`;
-    await chrome.downloads.download({ url: csvDataUrl(rows), filename, saveAs: false });
+    // When folder is set the folder name already disambiguates batches,
+    // so the per-file name doesn't need the batchId suffix.
+    const filename = folder
+      ? `${folder}/${slug}.csv`
+      : `${slug}_${batchId || Date.now()}.csv`;
+    await chrome.downloads.download({
+      url: csvDataUrl(rows),
+      filename,
+      saveAs: false,
+      // Overwrite so re-running the central download replaces previous
+      // versions instead of accumulating "(1)", "(2)" copies.
+      conflictAction: opts.folder ? 'overwrite' : 'uniquify',
+    });
     filenames.push(filename);
     await sleep(250);
   }
   return filenames;
 }
 
-export async function toXLSX(report, batchId) {
+// Same folder/overwrite semantics as toCSV — see its doc comment.
+export async function toXLSX(report, batchId, opts = {}) {
   if (!report || report.length === 0) throw new Error('Report is empty.');
   const groups = groupByProduct(report);
   const filenames = [];
+  const folder = opts.folder ? _safeFolder(opts.folder) : '';
   for (const [, rows] of groups) {
     const slug = fileSlug(rows[0].sku, rows[0].productName);
-    const filename = `${slug}_${batchId || Date.now()}.xlsx`;
-    await chrome.downloads.download({ url: xlsxDataUrl(rows), filename, saveAs: false });
+    const filename = folder
+      ? `${folder}/${slug}.xlsx`
+      : `${slug}_${batchId || Date.now()}.xlsx`;
+    await chrome.downloads.download({
+      url: xlsxDataUrl(rows),
+      filename,
+      saveAs: false,
+      conflictAction: opts.folder ? 'overwrite' : 'uniquify',
+    });
     filenames.push(filename);
     await sleep(250);
   }

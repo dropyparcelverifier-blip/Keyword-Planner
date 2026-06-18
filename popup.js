@@ -1444,7 +1444,7 @@ $('mgrDownloadBtn')?.addEventListener('click', () => {
         return;
       }
       $('mgrDownloadResult').textContent =
-        `✓ Downloaded ${resp.count} CSV(s) (${resp.rows} rows) for batch "${batchId}" to this PC's Downloads folder.`;
+        `✓ Downloaded ${resp.count} CSV(s) (${resp.rows} rows) into Downloads/${resp.folder || 'adbrain_' + batchId}/`;
       $('mgrDownloadResult').style.color = 'var(--success)';
     }
   );

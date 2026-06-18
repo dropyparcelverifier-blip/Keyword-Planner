@@ -898,7 +898,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Manager UI — pull every row for a batch back from Supabase and
   // generate the per-SKU CSVs locally on THIS PC. Solves the "CSVs are
   // scattered across worker PCs' Downloads folders" problem — manager
-  // runs this once, gets one .csv per SKU for the entire batch.
+  // runs this once, gets one .csv per SKU for the entire batch,
+  // grouped under Downloads/adbrain_<batchId>/ so multiple batches
+  // don't intermingle.
   if (action === 'jobs:downloadBatchCsvs') {
     (async () => {
       try {
@@ -912,10 +914,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: true, filenames: [], count: 0, message: 'no rows in batch' });
           return;
         }
-        emitProgress({ currentAction: `Generating CSVs from ${report.length} rows…`, logKind: 'ok' });
-        const filenames = await toCSV(report, batchId);
-        emitProgress({ currentAction: `✓ Downloaded ${filenames.length} CSV(s) for batch "${batchId}".`, logKind: 'ok' });
-        sendResponse({ ok: true, filenames, count: filenames.length, rows: report.length });
+        // Folder name: "adbrain_<batchId>" — the _safeFolder helper inside
+        // discovery-export strips any path-traversal or filename-unsafe
+        // characters, so user-supplied batch IDs are sanitised.
+        const folder = `adbrain_${batchId}`;
+        emitProgress({ currentAction: `Generating CSVs from ${report.length} rows into "${folder}/"…`, logKind: 'ok' });
+        const filenames = await toCSV(report, batchId, { folder });
+        emitProgress({ currentAction: `✓ Downloaded ${filenames.length} CSV(s) into Downloads/${folder}/`, logKind: 'ok' });
+        sendResponse({ ok: true, filenames, count: filenames.length, rows: report.length, folder });
       } catch (e) {
         sendResponse({ ok: false, error: e.message });
       }
