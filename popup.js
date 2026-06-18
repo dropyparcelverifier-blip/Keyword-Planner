@@ -1236,23 +1236,29 @@ function mgrCheckCreds() {
 $('mgrSaveCredsBtn')?.addEventListener('click', () => {
   const url = $('mgrSupabaseUrl').value.trim();
   const key = $('mgrServiceKey').value.trim();
-  if (!url || !key) {
-    $('mgrSaveCredsResult').textContent = 'Both fields required.';
-    $('mgrSaveCredsResult').style.color = 'var(--danger)';
-    return;
-  }
+  const r = $('mgrSaveCredsResult');
+  if (!url || !key) { setQResult(r, 'Both fields required.', 'error'); return; }
   chrome.runtime.sendMessage({ action: 'jobs:saveCreds', supabaseUrl: url, serviceKey: key }, (resp) => {
-    if (!resp?.ok) {
-      $('mgrSaveCredsResult').textContent = `Save failed: ${resp?.error || 'unknown'}`;
-      $('mgrSaveCredsResult').style.color = 'var(--danger)';
-      return;
-    }
-    $('mgrSaveCredsResult').textContent = '✓ Saved. Settings tab also reflects these values.';
-    $('mgrSaveCredsResult').style.color = 'var(--success)';
+    if (!resp?.ok) { setQResult(r, `Save failed: ${resp?.error || 'unknown'}`, 'error'); return; }
+    setQResult(r, '✓ Saved. Settings tab also reflects these values.', 'success');
     $('mgrServiceKey').value = ''; // wipe from DOM so it doesn't lurk
     mgrCheckCreds();
   });
 });
+
+// Helper: write a status message to a .queue-card-result div with the
+// proper colour class. Replaces the old `element.style.color = 'var(--X)'`
+// pattern so the result line picks up the CSS background+border treatment
+// (success = green pill, error = red pill, etc.) instead of just changing
+// text colour.
+function setQResult(el, text, kind = 'info') {
+  if (!el) return;
+  el.textContent = text || '';
+  el.classList.remove('success', 'error', 'info', 'warn');
+  if (text) el.classList.add(kind);
+  // Clear any legacy inline colour from older code so the class wins.
+  el.style.color = '';
+}
 
 // ─── Setup code (one-string portable creds) ───
 // Generate: pull saved supabaseUrl + service_role from background, encode
@@ -1262,17 +1268,16 @@ $('mgrSaveCredsBtn')?.addEventListener('click', () => {
 const SETUP_CODE_VERSION = 1;
 
 $('mgrGenerateSetupBtn')?.addEventListener('click', () => {
+  const r = $('mgrSaveCredsResult');
   chrome.runtime.sendMessage({ action: 'jobs:exportSetupCode' }, (resp) => {
     if (!resp?.ok) {
       $('mgrSetupCode').value = '';
-      $('mgrSaveCredsResult').textContent = `Generate failed: ${resp?.error || 'creds not saved yet'}`;
-      $('mgrSaveCredsResult').style.color = 'var(--danger)';
+      setQResult(r, `Generate failed: ${resp?.error || 'creds not saved yet'}`, 'error');
       return;
     }
     $('mgrSetupCode').value = resp.code;
     $('mgrCopySetupBtn').disabled = false;
-    $('mgrSaveCredsResult').textContent = '✓ Setup code generated — copy + paste to worker PCs.';
-    $('mgrSaveCredsResult').style.color = 'var(--success)';
+    setQResult(r, '✓ Setup code generated — copy + paste to worker PCs.', 'success');
   });
 });
 
@@ -1291,22 +1296,13 @@ $('mgrCopySetupBtn')?.addEventListener('click', async () => {
 });
 
 $('mgrApplySetupBtn')?.addEventListener('click', () => {
+  const r = $('mgrApplySetupResult');
   const raw = $('mgrApplySetupCode').value.trim();
-  if (!raw) {
-    $('mgrApplySetupResult').textContent = 'Paste the setup code first.';
-    $('mgrApplySetupResult').style.color = 'var(--danger)';
-    return;
-  }
+  if (!raw) { setQResult(r, 'Paste the setup code first.', 'error'); return; }
   chrome.runtime.sendMessage({ action: 'jobs:importSetupCode', code: raw }, (resp) => {
-    if (!resp?.ok) {
-      $('mgrApplySetupResult').textContent = `Apply failed: ${resp?.error || 'invalid code'}`;
-      $('mgrApplySetupResult').style.color = 'var(--danger)';
-      return;
-    }
-    $('mgrApplySetupResult').textContent = '✓ Setup applied. You can now claim jobs from the queue.';
-    $('mgrApplySetupResult').style.color = 'var(--success)';
+    if (!resp?.ok) { setQResult(r, `Apply failed: ${resp?.error || 'invalid code'}`, 'error'); return; }
+    setQResult(r, '✓ Setup applied. You can now claim jobs from the queue.', 'success');
     $('mgrApplySetupCode').value = '';
-    // Refresh the creds card so it disappears now that both fields are set.
     mgrCheckCreds();
   });
 });
@@ -1360,49 +1356,56 @@ $('mgrFileInput')?.addEventListener('change', async (e) => {
 $('mgrUploadBtn')?.addEventListener('click', () => {
   if (mgrParsedProducts.length === 0) return;
   const batchId = ($('mgrBatchId').value || '').trim() || String(Date.now());
+  const r = $('mgrUploadResult');
   $('mgrUploadBtn').disabled = true;
-  $('mgrUploadResult').textContent = `Uploading ${mgrParsedProducts.length} product(s)…`;
-  $('mgrUploadResult').style.color = 'var(--muted)';
+  setQResult(r, `Uploading ${mgrParsedProducts.length} product(s)…`, 'info');
   chrome.runtime.sendMessage(
     { action: 'jobs:upload', products: mgrParsedProducts, batchId },
     (resp) => {
       $('mgrUploadBtn').disabled = false;
-      if (!resp?.ok) {
-        $('mgrUploadResult').textContent = `Upload failed: ${resp?.error || 'unknown'}`;
-        $('mgrUploadResult').style.color = 'var(--danger)';
-        return;
-      }
-      $('mgrUploadResult').textContent =
-        `✓ Uploaded ${resp.uploaded}/${resp.total} into batch "${resp.batchId}". Share this Batch ID with worker PCs.`;
-      $('mgrUploadResult').style.color = 'var(--success)';
-      // Pre-fill the claim section's batch ID so single-PC manager+worker is one click.
-      if (!$('mgrClaimBatchId').value) $('mgrClaimBatchId').value = resp.batchId;
-      if (!$('mgrBatchId').value)      $('mgrBatchId').value      = resp.batchId;
+      if (!resp?.ok) { setQResult(r, `Upload failed: ${resp?.error || 'unknown'}`, 'error'); return; }
+      setQResult(r,
+        `✓ Uploaded ${resp.uploaded}/${resp.total} into batch "${resp.batchId}". Share this Batch ID with worker PCs.`,
+        'success');
+      // Pre-fill the claim + download section's batch ID so single-PC manager+worker is one click.
+      if (!$('mgrClaimBatchId').value)    $('mgrClaimBatchId').value    = resp.batchId;
+      if (!$('mgrBatchId').value)         $('mgrBatchId').value         = resp.batchId;
+      if (!$('mgrDownloadBatchId').value) $('mgrDownloadBatchId').value = resp.batchId;
       mgrRefreshSummary();
     }
   );
 });
 
-// Render live summary + active-worker breakdown.
+// Render live summary + active-worker breakdown using the .stat-grid
+// CSS — coloured stat tiles per batch instead of the prior inline-styled
+// rows. Each batch becomes a self-contained card with progress bar +
+// 4-tile metrics grid.
+function _esc(s) {
+  return String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+}
 function mgrRenderSummary(summary, workers) {
   const wrap = $('mgrSummary');
   if (!wrap) return;
   if (!Array.isArray(summary) || summary.length === 0) {
-    wrap.textContent = 'No batches yet — upload a file in Step 1.';
+    wrap.innerHTML = `<div style="padding:14px 8px; text-align:center; color:var(--muted); font-size:12px;">No batches yet — upload a file above to create one.</div>`;
     return;
   }
   const rows = summary.map(b => {
     const pct = b.total > 0 ? Math.round((b.done / b.total) * 100) : 0;
-    const safeId = String(b.batch_id).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
     return `
-      <div style="border:1px solid var(--border); border-radius:6px; padding:8px 10px; margin-bottom:6px;">
-        <div style="display:flex; justify-content:space-between; align-items:center;">
-          <code style="font-weight:600;">${safeId}</code>
-          <span><strong>${b.done}</strong> / ${b.total} done · ${pct}%</span>
+      <div style="border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin-bottom:8px; background:var(--bg);">
+        <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px;">
+          <code style="font-weight:600; font-size:12px; color:var(--text);">${_esc(b.batch_id)}</code>
+          <span style="font-size:11px; color:var(--muted);"><strong style="color:var(--text);">${b.done}</strong> / ${b.total} · ${pct}%</span>
         </div>
-        <div style="font-size:11px; color:var(--muted); margin-top:4px;">
-          pending: <strong>${b.pending}</strong> · claimed: <strong>${b.claimed}</strong>
-          · failed: <strong>${b.failed}</strong> · workers: <strong>${b.active_workers}</strong>
+        <div style="height:4px; background:var(--panel); border-radius:2px; overflow:hidden; margin-bottom:8px;">
+          <div style="height:100%; width:${pct}%; background:#22c55e; transition:width 0.3s;"></div>
+        </div>
+        <div class="stat-grid">
+          <div class="stat-tile pending"><div class="stat-tile-value">${b.pending}</div><div class="stat-tile-label">pending</div></div>
+          <div class="stat-tile claimed"><div class="stat-tile-value">${b.claimed}</div><div class="stat-tile-label">claimed</div></div>
+          <div class="stat-tile done"><div class="stat-tile-value">${b.done}</div><div class="stat-tile-label">done</div></div>
+          <div class="stat-tile failed"><div class="stat-tile-value">${b.failed}</div><div class="stat-tile-label">failed</div></div>
         </div>
       </div>
     `;
@@ -1416,13 +1419,18 @@ function mgrRenderSummary(summary, workers) {
     return;
   }
   const wRows = workers.map(w => {
-    const safeW = String(w.worker).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
     const ago = w.lastHeartbeat ? Math.round((Date.now() - new Date(w.lastHeartbeat).getTime()) / 1000) : null;
     const hb = ago === null ? 'no heartbeat yet'
              : ago < 60 ? `${ago}s ago` : `${Math.round(ago / 60)} min ago`;
-    return `<div style="font-size:11px; color:var(--muted);">• <strong>${safeW}</strong>: ${w.count} job(s) in flight (last heartbeat ${hb})</div>`;
+    const hbColor = ago === null ? 'var(--muted)' : (ago < 90 ? '#22c55e' : (ago < 300 ? '#f59e0b' : '#ef4444'));
+    return `
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; margin-bottom:4px; font-size:11px;">
+        <span><span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${hbColor}; margin-right:6px;"></span><strong style="color:var(--text);">${_esc(w.worker)}</strong></span>
+        <span style="color:var(--muted);">${w.count} job(s) · ${hb}</span>
+      </div>
+    `;
   }).join('');
-  wWrap.innerHTML = `<div style="border-top:1px solid var(--border); padding-top:8px;"><strong>Active workers</strong><br>${wRows}</div>`;
+  wWrap.innerHTML = `<div style="font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.4px; margin:8px 0 6px;">Active workers</div>${wRows}`;
 }
 
 function mgrRefreshSummary() {
@@ -1444,16 +1452,11 @@ function mgrRefreshSummary() {
 $('mgrRefreshBtn')?.addEventListener('click', mgrRefreshSummary);
 
 $('mgrReleaseBtn')?.addEventListener('click', () => {
-  $('mgrReleaseResult').textContent = 'Releasing…';
-  $('mgrReleaseResult').style.color = 'var(--muted)';
+  const r = $('mgrReleaseResult');
+  setQResult(r, 'Releasing…', 'info');
   chrome.runtime.sendMessage({ action: 'jobs:releaseStale', staleMinutes: 10 }, (resp) => {
-    if (!resp?.ok) {
-      $('mgrReleaseResult').textContent = `Release failed: ${resp?.error || 'unknown'}`;
-      $('mgrReleaseResult').style.color = 'var(--danger)';
-      return;
-    }
-    $('mgrReleaseResult').textContent = `✓ Released ${resp.released} stale claim(s).`;
-    $('mgrReleaseResult').style.color = 'var(--success)';
+    if (!resp?.ok) { setQResult(r, `Release failed: ${resp?.error || 'unknown'}`, 'error'); return; }
+    setQResult(r, `✓ Released ${resp.released} stale claim(s).`, 'success');
     mgrRefreshSummary();
   });
 });
@@ -1473,44 +1476,28 @@ $('mgrWorkerId')?.addEventListener('input', () => {
 
 // Claim a chunk and hand it to the engine.
 $('mgrClaimBtn')?.addEventListener('click', () => {
+  const r = $('mgrClaimResult');
   const workerId = $('mgrWorkerId').value.trim();
   const batchId  = $('mgrClaimBatchId').value.trim();
   const limit    = parseInt($('mgrChunkSize').value, 10) || 5;
-  if (!workerId) {
-    $('mgrClaimResult').textContent = 'Set a Worker ID first.';
-    $('mgrClaimResult').style.color = 'var(--danger)';
-    return;
-  }
-  if (!batchId) {
-    $('mgrClaimResult').textContent = 'Paste a Batch ID to claim from.';
-    $('mgrClaimResult').style.color = 'var(--danger)';
-    return;
-  }
-  // Force-persist the Worker ID right now, in case the user typed it
-  // and clicked Claim before the debounced 'input' handler ran. Without
-  // this, a fresh popup open would pre-fill the OLD stored ID and the
-  // user would silently use the wrong identity.
+  if (!workerId) { setQResult(r, 'Set a Worker ID first.', 'error'); return; }
+  if (!batchId)  { setQResult(r, 'Paste a Batch ID to claim from.', 'error'); return; }
+  // Force-persist the Worker ID synchronously in case the user typed it
+  // and clicked Claim before the debounced 'input' handler fired.
   chrome.runtime.sendMessage({ action: 'jobs:setWorkerId', workerId });
-  $('mgrClaimResult').textContent = 'Claiming…';
-  $('mgrClaimResult').style.color = 'var(--muted)';
+  setQResult(r, 'Claiming…', 'info');
   // Snapshot the same runOpts the Run tab would use so the engine runs
   // identically whether started from a local file or a queue claim.
   const runOpts = (typeof readRunOpts === 'function') ? readRunOpts() : {};
   chrome.runtime.sendMessage(
     { action: 'jobs:claimAndStart', workerId, batchId, limit, runOpts },
     (resp) => {
-      if (!resp?.ok) {
-        $('mgrClaimResult').textContent = `Claim failed: ${resp?.error || 'unknown'}`;
-        $('mgrClaimResult').style.color = 'var(--danger)';
-        return;
-      }
+      if (!resp?.ok) { setQResult(r, `Claim failed: ${resp?.error || 'unknown'}`, 'error'); return; }
       if (resp.claimed === 0) {
-        $('mgrClaimResult').textContent = '✓ Queue empty — no jobs left to claim in this batch.';
-        $('mgrClaimResult').style.color = 'var(--warn)';
+        setQResult(r, '✓ Queue empty — no jobs left to claim in this batch.', 'warn');
         return;
       }
-      $('mgrClaimResult').textContent = `✓ Claimed ${resp.claimed} job(s). Engine started — watch the Run tab.`;
-      $('mgrClaimResult').style.color = 'var(--success)';
+      setQResult(r, `✓ Claimed ${resp.claimed} job(s). Engine started — watch the Run tab.`, 'success');
       mgrRefreshSummary();
     }
   );
@@ -1520,34 +1507,25 @@ $('mgrClaimBtn')?.addEventListener('click', () => {
 // and generate per-SKU CSVs locally. Cures the "CSVs scattered across
 // workers' Downloads folders" problem.
 $('mgrDownloadBtn')?.addEventListener('click', () => {
+  const r = $('mgrDownloadResult');
   const batchId = $('mgrDownloadBatchId').value.trim()
     || $('mgrClaimBatchId').value.trim()
     || $('mgrBatchId').value.trim();
-  if (!batchId) {
-    $('mgrDownloadResult').textContent = 'Paste a Batch ID to download.';
-    $('mgrDownloadResult').style.color = 'var(--danger)';
-    return;
-  }
+  if (!batchId) { setQResult(r, 'Paste a Batch ID to download.', 'error'); return; }
   $('mgrDownloadBtn').disabled = true;
-  $('mgrDownloadResult').textContent = 'Fetching from Supabase…';
-  $('mgrDownloadResult').style.color = 'var(--muted)';
+  setQResult(r, 'Fetching from Supabase…', 'info');
   chrome.runtime.sendMessage(
     { action: 'jobs:downloadBatchCsvs', batchId },
     (resp) => {
       $('mgrDownloadBtn').disabled = false;
-      if (!resp?.ok) {
-        $('mgrDownloadResult').textContent = `Download failed: ${resp?.error || 'unknown'}`;
-        $('mgrDownloadResult').style.color = 'var(--danger)';
-        return;
-      }
+      if (!resp?.ok) { setQResult(r, `Download failed: ${resp?.error || 'unknown'}`, 'error'); return; }
       if (resp.count === 0) {
-        $('mgrDownloadResult').textContent = 'No rows in this batch yet — workers haven\'t pushed anything.';
-        $('mgrDownloadResult').style.color = 'var(--warn)';
+        setQResult(r, 'No rows in this batch yet — workers haven\'t pushed anything.', 'warn');
         return;
       }
-      $('mgrDownloadResult').textContent =
-        `✓ Downloaded ${resp.count} CSV(s) (${resp.rows} rows) into Downloads/${resp.folder || 'adbrain_' + batchId}/`;
-      $('mgrDownloadResult').style.color = 'var(--success)';
+      setQResult(r,
+        `✓ Downloaded ${resp.count} CSV(s) (${resp.rows} rows) into Downloads/${resp.folder || 'adbrain_' + batchId}/`,
+        'success');
     }
   );
 });

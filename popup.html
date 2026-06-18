@@ -238,6 +238,177 @@
       .role-banner-hint { text-align: left; }
     }
 
+    /* ============ Queue-tab card layout =============
+       The Queue tab's outer sections (Connection, Upload, Status, Claim,
+       Download) all share the same visual shell — a panel with icon +
+       title + sub header, controls in the body, optional result line at
+       the bottom. Replaces the smaller .settings-group styling for the
+       distributed-mode workflow so each step reads as a self-contained
+       card instead of a flat list of inputs. */
+    .queue-card {
+      margin-bottom: 12px;
+      padding: 14px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      box-shadow: var(--shadow-md);
+    }
+    .queue-card-head {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      margin-bottom: 12px;
+    }
+    .queue-card-icon {
+      font-size: 20px;
+      line-height: 1;
+      margin-top: 1px;
+      flex-shrink: 0;
+    }
+    .queue-card-title-wrap { flex: 1; min-width: 0; }
+    .queue-card-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.3;
+    }
+    .queue-card-sub {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+      line-height: 1.45;
+    }
+    /* Form rows inside a queue card. Tighter than the .section default. */
+    .queue-card .qc-row { margin-bottom: 10px; }
+    .queue-card .qc-row:last-of-type { margin-bottom: 0; }
+    .queue-card .qc-row label.label {
+      display: block;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--muted);
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .queue-card .qc-row input[type="text"],
+    .queue-card .qc-row input[type="password"],
+    .queue-card .qc-row input[type="number"] {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px 10px;
+      font-size: 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+    }
+    .queue-card .qc-row input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px var(--accent-soft);
+    }
+    .queue-card .qc-row .hint {
+      font-size: 10px;
+      color: var(--muted);
+      margin-top: 4px;
+      line-height: 1.45;
+    }
+    .queue-card .qc-row input[type="file"] {
+      display: block;
+      width: 100%;
+      padding: 14px 10px;
+      background: var(--bg);
+      border: 2px dashed var(--border);
+      border-radius: 6px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 11px;
+    }
+    .queue-card .qc-row input[type="file"]:hover {
+      border-color: var(--accent);
+      color: var(--text);
+    }
+    /* The primary CTA button at the bottom of each card. */
+    .queue-card-action {
+      display: flex;
+      gap: 6px;
+      margin-top: 12px;
+    }
+    .queue-card-action button {
+      flex: 1;
+      padding: 9px 14px;
+      font-size: 12px;
+      font-weight: 500;
+      border-radius: 6px;
+      border: none;
+      background: var(--accent);
+      color: white;
+      cursor: pointer;
+    }
+    .queue-card-action button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .queue-card-action button.secondary {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      flex: 0 0 auto;
+      padding: 9px 14px;
+    }
+    .queue-card-action button.secondary:hover:not(:disabled) { background: var(--panel-2); }
+    /* Result line shown below actions — green for success, red for error,
+       grey for neutral info. Hidden by default until JS populates it. */
+    .queue-card-result {
+      margin-top: 10px;
+      padding: 8px 10px;
+      font-size: 11px;
+      border-radius: 6px;
+      line-height: 1.45;
+      display: none;
+      word-break: break-word;
+    }
+    .queue-card-result:not(:empty) { display: block; }
+    .queue-card-result.success {
+      background: rgba(34, 197, 94, 0.08);
+      border: 1px solid rgba(34, 197, 94, 0.25);
+      color: var(--text);
+    }
+    .queue-card-result.error {
+      background: rgba(239, 68, 68, 0.08);
+      border: 1px solid rgba(239, 68, 68, 0.25);
+      color: var(--text);
+    }
+    .queue-card-result.info {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .queue-card-result.warn {
+      background: rgba(245, 158, 11, 0.08);
+      border: 1px solid rgba(245, 158, 11, 0.25);
+      color: var(--text);
+    }
+
+    /* Stat-card grid for the Live Status panel — discrete metric tiles
+       instead of inline-styled divs. */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      margin: 4px 0 10px;
+    }
+    .stat-tile {
+      padding: 8px 6px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      text-align: center;
+    }
+    .stat-tile-value { font-size: 16px; font-weight: 700; color: var(--text); line-height: 1.1; }
+    .stat-tile-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; margin-top: 3px; }
+    .stat-tile.done    .stat-tile-value { color: #22c55e; }
+    .stat-tile.claimed .stat-tile-value { color: #3b82f6; }
+    .stat-tile.pending .stat-tile-value { color: #f59e0b; }
+    .stat-tile.failed  .stat-tile-value { color: #ef4444; }
+
     /* ============ Setup-code cards (Connection card sub-section) ============
        Two compact cards inside the Connection settings-group — one for the
        manager to generate + share a setup code, one for the worker to paste
@@ -1286,23 +1457,31 @@
        "both" role and is not the primary entrypoint anymore. -->
   <div class="panel active" id="panel-queue">
 
-    <!-- Inline Supabase credentials. Hidden once both are set so it
-         doesn't visually clutter day-to-day use. Same storage keys as
-         the Settings tab, so saving here also unlocks Push to AdBrain. -->
-    <div class="settings-group" id="mgrCredsCard">
-      <div class="settings-group-title">Connection (first-time only)</div>
-      <div class="hint" id="mgrCredsStatus" style="margin-bottom:8px;">Checking…</div>
-      <div class="section">
+    <!-- Inline Supabase credentials. Same storage keys as the Settings
+         tab, so saving here also unlocks Push to AdBrain. Card stays
+         visible so managers can always re-generate setup codes for
+         new workers. -->
+    <div class="queue-card" id="mgrCredsCard">
+      <div class="queue-card-head">
+        <span class="queue-card-icon">🔌</span>
+        <div class="queue-card-title-wrap">
+          <div class="queue-card-title">Connection</div>
+          <div class="queue-card-sub" id="mgrCredsStatus">Checking…</div>
+        </div>
+      </div>
+      <div class="qc-row">
         <label class="label">Supabase project URL</label>
         <input type="text" id="mgrSupabaseUrl" placeholder="https://xxxxx.supabase.co" />
       </div>
-      <div class="section">
+      <div class="qc-row">
         <label class="label">service_role key</label>
         <input type="password" id="mgrServiceKey" placeholder="eyJhbGc..." />
         <div class="hint">Stored locally in this PC's <code>chrome.storage</code>. Used by every queue call AND by Push-to-AdBrain.</div>
       </div>
-      <button id="mgrSaveCredsBtn">Save credentials</button>
-      <div id="mgrSaveCredsResult" class="hint" style="margin-top:8px;"></div>
+      <div class="queue-card-action">
+        <button id="mgrSaveCredsBtn">Save credentials</button>
+      </div>
+      <div id="mgrSaveCredsResult" class="queue-card-result"></div>
 
       <!-- ───── Setup code ─────
            Role-aware: managers see only the "Generate & share" card,
@@ -1354,71 +1533,104 @@
       </div>
     </div>
 
-    <div class="settings-group" data-show-when="manager,both">
-      <div class="settings-group-title">📤 Upload products (manager)</div>
-      <div class="section">
-        <label class="label">Product file to upload to the shared queue</label>
+    <!-- Manager: upload product list into the shared queue. Workers then
+         claim chunks from this batch. -->
+    <div class="queue-card" data-show-when="manager,both">
+      <div class="queue-card-head">
+        <span class="queue-card-icon">📤</span>
+        <div class="queue-card-title-wrap">
+          <div class="queue-card-title">Upload products</div>
+          <div class="queue-card-sub">Push the product list into the shared queue. Workers claim chunks from it.</div>
+        </div>
+      </div>
+      <div class="qc-row">
+        <label class="label">Product file (CSV / XLSX)</label>
         <input type="file" id="mgrFileInput" accept=".csv,.xlsx,.xls" />
         <div class="file-info" id="mgrFileInfo">No file selected.</div>
-        <div class="hint">Columns (case-insensitive): "Product URL", "Priority", "SKU", "Handles", "Brand". Rows are inserted into <code>adbrain_discovery_jobs</code> with status=pending so worker PCs can claim chunks.</div>
+        <div class="hint">Columns (case-insensitive): "Product URL", "Priority", "SKU", "Handles", "Brand".</div>
       </div>
-      <div class="section">
-        <label class="label">Batch ID (share this with worker PCs)</label>
+      <div class="qc-row">
+        <label class="label">Batch ID</label>
         <input type="text" id="mgrBatchId" placeholder="auto-generate from timestamp" />
-        <div class="hint">Leave blank to auto-generate. Re-uploading the same Batch ID is idempotent — duplicates merge, not re-insert. Workers paste this ID below to claim from.</div>
+        <div class="hint">Leave blank to auto-generate. Re-uploading the same Batch ID merges duplicates instead of re-inserting. Workers paste this ID to claim from.</div>
       </div>
-      <button id="mgrUploadBtn" disabled>Upload to manager queue</button>
-      <div id="mgrUploadResult" class="hint" style="margin-top:8px;"></div>
+      <div class="queue-card-action">
+        <button id="mgrUploadBtn" disabled>Upload to manager queue</button>
+      </div>
+      <div id="mgrUploadResult" class="queue-card-result"></div>
     </div>
 
-    <div class="settings-group" data-show-when="manager,worker,both">
-      <div class="settings-group-title">📊 Live batch status</div>
-      <div class="section">
+    <!-- Live status: visible to everyone. Manager + worker both want to
+         see the batch's progress and who's working on what. -->
+    <div class="queue-card" data-show-when="manager,worker,both">
+      <div class="queue-card-head">
+        <span class="queue-card-icon">📊</span>
+        <div class="queue-card-title-wrap">
+          <div class="queue-card-title">Live batch status</div>
+          <div class="queue-card-sub">Auto-refreshes every 30s while this tab is open.</div>
+        </div>
+      </div>
+      <div id="mgrSummary" style="font-size:12px;">Click "Refresh now" to load.</div>
+      <div id="mgrWorkers" style="font-size:12px; margin-top:10px;"></div>
+      <div class="queue-card-action">
         <button class="secondary" id="mgrRefreshBtn">Refresh now</button>
-        <span class="hint" style="margin-left:8px;">Auto-refreshes every 30s while this tab is open.</span>
+        <button class="secondary" id="mgrReleaseBtn">Release stale (&gt; 10 min)</button>
       </div>
-      <div id="mgrSummary" style="margin-top:10px; font-size: 12px;">Click "Refresh now" to load.</div>
-      <div id="mgrWorkers" style="margin-top:10px; font-size: 12px;"></div>
-      <div class="section" style="margin-top:14px;">
-        <button class="secondary" id="mgrReleaseBtn">Release stale claims (&gt; 10 min idle)</button>
-        <div class="hint" style="margin-top:6px;">Releases any worker's claim that hasn't heartbeated in 10+ min. Distributed cleanup — also runs automatically before every claim.</div>
-        <div id="mgrReleaseResult" class="hint" style="margin-top:6px;"></div>
-      </div>
+      <div id="mgrReleaseResult" class="queue-card-result"></div>
     </div>
 
-    <div class="settings-group" data-show-when="worker,both">
-      <div class="settings-group-title">⚡ Claim &amp; run work on this PC</div>
-      <div class="section">
+    <!-- Worker: claim a chunk of pending jobs and start the engine on
+         them. The engine flow is identical to a local-file run; only
+         the source of products differs. -->
+    <div class="queue-card" data-show-when="worker,both">
+      <div class="queue-card-head">
+        <span class="queue-card-icon">⚡</span>
+        <div class="queue-card-title-wrap">
+          <div class="queue-card-title">Claim &amp; run work</div>
+          <div class="queue-card-sub">Lock a chunk of jobs to this PC and start the engine on them.</div>
+        </div>
+      </div>
+      <div class="qc-row">
         <label class="label">Worker ID for this PC</label>
         <input type="text" id="mgrWorkerId" placeholder="e.g. PC-A, Office, Home" />
-        <div class="hint">Persisted in <code>chrome.storage</code>. Must be unique across your PCs so heartbeats / claims don't collide.</div>
+        <div class="hint">Must be unique across your PCs. Used for heartbeat locking and the live-status breakdown.</div>
       </div>
-      <div class="section">
+      <div class="qc-row">
         <label class="label">Batch to pull from</label>
         <input type="text" id="mgrClaimBatchId" placeholder="paste a Batch ID from the status above" />
       </div>
-      <div class="section">
+      <div class="qc-row">
         <label class="label">Chunk size (jobs per claim)</label>
         <input type="number" id="mgrChunkSize" value="5" min="1" max="50" />
-        <div class="hint">When this PC finishes its chunk, click "Claim more" again for the next chunk. 5 is a balanced default for &lt; 10 PCs.</div>
+        <div class="hint">5 is a balanced default. When the chunk finishes, click again for the next.</div>
       </div>
-      <button id="mgrClaimBtn">Claim &amp; start on this PC</button>
-      <div id="mgrClaimResult" class="hint" style="margin-top:8px;"></div>
+      <div class="queue-card-action">
+        <button id="mgrClaimBtn">Claim &amp; start on this PC</button>
+      </div>
+      <div id="mgrClaimResult" class="queue-card-result"></div>
     </div>
 
-    <!-- Centralized CSV download. Pulls every row for a batch from
-         Supabase and generates per-SKU CSVs locally on THIS PC so the
+    <!-- Manager-only: centralised CSV download. Pulls every row for a
+         batch from Supabase and generates per-SKU CSVs locally so the
          manager doesn't have to collect files from each worker's
-         Downloads folder. Shown to manager + both. -->
-    <div class="settings-group" data-show-when="manager,both">
-      <div class="settings-group-title">📦 Download all CSVs (manager)</div>
-      <div class="section">
+         Downloads folder. -->
+    <div class="queue-card" data-show-when="manager,both">
+      <div class="queue-card-head">
+        <span class="queue-card-icon">📦</span>
+        <div class="queue-card-title-wrap">
+          <div class="queue-card-title">Download all CSVs</div>
+          <div class="queue-card-sub">Pull every row for a batch from Supabase and generate per-SKU CSVs on this PC.</div>
+        </div>
+      </div>
+      <div class="qc-row">
         <label class="label">Batch to download</label>
         <input type="text" id="mgrDownloadBatchId" placeholder="paste a Batch ID from the status above" />
-        <div class="hint">Pulls every row in <code>adbrain_discovered_keywords</code> with that batch_id from Supabase, then generates one CSV per SKU locally into <code>Downloads/adbrain_&lt;batchId&gt;/</code>. Each batch gets its own folder so multiple batches don't intermingle. Runs on THIS PC even if other workers processed the products.</div>
+        <div class="hint">CSVs land in <code>Downloads/adbrain_&lt;batchId&gt;/</code>. Each batch gets its own folder so they don't intermingle.</div>
       </div>
-      <button id="mgrDownloadBtn">Download all CSVs from Supabase</button>
-      <div id="mgrDownloadResult" class="hint" style="margin-top:8px;"></div>
+      <div class="queue-card-action">
+        <button id="mgrDownloadBtn">Download all CSVs from Supabase</button>
+      </div>
+      <div id="mgrDownloadResult" class="queue-card-result"></div>
     </div>
   </div>
 
