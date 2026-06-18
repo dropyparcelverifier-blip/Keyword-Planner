@@ -190,6 +190,7 @@
       display: flex;
       align-items: center;
       gap: 10px;
+      flex-wrap: wrap;          /* let it stack on narrow side-panel widths */
       padding: 8px 12px;
       margin: 8px 0;
       background: var(--panel);
@@ -204,7 +205,7 @@
       letter-spacing: 0.4px;
       flex-shrink: 0;
     }
-    .role-banner-btns { display: flex; gap: 4px; }
+    .role-banner-btns { display: flex; gap: 4px; flex-shrink: 0; }
     .role-btn {
       padding: 6px 12px;
       font-size: 12px;
@@ -227,19 +228,32 @@
       color: var(--muted);
       margin-left: auto;
       font-style: italic;
+      min-width: 0;              /* allow shrinking inside flex */
+      flex: 1 1 100%;            /* on wrap, take a full new row */
+      text-align: right;
+    }
+    /* When the banner wraps to multiple rows (very narrow widths), make
+       the hint span the new row at left so it stays readable. */
+    @media (max-width: 380px) {
+      .role-banner-hint { text-align: left; }
     }
 
     /* Whole-popup role-based visibility. Any element with [data-show-when]
        is shown ONLY if its comma-separated list includes the current role.
-       Tabs (top-of-popup) and sections (inside the Queue tab) use this same
-       mechanism — single source of truth, no JS toggling display:none on
-       each section individually.
-       Use display:revert so the element falls back to its natural display
-       value (block for div, inline-flex for .tab) when shown. */
-    [data-show-when] { display: none !important; }
-    body[data-mgr-role="manager"] [data-show-when*="manager"],
-    body[data-mgr-role="worker"]  [data-show-when*="worker"],
-    body[data-mgr-role="both"]    [data-show-when*="both"] { display: revert !important; }
+       Tabs (top-of-popup) and sections (inside the Queue tab) use this
+       same mechanism — single source of truth, no JS toggling display:none
+       on each section individually.
+       Inverted CSS approach: by default elements show in their NATURAL
+       display value (block for div, inline-flex for flex item, etc.).
+       We only set display:none when the role DOESN'T match — keeps the
+       cascade clean and avoids `display: revert` quirks (which would
+       reset to UA default `block` for div tabs, breaking the flex row
+       layout). The :not() selector inverts the role match. */
+    body[data-mgr-role="manager"] [data-show-when]:not([data-show-when*="manager"]),
+    body[data-mgr-role="worker"]  [data-show-when]:not([data-show-when*="worker"]),
+    body[data-mgr-role="both"]    [data-show-when]:not([data-show-when*="both"]) {
+      display: none !important;
+    }
 
     /* Reusable banner classes (replaces inline style="..."). Each banner
        has the same layout but a different colour family. */
