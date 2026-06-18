@@ -800,6 +800,7 @@ async function _handleStartInner(msg) {
   state.running = true;
   state.stopRequested = false;
   state.pausedByCaptcha = false;
+  state._runStartedAt = Date.now();
   if (!state.batchId) state.batchId = String(Date.now());
   state.lastStatus = 'Running';
   // Keep the screen on for the duration of the run. A 30+ product run
@@ -1117,6 +1118,18 @@ async function _handleStartInner(msg) {
         await setRunIntent(false);
       }
       await persistReport();
+      // Honest summary at the end so the user can immediately tell if
+      // the engine actually did the work. Previously the engine could
+      // finish in 2-3 min with 0 keywords and no clear signal — looked
+      // like "success" when it was really "skipped everything".
+      const elapsedMin = Math.max(1, Math.round((Date.now() - (state._runStartedAt || Date.now())) / 60000));
+      const kwPerProduct = state.doneProducts.length > 0
+        ? Math.round(state.report.length / state.doneProducts.length)
+        : 0;
+      const healthLine = kwPerProduct < 20
+        ? `⚠ Average ${kwPerProduct} keywords/product — likely KP URL missing or all keywords filtered. Expected 50-200+ per product.`
+        : `✓ Average ${kwPerProduct} keywords/product over ${elapsedMin} min`;
+      pushLog(`Run summary: ${state.report.length} total keywords across ${state.doneProducts.length} product(s) · ${elapsedMin} min · ${healthLine}`, kwPerProduct < 20 ? 'warn' : 'ok');
       broadcast({ action: 'discoveryDone', totalKeywords: state.report.length, stopped, doneProducts: state.doneProducts.length });
       // CONTINUOUS-CLAIM AUTO-LOOP — when the worker is in continuous
       // mode and the engine finishes without the user stopping it, claim
@@ -1532,6 +1545,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // Mirror the central KP URL into chrome.storage so the KP
           // content script (which reads from storage) picks it up.
           await chrome.storage.local.set({ [STORAGE_KEY_KP_URL]: centralRunOpts.kpUrl }).catch(() => {});
+        }
+        // HARD GUARD: KP URL is mandatory. Without it, the engine
+        // skips KP entirely, processes a product in 2-3 min instead
+        // of the 10-15 min it should take, generates almost no
+        // keyword rows, and silently marks the job done. Bail loudly
+        // here with a clear next step.
+        const localKpUrl = (await chrome.storage.local.get([STORAGE_KEY_KP_URL]))[STORAGE_KEY_KP_URL] || '';
+        const effectiveKpUrl = (centralRunOpts.kpUrl || localKpUrl || '').trim();
+        if (!effectiveKpUrl || !effectiveKpUrl.includes('ads.google.com')) {
+          sendResponse({
+            ok: false,
+            error: 'No Keyword Planner URL configured. Manager: Settings → paste your Google Ads KP URL → Save Settings (also pushes to all workers). Without this, the engine skips KP entirely and processes each product in 2-3 minutes producing almost no keywords.',
+          });
+          return;
         }
         // Claim a chunk and start the engine (re-uses the existing
         // claimAndStart code path).
