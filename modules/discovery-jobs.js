@@ -17,6 +17,10 @@ export const JOBS_TABLE = 'adbrain_discovery_jobs';
 export const JOBS_SUMMARY_VIEW = 'adbrain_discovery_job_summary';
 export const CLAIM_RPC = 'adbrain_claim_jobs';
 export const RELEASE_RPC = 'adbrain_release_stale_jobs';
+export const ACTIVITY_LOG_TABLE = 'adbrain_activity_log';
+export const COMMANDS_TABLE = 'adbrain_worker_commands';
+export const WORKER_STATS_VIEW = 'adbrain_worker_stats';
+export const PER_PRODUCT_VIEW = 'adbrain_per_product_status';
 
 // Build the auth/headers block every PostgREST call needs.
 async function _supabaseHeaders() {
@@ -442,6 +446,128 @@ export async function getFailedJobs(batchId, limit = 50) {
   const resp = await fetch(url, { method: 'GET', headers });
   if (!resp.ok) return [];
   return resp.json().catch(() => []);
+}
+
+// ============================================================================
+// DASHBOARD ENDPOINTS — activity log, commands, worker stats
+// ============================================================================
+
+// WORKER: push a batch of activity-log entries to Supabase. Called from the
+// engine (via background.js) every ~10s with the events since the last push.
+// Buffered + batched so each push is one HTTP call regardless of how many
+// log lines were produced.
+export async function pushActivityLog(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return { inserted: 0 };
+  const { base, headers } = await _supabaseHeaders();
+  const url = `${base}/rest/v1/${ACTIVITY_LOG_TABLE}`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { ...headers, 'Prefer': 'return=minimal' },
+    body: JSON.stringify(entries),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    return { inserted: 0, error: `HTTP ${resp.status}: ${text.slice(0, 120)}` };
+  }
+  return { inserted: entries.length };
+}
+
+// DASHBOARD: fetch recent activity log entries for a batch (or all batches).
+// `sinceTs` is an ISO timestamp — fetch only newer entries (used for
+// incremental polling so the dashboard doesn't re-download everything).
+export async function fetchActivityLog({ batchId, sinceTs, level, workerId, limit = 200 } = {}) {
+  const { base, headers } = await _supabaseHeaders();
+  const params = [`select=*`, `order=ts.desc`, `limit=${Math.max(1, Math.min(1000, limit))}`];
+  if (batchId)  params.push(`batch_id=eq.${encodeURIComponent(batchId)}`);
+  if (workerId) params.push(`worker_id=eq.${encodeURIComponent(workerId)}`);
+  if (sinceTs)  params.push(`ts=gt.${encodeURIComponent(sinceTs)}`);
+  if (level && level !== 'all') params.push(`level=eq.${encodeURIComponent(level)}`);
+  const url = `${base}/rest/v1/${ACTIVITY_LOG_TABLE}?${params.join('&')}`;
+  const resp = await fetch(url, { method: 'GET', headers });
+  if (!resp.ok) return [];
+  return resp.json().catch(() => []);
+}
+
+// DASHBOARD: per-worker stats from the view. One row per (worker_id, batch_id).
+export async function fetchWorkerStats(batchId) {
+  const { base, headers } = await _supabaseHeaders();
+  const params = [`select=*`];
+  if (batchId) params.push(`batch_id=eq.${encodeURIComponent(batchId)}`);
+  const url = `${base}/rest/v1/${WORKER_STATS_VIEW}?${params.join('&')}`;
+  const resp = await fetch(url, { method: 'GET', headers });
+  if (!resp.ok) return [];
+  return resp.json().catch(() => []);
+}
+
+// DASHBOARD: per-product status grid — flat list of all jobs in a batch
+// with their current claim / status. Used for the "which worker is on
+// which SKU right now" view.
+export async function fetchPerProductStatus(batchId, limit = 500) {
+  if (!batchId) return [];
+  const { base, headers } = await _supabaseHeaders();
+  const url = `${base}/rest/v1/${PER_PRODUCT_VIEW}`
+    + `?batch_id=eq.${encodeURIComponent(batchId)}`
+    + `&order=claimed_at.desc.nullslast&limit=${limit}`;
+  const resp = await fetch(url, { method: 'GET', headers });
+  if (!resp.ok) return [];
+  return resp.json().catch(() => []);
+}
+
+// MANAGER: push a command to one worker (or broadcast to all if workerId=null).
+// Workers poll for pending commands every 30s and honor them, then mark
+// acknowledged so the same command isn't re-fired.
+export async function sendWorkerCommand({ workerId, command, payload, managerId }) {
+  if (!command) throw new Error('command required');
+  const { base, headers } = await _supabaseHeaders();
+  const url = `${base}/rest/v1/${COMMANDS_TABLE}`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { ...headers, 'Prefer': 'return=representation' },
+    body: JSON.stringify([{
+      worker_id:  workerId || null,
+      command,
+      payload:    payload || null,
+      created_by: managerId || null,
+    }]),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`Command send failed (HTTP ${resp.status}): ${text.slice(0, 120)}`);
+  }
+  const rows = await resp.json().catch(() => []);
+  return rows[0] || null;
+}
+
+// WORKER: pull commands addressed to this worker (or broadcasted). Returns
+// only unacknowledged ones, newest first.
+export async function fetchPendingCommands(workerId) {
+  if (!workerId) return [];
+  const { base, headers } = await _supabaseHeaders();
+  // Two-pass: commands targeting this worker_id, AND broadcasts
+  // (worker_id is null). PostgREST `or` syntax handles this in one call.
+  const filter = `or=(worker_id.eq.${encodeURIComponent(workerId)},worker_id.is.null)`;
+  const url = `${base}/rest/v1/${COMMANDS_TABLE}`
+    + `?${filter}&acknowledged_at=is.null&order=created_at.asc&limit=20`;
+  const resp = await fetch(url, { method: 'GET', headers });
+  if (!resp.ok) return [];
+  return resp.json().catch(() => []);
+}
+
+// WORKER: mark a command as acknowledged so it doesn't fire again on the
+// next poll.
+export async function acknowledgeCommand(commandId, workerId) {
+  if (!commandId) return { updated: 0 };
+  const { base, headers } = await _supabaseHeaders();
+  const url = `${base}/rest/v1/${COMMANDS_TABLE}?id=eq.${Number(commandId)}`;
+  const resp = await fetch(url, {
+    method: 'PATCH',
+    headers: { ...headers, 'Prefer': 'return=minimal' },
+    body: JSON.stringify({
+      acknowledged_at: new Date().toISOString(),
+      acknowledged_by: workerId || null,
+    }),
+  });
+  return { updated: resp.ok ? 1 : 0 };
 }
 
 // MANAGER UI: re-queue a failed job. Sets status back to 'pending' and

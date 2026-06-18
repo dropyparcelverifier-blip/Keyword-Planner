@@ -1560,6 +1560,23 @@
       <div id="mgrUploadResult" class="queue-card-result"></div>
     </div>
 
+    <!-- Open the full-screen Operations Dashboard in a new browser tab.
+         Side panel is too narrow for the rich worker-fleet + log feed
+         + per-product views; the dashboard runs in its own tab and
+         polls every 5s for near-realtime visibility. -->
+    <div class="queue-card" data-show-when="manager,worker,both">
+      <div class="queue-card-head">
+        <span class="queue-card-icon">🎛️</span>
+        <div class="queue-card-title-wrap">
+          <div class="queue-card-title">Operations Dashboard</div>
+          <div class="queue-card-sub">Full-screen view: batches, worker fleet, live activity log, failed jobs, commands.</div>
+        </div>
+      </div>
+      <div class="queue-card-action">
+        <button id="mgrOpenDashboardBtn">Open Dashboard in new tab</button>
+      </div>
+    </div>
+
     <!-- Live status: visible to everyone. Manager + worker both want to
          see the batch's progress and who's working on what. -->
     <div class="queue-card" data-show-when="manager,worker,both">
@@ -1567,7 +1584,7 @@
         <span class="queue-card-icon">📊</span>
         <div class="queue-card-title-wrap">
           <div class="queue-card-title">Live batch status</div>
-          <div class="queue-card-sub">Auto-refreshes every 30s while this tab is open.</div>
+          <div class="queue-card-sub">Compact summary. For full insights, open the Dashboard above.</div>
         </div>
       </div>
       <div id="mgrSummary" style="font-size:12px;">Click "Refresh now" to load.</div>

@@ -16,6 +16,13 @@ import {
   requeueJob,
   fetchBatchReportFromSupabase,
   getActiveBatchId,
+  pushActivityLog,
+  fetchActivityLog,
+  fetchWorkerStats,
+  fetchPerProductStatus,
+  sendWorkerCommand,
+  fetchPendingCommands,
+  acknowledgeCommand,
 } from './modules/discovery-jobs.js';
 import {
   STORAGE_KEY_SERVICE_KEY,
@@ -216,6 +223,17 @@ function pushLog(text, kind) {
 
 function emitProgress(payload) {
   if (payload?.currentAction) pushLog(payload.currentAction, payload.logKind);
+  // Also buffer the line for the operations dashboard. Only meaningful
+  // when distributed mode is active (state.workerId set) — bufferActivity
+  // bails on its own otherwise.
+  if (payload?.currentAction) {
+    bufferActivity({
+      level:      payload.logKind || 'info',
+      source:     payload.currentSource || 'engine',
+      message:    payload.currentAction,
+      productUrl: payload.currentProduct || null,
+    });
+  }
   // Always include batch totals in the broadcast even when the engine
   // didn't put them in this particular payload (e.g. "KP: waiting for
   // hydrate" only carries currentAction). The popup's batch-progress
@@ -351,6 +369,90 @@ try {
 try {
   chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 1, delayInMinutes: 0.1 });
 } catch {}
+// Dashboard activity-log push alarm — fires every minute. Drains the
+// in-memory log buffer to Supabase so the manager dashboard's activity
+// feed populates within ~60s of an engine event. Worker-side only;
+// no-op when state.workerId is empty.
+const DASHBOARD_PUSH_ALARM = 'adbrain-dashboard-push';
+try {
+  chrome.alarms.create(DASHBOARD_PUSH_ALARM, { periodInMinutes: 1, delayInMinutes: 0.1 });
+} catch {}
+// Worker command-poll alarm — fires every minute, checks for unacked
+// commands targeted at this worker (or broadcast). Honors stop/pause/
+// release_claims and acks them so they don't re-fire.
+const COMMAND_POLL_ALARM = 'adbrain-command-poll';
+try {
+  chrome.alarms.create(COMMAND_POLL_ALARM, { periodInMinutes: 1, delayInMinutes: 0.2 });
+} catch {}
+
+// In-memory activity log buffer. Drained every minute by the
+// DASHBOARD_PUSH_ALARM. Capped to avoid runaway memory on long runs.
+const _activityBuffer = [];
+const ACTIVITY_BUFFER_CAP = 500;
+function bufferActivity(entry) {
+  if (!entry || !entry.message) return;
+  if (!state.workerId) return;  // only push when running in distributed mode
+  _activityBuffer.push({
+    batch_id:    state.queueBatchId || null,
+    worker_id:   state.workerId,
+    level:       entry.level || 'info',
+    source:      entry.source || 'engine',
+    message:     String(entry.message).slice(0, 500),
+    product_url: entry.productUrl || null,
+    sku:         entry.sku || null,
+    ts:          new Date().toISOString(),
+  });
+  if (_activityBuffer.length > ACTIVITY_BUFFER_CAP) {
+    _activityBuffer.splice(0, _activityBuffer.length - ACTIVITY_BUFFER_CAP);
+  }
+}
+
+async function flushActivityBuffer() {
+  if (_activityBuffer.length === 0) return;
+  const slice = _activityBuffer.splice(0, _activityBuffer.length);
+  try {
+    const r = await pushActivityLog(slice);
+    if (r.error) {
+      // On push failure, re-buffer (capped) so we don't lose every
+      // entry permanently to one transient network error.
+      _activityBuffer.unshift(...slice.slice(0, 100));
+    }
+  } catch {
+    _activityBuffer.unshift(...slice.slice(0, 100));
+  }
+}
+
+async function pollWorkerCommands() {
+  if (!state.workerId) return;
+  try {
+    const cmds = await fetchPendingCommands(state.workerId);
+    if (!Array.isArray(cmds) || cmds.length === 0) return;
+    for (const c of cmds) {
+      try {
+        if (c.command === 'stop') {
+          // Treat as a remote Stop click.
+          state.stopRequested = true;
+          state.continuousClaim = false;
+          await chrome.storage.local.set({ adbrainContinuousClaim: false }).catch(() => {});
+          await setRunIntent(false);
+          bufferActivity({ level: 'warn', source: 'cmd', message: `Stop command received from manager — halting after current product.` });
+        } else if (c.command === 'pause') {
+          // For now treat pause same as stop (graceful halt). True pause
+          // requires engine-level pause primitives that don't exist yet.
+          state.stopRequested = true;
+          bufferActivity({ level: 'warn', source: 'cmd', message: `Pause command received — halting (no resumable pause primitive yet).` });
+        } else if (c.command === 'release_claims') {
+          // Release this worker's claims back to pending.
+          await releaseStaleJobs(0).catch(() => {});
+          state.claimedJobs = [];
+          await chrome.storage.local.set({ [STORAGE_KEY_CLAIMED_JOBS]: [] }).catch(() => {});
+          bufferActivity({ level: 'warn', source: 'cmd', message: `Release-claims command received — claims back to queue.` });
+        }
+        await acknowledgeCommand(c.id, state.workerId);
+      } catch {}
+    }
+  } catch {}
+}
 
 async function tickHeartbeat() {
   try {
@@ -366,8 +468,10 @@ async function tickHeartbeat() {
 }
 
 chrome.alarms?.onAlarm.addListener((alarm) => {
-  if (alarm.name === WATCHDOG_ALARM)  return void tryAutoResume('watchdog');
-  if (alarm.name === HEARTBEAT_ALARM) return void tickHeartbeat();
+  if (alarm.name === WATCHDOG_ALARM)        return void tryAutoResume('watchdog');
+  if (alarm.name === HEARTBEAT_ALARM)       return void tickHeartbeat();
+  if (alarm.name === DASHBOARD_PUSH_ALARM)  return void flushActivityBuffer();
+  if (alarm.name === COMMAND_POLL_ALARM)    return void pollWorkerCommands();
 });
 
 // Chrome itself just started — wake immediately and resume if intent flag set.
@@ -1084,6 +1188,65 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
     })();
     return true;
+  }
+
+  // ── Dashboard handlers ──────────────────────────────────────────────
+  // Fetch activity log entries since a timestamp (incremental polling).
+  if (action === 'dashboard:fetchLog') {
+    (async () => {
+      try {
+        const entries = await fetchActivityLog({
+          batchId: msg.batchId,
+          sinceTs: msg.sinceTs,
+          level:   msg.level,
+          workerId: msg.workerId,
+          limit:   msg.limit || 200,
+        });
+        sendResponse({ ok: true, entries });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
+  // Per-worker stats from the adbrain_worker_stats view.
+  if (action === 'dashboard:workerStats') {
+    (async () => {
+      try {
+        const stats = await fetchWorkerStats(msg.batchId);
+        sendResponse({ ok: true, stats });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
+  // Per-product status grid.
+  if (action === 'dashboard:perProduct') {
+    (async () => {
+      try {
+        const rows = await fetchPerProductStatus(msg.batchId, msg.limit || 500);
+        sendResponse({ ok: true, rows });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
+  // Send a command to one or all workers (workerId = null → broadcast).
+  if (action === 'dashboard:sendCommand') {
+    (async () => {
+      try {
+        const result = await sendWorkerCommand({
+          workerId: msg.workerId || null,
+          command:  msg.command,
+          payload:  msg.payload,
+          managerId: state.workerId || 'manager',
+        });
+        sendResponse({ ok: true, command: result });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
+  // Open the dashboard in a new browser tab.
+  if (action === 'dashboard:open') {
+    chrome.tabs.create({ url: chrome.runtime.getURL('dashboard.html') });
+    sendResponse({ ok: true });
+    return false;
   }
 
   // Manager UI — re-queue a single failed job by id.

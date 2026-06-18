@@ -1629,6 +1629,11 @@ $('mgrClaimBtn')?.addEventListener('click', () => {
   );
 });
 
+// Open the full-screen Operations Dashboard in a new browser tab.
+$('mgrOpenDashboardBtn')?.addEventListener('click', () => {
+  chrome.runtime.sendMessage({ action: 'dashboard:open' });
+});
+
 // Centralised CSV download — pull every row for a batch from Supabase
 // and generate per-SKU CSVs locally. Cures the "CSVs scattered across
 // workers' Downloads folders" problem.

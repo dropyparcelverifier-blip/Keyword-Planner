@@ -68,6 +68,10 @@
     {
       "resources": ["lib/xlsx.mjs", "lib/transformers.min.js"],
       "matches": ["<all_urls>"]
+    },
+    {
+      "resources": ["dashboard.html", "dashboard.js"],
+      "matches": ["<all_urls>"]
     }
   ],
   "sandbox": {
