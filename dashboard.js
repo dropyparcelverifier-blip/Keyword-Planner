@@ -372,7 +372,23 @@ async function sendCommand(workerId, command, payload) {
   // workerId === null/undefined = broadcast.
   const resp = await rpc('dashboard:sendCommand', { workerId, command, payload });
   if (!resp?.ok) {
-    alert(`Command failed: ${resp?.error || 'unknown'}`);
+    const err = resp?.error || 'unknown';
+    // Detect the most common cause: schema missing / PostgREST cache stale.
+    if (/PGRST205|adbrain_worker_commands|adbrain_activity_log|adbrain_worker_config|not.*found.*schema cache/i.test(err)) {
+      alert(
+        `❌ Database schema not migrated.\n\n` +
+        `The dashboard tables don't exist in your Supabase project yet (or PostgREST hasn't refreshed its cache).\n\n` +
+        `FIX:\n` +
+        `1. Open your Supabase project → SQL Editor\n` +
+        `2. Open supabase_schema.sql from the extension's source folder\n` +
+        `3. Copy + paste the WHOLE file → Run\n` +
+        `4. Run: NOTIFY pgrst, 'reload schema';\n` +
+        `5. Reload the dashboard.\n\n` +
+        `Raw error: ${err.slice(0, 200)}`
+      );
+    } else {
+      alert(`Command failed: ${err}`);
+    }
     return;
   }
   refreshAll();
@@ -487,8 +503,30 @@ $('stopAllBtn').addEventListener('click', async () => {
 // auto-poll tick) immediately claim and start. Useful right after the
 // manager uploads a new batch — no need to wait 30s for the poll.
 $('wakeAllBtn').addEventListener('click', async () => {
-  await sendCommand(null, 'wake');
-  alert('Wake signal sent to all armed workers. They\'ll claim within ~30s.');
+  const result = await rpc('dashboard:sendCommand', { workerId: null, command: 'wake' });
+  if (!result?.ok) {
+    // Use the same schema-detection logic as sendCommand. Don't call
+    // sendCommand directly here because it already shows an alert; we
+    // want to consolidate the success path too.
+    const err = result?.error || 'unknown';
+    if (/PGRST205|adbrain_worker_commands|not.*found.*schema cache/i.test(err)) {
+      alert(
+        `❌ Database schema not migrated.\n\n` +
+        `The "adbrain_worker_commands" table doesn't exist in your Supabase project yet — that's why Wake all can't reach workers.\n\n` +
+        `FIX:\n` +
+        `1. Open Supabase → SQL Editor\n` +
+        `2. Open supabase_schema.sql from the extension folder\n` +
+        `3. Copy + paste the WHOLE file → Run\n` +
+        `4. Then run: NOTIFY pgrst, 'reload schema';\n` +
+        `5. Click Wake all workers again.`
+      );
+    } else {
+      alert(`Wake failed: ${err}`);
+    }
+    return;
+  }
+  alert('✓ Wake signal sent. Armed workers will claim within ~30s.');
+  refreshAll();
 });
 
 // Resume all — broadcast a resume command. Workers that received an
