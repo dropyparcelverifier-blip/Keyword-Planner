@@ -475,6 +475,23 @@ async function pollWorkerCommands() {
           // requires engine-level pause primitives that don't exist yet.
           state.stopRequested = true;
           bufferActivity({ level: 'warn', source: 'cmd', message: `Pause command received — halting (no resumable pause primitive yet).` });
+        } else if (c.command === 'resume') {
+          // Re-enable continuous-claim and kick off a fresh auto-connect
+          // cycle so this worker starts pulling jobs again. No-op if
+          // we're already running.
+          if (state.running) {
+            bufferActivity({ level: 'info', source: 'cmd', message: `Resume command received but engine is already running — ignoring.` });
+          } else {
+            state.continuousClaim = true;
+            await chrome.storage.local.set({ adbrainContinuousClaim: true }).catch(() => {});
+            await setRunIntent(true);
+            bufferActivity({ level: 'ok', source: 'cmd', message: `Resume command received — claiming next chunk.` });
+            // Fire async; don't await so command-ack still happens.
+            const wId = state.workerId;
+            setTimeout(() => {
+              chrome.runtime.sendMessage({ action: 'jobs:autoConnectWorker', workerId: wId, chunkSize: state.continuousChunkSize || 5 }, () => {});
+            }, 200);
+          }
         } else if (c.command === 'release_claims') {
           // Release this worker's claims back to pending.
           await releaseStaleJobs(0).catch(() => {});

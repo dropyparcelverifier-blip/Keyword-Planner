@@ -246,60 +246,59 @@
        distributed-mode workflow so each step reads as a self-contained
        card instead of a flat list of inputs. */
     .queue-card {
-      margin-bottom: 12px;
-      padding: 14px;
+      margin-bottom: 8px;
+      padding: 10px 12px;
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 8px;
       box-shadow: var(--shadow-md);
     }
     .queue-card-head {
       display: flex;
-      gap: 10px;
-      align-items: flex-start;
-      margin-bottom: 12px;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
     }
     .queue-card-icon {
-      font-size: 20px;
+      font-size: 15px;
       line-height: 1;
-      margin-top: 1px;
       flex-shrink: 0;
     }
     .queue-card-title-wrap { flex: 1; min-width: 0; }
     .queue-card-title {
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 600;
       color: var(--text);
-      line-height: 1.3;
+      line-height: 1.25;
     }
     .queue-card-sub {
-      font-size: 11px;
+      font-size: 10px;
       color: var(--muted);
-      margin-top: 2px;
-      line-height: 1.45;
+      margin-top: 1px;
+      line-height: 1.35;
     }
-    /* Form rows inside a queue card. Tighter than the .section default. */
-    .queue-card .qc-row { margin-bottom: 10px; }
+    /* Form rows inside a queue card. Justified label-and-input pairs. */
+    .queue-card .qc-row { margin-bottom: 6px; }
     .queue-card .qc-row:last-of-type { margin-bottom: 0; }
     .queue-card .qc-row label.label {
       display: block;
-      font-size: 11px;
-      font-weight: 500;
+      font-size: 9px;
+      font-weight: 600;
       color: var(--muted);
-      margin-bottom: 4px;
+      margin-bottom: 3px;
       text-transform: uppercase;
-      letter-spacing: 0.3px;
+      letter-spacing: 0.4px;
     }
     .queue-card .qc-row input[type="text"],
     .queue-card .qc-row input[type="password"],
     .queue-card .qc-row input[type="number"] {
       width: 100%;
       box-sizing: border-box;
-      padding: 8px 10px;
+      padding: 6px 9px;
       font-size: 12px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: 5px;
       color: var(--text);
     }
     .queue-card .qc-row input:focus {
@@ -310,16 +309,16 @@
     .queue-card .qc-row .hint {
       font-size: 10px;
       color: var(--muted);
-      margin-top: 4px;
-      line-height: 1.45;
+      margin-top: 3px;
+      line-height: 1.4;
     }
     .queue-card .qc-row input[type="file"] {
       display: block;
       width: 100%;
-      padding: 14px 10px;
+      padding: 10px 8px;
       background: var(--bg);
-      border: 2px dashed var(--border);
-      border-radius: 6px;
+      border: 1px dashed var(--border);
+      border-radius: 5px;
       color: var(--muted);
       cursor: pointer;
       font-size: 11px;
@@ -328,18 +327,18 @@
       border-color: var(--accent);
       color: var(--text);
     }
-    /* The primary CTA button at the bottom of each card. */
+    /* Primary CTA button — full width, compact. */
     .queue-card-action {
       display: flex;
-      gap: 6px;
-      margin-top: 12px;
+      gap: 5px;
+      margin-top: 8px;
     }
     .queue-card-action button {
       flex: 1;
-      padding: 9px 14px;
+      padding: 7px 12px;
       font-size: 12px;
       font-weight: 500;
-      border-radius: 6px;
+      border-radius: 5px;
       border: none;
       background: var(--accent);
       color: white;
@@ -351,17 +350,16 @@
       border: 1px solid var(--border);
       color: var(--text);
       flex: 0 0 auto;
-      padding: 9px 14px;
+      padding: 7px 12px;
     }
     .queue-card-action button.secondary:hover:not(:disabled) { background: var(--panel-2); }
-    /* Result line shown below actions — green for success, red for error,
-       grey for neutral info. Hidden by default until JS populates it. */
+    /* Result line shown below actions. */
     .queue-card-result {
-      margin-top: 10px;
-      padding: 8px 10px;
+      margin-top: 6px;
+      padding: 6px 9px;
       font-size: 11px;
-      border-radius: 6px;
-      line-height: 1.45;
+      border-radius: 5px;
+      line-height: 1.4;
       display: none;
       word-break: break-word;
     }
@@ -392,76 +390,76 @@
        + a Stop button so the worker has a self-contained view of what
        it's doing without needing to open the dashboard. */
     .worker-live {
-      padding: 10px 12px;
+      padding: 8px 10px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: 6px;
     }
     .worker-live-head {
       display: flex;
       align-items: center;
-      gap: 8px;
-      margin-bottom: 8px;
+      gap: 6px;
+      margin-bottom: 6px;
     }
     .worker-live-dot {
-      width: 9px; height: 9px; border-radius: 50%;
+      width: 8px; height: 8px; border-radius: 50%;
       background: var(--success);
-      box-shadow: 0 0 6px var(--success);
+      box-shadow: 0 0 5px var(--success);
       animation: workerPulse 1.5s ease-in-out infinite;
       flex-shrink: 0;
     }
     .worker-live-dot.idle  { background: var(--muted); box-shadow: none; animation: none; }
-    .worker-live-dot.err   { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+    .worker-live-dot.err   { background: var(--danger); box-shadow: 0 0 5px var(--danger); }
     @keyframes workerPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
     .worker-live-status {
       font-weight: 600;
       color: var(--text);
-      font-size: 12px;
+      font-size: 11px;
       flex: 1;
     }
     .worker-live-batch {
       font-family: 'SF Mono', Consolas, monospace;
-      font-size: 10px;
+      font-size: 9px;
       color: var(--muted);
       background: var(--panel);
-      padding: 2px 6px;
-      border-radius: 4px;
+      padding: 1px 5px;
+      border-radius: 3px;
     }
     .worker-live-stats {
       display: grid;
       grid-template-columns: 1fr 1fr 1fr;
-      gap: 6px;
-      margin-bottom: 8px;
+      gap: 4px;
+      margin-bottom: 6px;
     }
     .wl-stat {
       text-align: center;
-      padding: 6px 4px;
+      padding: 5px 3px;
       background: var(--panel);
-      border-radius: 6px;
+      border-radius: 4px;
     }
-    .wl-stat-v { font-size: 16px; font-weight: 700; color: var(--text); line-height: 1.1; }
-    .wl-stat-l { font-size: 9px; color: var(--muted); text-transform: uppercase;
+    .wl-stat-v { font-size: 14px; font-weight: 700; color: var(--text); line-height: 1.1; }
+    .wl-stat-l { font-size: 8px; color: var(--muted); text-transform: uppercase;
       letter-spacing: 0.4px; margin-top: 2px; }
     .worker-live-action {
-      font-size: 11px;
+      font-size: 10px;
       color: var(--muted);
-      padding: 6px 8px;
+      padding: 5px 7px;
       background: var(--panel);
       border-radius: 4px;
       border-left: 2px solid var(--accent);
       word-break: break-word;
-      line-height: 1.4;
-      min-height: 14px;
-      margin-bottom: 8px;
+      line-height: 1.35;
+      min-height: 12px;
+      margin-bottom: 6px;
     }
     .worker-mini-log {
-      max-height: 110px;
+      max-height: 90px;
       overflow-y: auto;
       font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-      font-size: 10px;
-      line-height: 1.5;
+      font-size: 9px;
+      line-height: 1.45;
       color: var(--muted);
-      padding: 4px 8px;
+      padding: 3px 6px;
       background: var(--bg);
       border-radius: 4px;
       border: 1px solid var(--border);
@@ -469,9 +467,9 @@
     .worker-mini-log:empty { display: none; }
     .worker-mini-log-line {
       display: grid;
-      grid-template-columns: 48px 1fr;
-      gap: 6px;
-      padding: 1px 0;
+      grid-template-columns: 42px 1fr;
+      gap: 5px;
+      padding: 0;
     }
     .worker-mini-log-line .t { color: var(--muted); }
     .worker-mini-log-line .m { color: var(--text); word-break: break-word; }
@@ -507,35 +505,35 @@
        + apply one. Role-gated via data-show-when so each PC sees only the
        half that matters. */
     .setup-code-card {
-      margin-top: 14px;
-      padding: 12px;
+      margin-top: 8px;
+      padding: 8px 10px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: 6px;
     }
-    .setup-code-card + .setup-code-card { margin-top: 10px; }
+    .setup-code-card + .setup-code-card { margin-top: 6px; }
     .setup-code-head {
       display: flex;
-      gap: 10px;
-      align-items: flex-start;
-      margin-bottom: 10px;
+      gap: 7px;
+      align-items: center;
+      margin-bottom: 7px;
     }
     .setup-code-icon {
-      font-size: 18px;
+      font-size: 14px;
       line-height: 1;
-      margin-top: 2px;
+      flex-shrink: 0;
     }
     .setup-code-title {
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 600;
       color: var(--text);
-      line-height: 1.3;
+      line-height: 1.2;
     }
     .setup-code-sub {
-      font-size: 11px;
+      font-size: 10px;
       color: var(--muted);
-      margin-top: 2px;
-      line-height: 1.4;
+      margin-top: 1px;
+      line-height: 1.35;
     }
     .setup-code-actions {
       display: flex;
