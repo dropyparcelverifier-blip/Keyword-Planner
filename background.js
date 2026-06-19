@@ -1685,6 +1685,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
+  // Manager pins a specific batch as the one all workers should focus
+  // on. Pass batchId=null to clear the pin and revert to "newest
+  // pending" auto-pick. Every armed worker will pick up the change
+  // on its next auto-poll tick (within 30s).
+  if (action === 'jobs:setActiveBatch') {
+    (async () => {
+      try {
+        const batchId = (msg.batchId || '').trim() || null;
+        const result = await saveWorkerConfig({ active_batch_id: batchId }, msg.managerId || state.workerId || 'manager');
+        sendResponse({ ok: true, pinned: batchId, config: result });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
 
   // Worker one-button connect: auto-detect the newest pending batch,
   // claim a chunk, start the engine, and enable continuous-claim so the

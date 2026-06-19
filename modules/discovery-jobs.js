@@ -497,14 +497,38 @@ export async function getActiveWorkers(batchId) {
     .sort((a, b) => (b.inFlight + b.doneCount) - (a.inFlight + a.doneCount));
 }
 
-// WORKER UI: pick the newest batch that still has pending work, so workers
-// don't have to type a Batch ID at all. Returns the batch_id string or
-// null if every batch is fully claimed/done/failed. Used by the
-// one-button worker flow ("Connect & start working").
+// WORKER UI: pick which batch to claim from. Two-tier logic:
+//   1. Manager has pinned a specific batch via setActiveBatch ->
+//      check that batch has pending work; if yes return it.
+//   2. Otherwise return the newest batch with pending work
+//      (legacy auto-pick behaviour).
+// Used by the one-button worker flow ("Connect & start working").
 export async function getActiveBatchId() {
   const { base, headers } = await _supabaseHeaders();
-  // Query: get distinct batch_id values that have at least one pending
-  // job, ordered by created_at desc (newest first), limit 1.
+
+  // Tier 1: check if manager pinned a batch.
+  try {
+    const cfgUrl = `${base}/rest/v1/${WORKER_CONFIG_TABLE}?id=eq.1&select=active_batch_id`;
+    const cfgResp = await fetch(cfgUrl, { method: 'GET', headers });
+    if (cfgResp.ok) {
+      const cfgRows = await cfgResp.json().catch(() => []);
+      const pinned = (cfgRows[0]?.active_batch_id || '').trim();
+      if (pinned) {
+        // Verify the pinned batch still has pending work.
+        const checkUrl = `${base}/rest/v1/${JOBS_TABLE}`
+          + `?batch_id=eq.${encodeURIComponent(pinned)}`
+          + `&status=eq.pending&select=id&limit=1`;
+        const checkResp = await fetch(checkUrl, { method: 'GET', headers });
+        if (checkResp.ok) {
+          const has = await checkResp.json().catch(() => []);
+          if (Array.isArray(has) && has.length > 0) return pinned;
+          // Pinned batch has no pending work — fall through to auto-pick.
+        }
+      }
+    }
+  } catch { /* fall through */ }
+
+  // Tier 2: newest batch with pending work.
   const url = `${base}/rest/v1/${JOBS_TABLE}`
     + `?status=eq.pending`
     + `&select=batch_id,created_at`
