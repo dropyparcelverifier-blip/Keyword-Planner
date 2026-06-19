@@ -192,6 +192,113 @@ function renderWorkerGrid(workers, perProduct) {
   });
 }
 
+// ───────────── Render: live "Output uploaded to Supabase" ─────────────
+// Shows TOTAL keyword rows in adbrain_discovered_keywords for the
+// focused batch, plus a per-SKU breakdown so the user can see which
+// SKUs produced rows and which completed with zero (a bug signal).
+function renderOutputStats(stats, errMsg) {
+  const wrap = $('outputStatsPanel');
+  const head = $('outputStatsHeader');
+  if (!wrap || !head) return;
+
+  if (errMsg) {
+    head.textContent = '⚠ error';
+    wrap.innerHTML = `<div class="empty" style="padding: 12px 8px;">
+      <div class="empty-icon" style="font-size: 22px;">⚠</div>
+      <strong>Could not fetch output stats</strong>
+      ${esc(errMsg)}
+    </div>`;
+    return;
+  }
+  if (!stats) {
+    head.textContent = '—';
+    wrap.innerHTML = `<div class="empty" style="padding: 16px 8px;">
+      <div class="empty-icon" style="font-size: 24px;">📊</div>
+      <strong>Pick a batch above</strong>
+      Selecting a batch shows per-SKU keyword counts as they land.
+    </div>`;
+    return;
+  }
+
+  const { totalKeywords, totalSkus, skusWithKeywords, avgKwPerSku, topSkus, skusWithZeroKw } = stats;
+  head.textContent = `${totalKeywords.toLocaleString()} rows · ${skusWithKeywords}/${totalSkus} SKUs producing`;
+
+  // Top-line counter row.
+  const counters = `
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px;">
+      <div style="background: var(--success-soft); border: 1px solid var(--success); border-radius: 8px; padding: 8px 10px;">
+        <div style="font-size: 11px; color: var(--success); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Total rows</div>
+        <div style="font-size: 20px; font-weight: 700; color: var(--success);">${totalKeywords.toLocaleString()}</div>
+      </div>
+      <div style="background: var(--info-soft, #eef2ff); border: 1px solid var(--info, #6366f1); border-radius: 8px; padding: 8px 10px;">
+        <div style="font-size: 11px; color: var(--info, #4f46e5); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">SKUs total</div>
+        <div style="font-size: 20px; font-weight: 700; color: var(--info, #4f46e5);">${totalSkus}</div>
+      </div>
+      <div style="background: var(--success-soft); border: 1px solid var(--success); border-radius: 8px; padding: 8px 10px;">
+        <div style="font-size: 11px; color: var(--success); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Producing</div>
+        <div style="font-size: 20px; font-weight: 700; color: var(--success);">${skusWithKeywords}</div>
+      </div>
+      <div style="background: var(--bg-elev, #fafafa); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;">
+        <div style="font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Avg / SKU</div>
+        <div style="font-size: 20px; font-weight: 700;">${avgKwPerSku}</div>
+      </div>
+    </div>
+  `;
+
+  // Per-SKU table. Sorted desc by kw count so productive SKUs surface
+  // first. Status badge shows lifecycle. Zero-kw + done = bug signal.
+  const rows = (topSkus || []).map(s => {
+    const statusClr = s.status === 'done'
+      ? 'var(--success)'
+      : s.status === 'failed'
+      ? 'var(--danger)'
+      : s.status === 'claimed'
+      ? 'var(--warn)'
+      : 'var(--muted)';
+    const kwBadge = s.kwCount > 0
+      ? `<span style="background: var(--success-soft); color: var(--success); padding: 2px 6px; border-radius: 4px; font-weight: 700;">${s.kwCount}</span>`
+      : `<span style="background: var(--danger-soft); color: var(--danger); padding: 2px 6px; border-radius: 4px; font-weight: 700;">0</span>`;
+    const doneAt = s.doneAt ? fmtTime(s.doneAt) : '—';
+    const worker = s.claimedBy ? esc(s.claimedBy) : '—';
+    const name = esc(s.productName || s.sku || '—');
+    return `
+      <tr>
+        <td style="padding: 4px 6px; font-family: var(--mono); font-size: 11px;">${esc(s.sku)}</td>
+        <td style="padding: 4px 6px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${name}">${name}</td>
+        <td style="padding: 4px 6px;"><span style="color: ${statusClr}; font-weight: 600; font-size: 11px; text-transform: uppercase;">${esc(s.status)}</span></td>
+        <td style="padding: 4px 6px; font-family: var(--mono); font-size: 11px;">${worker}</td>
+        <td style="padding: 4px 6px; text-align: right;">${kwBadge}</td>
+        <td style="padding: 4px 6px; font-size: 11px; color: var(--muted);">${doneAt}</td>
+      </tr>
+    `;
+  }).join('');
+
+  const zeroBanner = (skusWithZeroKw && skusWithZeroKw.length > 0) ? `
+    <div style="margin: 8px 0; padding: 8px 10px; background: var(--danger-soft); border: 1px solid var(--danger); border-radius: 6px; font-size: 12px;">
+      <strong style="color: var(--danger);">⚠ ${skusWithZeroKw.length} SKU(s) finished with zero keyword rows</strong> —
+      likely KP failed silently or engine returned empty. Check the activity log for "KP FAILED" or "LOW YIELD" warnings.
+    </div>
+  ` : '';
+
+  wrap.innerHTML = `
+    ${counters}
+    ${zeroBanner}
+    <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+      <thead style="background: var(--bg-elev, #fafafa); border-bottom: 1px solid var(--border);">
+        <tr>
+          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--muted);">SKU</th>
+          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--muted);">Product</th>
+          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--muted);">Status</th>
+          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--muted);">Worker</th>
+          <th style="text-align: right; padding: 6px; font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--muted);">Rows</th>
+          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--muted);">Done</th>
+        </tr>
+      </thead>
+      <tbody>${rows || '<tr><td colspan="6" style="padding: 12px; text-align: center; color: var(--muted);">No SKUs in this batch yet</td></tr>'}</tbody>
+    </table>
+  `;
+}
+
 // ───────────── Render: failed jobs ─────────────
 function renderFailed(failed) {
   const wrap = $('failedList');
@@ -490,6 +597,16 @@ async function refreshAll() {
   renderWorkerGrid(workers, perProduct);
   renderFailed(summaryResp.failed);
 
+  // Live "Output uploaded to Supabase" card. Only runs when a batch is
+  // focused — otherwise the panel shows a placeholder. Counts every row
+  // in adbrain_discovered_keywords for the batch and groups by SKU so
+  // we can see who produced what (and which SKUs ended with zero).
+  if (state.batchId) {
+    const ks = await rpc('dashboard:batchKeywordStats', { batchId: state.batchId, limit: 100 });
+    renderOutputStats(ks?.ok ? ks.stats : null, ks?.error);
+  } else {
+    renderOutputStats(null, null);
+  }
   // Activity log: incremental fetch since lastLogTs (or full if first load).
   const logResp = await rpc('dashboard:fetchLog', {
     batchId: state.batchId,

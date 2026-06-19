@@ -798,6 +798,100 @@ export function workerConfigToRunOpts(cfg) {
   return out;
 }
 
+// MANAGER UI: live keyword-output stats. Pulls every row for a batch
+// from the results table + joins against jobs to give a per-SKU
+// breakdown of how much output actually landed. Used by the
+// "Output stats" panel on the dashboard.
+//
+// Returns: {
+//   batchId, totalKeywords, totalSkus, skusWithKeywords,
+//   avgKwPerSku, topSkus: [{sku, productName, status, kwCount, imageMatches}, ...],
+//   skusWithZeroKw: [{sku, productName, status, claimedBy, failedReason}, ...]
+// }
+export async function fetchBatchKeywordStats(batchId, limit = 50) {
+  if (!batchId) return null;
+  const { base, headers } = await _supabaseHeaders();
+
+  // Fetch all jobs for this batch (status + claim info per SKU).
+  const jobsUrl = `${base}/rest/v1/${JOBS_TABLE}`
+    + `?batch_id=eq.${encodeURIComponent(batchId)}`
+    + `&select=sku,product_name,product_url,status,claimed_by,failed_reason,done_at`
+    + `&order=id.asc`;
+  const jobsResp = await fetch(jobsUrl, {
+    method: 'GET',
+    headers: { ...headers, 'Range-Unit': 'items', 'Range': '0-999' },
+  });
+  if (!jobsResp.ok) {
+    const t = await jobsResp.text().catch(() => '');
+    throw new Error(`jobs fetch HTTP ${jobsResp.status}: ${t.slice(0, 150)}`);
+  }
+  const jobs = await jobsResp.json().catch(() => []);
+
+  // Fetch keyword count per product_url. Paginated to handle large batches.
+  const PAGE = 1000;
+  let from = 0;
+  const kwByUrl = new Map();   // product_url -> { count, withImages }
+  let totalKeywords = 0;
+  for (;;) {
+    const url = `${base}/rest/v1/${SUPABASE_TABLE}`
+      + `?batch_id=eq.${encodeURIComponent(batchId)}`
+      + `&select=product_url,image_count`;
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: { ...headers, 'Range-Unit': 'items', 'Range': `${from}-${from + PAGE - 1}` },
+    });
+    if (!resp.ok) break;
+    const page = await resp.json().catch(() => []);
+    if (!Array.isArray(page) || page.length === 0) break;
+    for (const r of page) {
+      const u = r.product_url;
+      if (!u) continue;
+      const cur = kwByUrl.get(u) || { count: 0, withImages: 0 };
+      cur.count++;
+      if ((r.image_count || 0) > 0) cur.withImages++;
+      kwByUrl.set(u, cur);
+      totalKeywords++;
+    }
+    if (page.length < PAGE) break;
+    from += PAGE;
+    if (from > 50000) break;  // safety stop
+  }
+
+  // Build per-SKU breakdown. Includes ALL jobs (so we can see the
+  // zero-keyword cases too — those are the bugs).
+  const perSku = jobs.map(j => {
+    const stats = kwByUrl.get(j.product_url) || { count: 0, withImages: 0 };
+    return {
+      sku: j.sku || '—',
+      productName: j.product_name || '—',
+      productUrl: j.product_url,
+      status: j.status,
+      claimedBy: j.claimed_by || null,
+      failedReason: j.failed_reason || null,
+      doneAt: j.done_at || null,
+      kwCount: stats.count,
+      imageMatches: stats.withImages,
+    };
+  });
+  // Sort: descending by kwCount (most productive first); failed/empty
+  // SKUs end up at the bottom — easy to spot.
+  perSku.sort((a, b) => b.kwCount - a.kwCount);
+
+  const skusWithKw = perSku.filter(s => s.kwCount > 0).length;
+  const skusZero = perSku.filter(s => s.kwCount === 0 && s.status !== 'pending' && s.status !== 'claimed');
+
+  return {
+    batchId,
+    totalKeywords,
+    totalSkus: jobs.length,
+    skusWithKeywords: skusWithKw,
+    avgKwPerSku: skusWithKw > 0 ? Math.round(totalKeywords / skusWithKw) : 0,
+    topSkus: perSku.slice(0, limit),
+    skusWithZeroKw: skusZero.slice(0, limit),
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
 // MANAGER UI: re-queue a failed job. Sets status back to 'pending' and
 // clears the claim/failure fields so any worker can pick it up again.
 // Useful when a worker hits a transient error (network, CAPTCHA, KP

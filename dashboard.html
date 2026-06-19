@@ -866,6 +866,26 @@
         </div>
       </div>
 
+      <!-- Output stats: live count of keyword rows landing in Supabase
+           per SKU, per batch. Shows BOTH the productive SKUs AND
+           the ones that completed with zero rows (low-yield bugs). -->
+      <div class="card">
+        <div class="card-head">
+          <span class="card-icon">📦</span>
+          <span class="card-title">Output uploaded to Supabase</span>
+          <span class="card-sub" id="outputStatsHeader">—</span>
+        </div>
+        <div class="card-body tight" style="max-height: 320px;">
+          <div id="outputStatsPanel">
+            <div class="empty" style="padding: 16px 8px;">
+              <div class="empty-icon" style="font-size: 24px;">📊</div>
+              <strong>Pick a batch above</strong>
+              Selecting a batch shows per-SKU keyword counts as they land.
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Worker grid -->
       <div class="card" style="flex: 1; min-height: 0;">
         <div class="card-head">
