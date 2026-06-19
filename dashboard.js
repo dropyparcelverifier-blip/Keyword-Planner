@@ -363,8 +363,58 @@ function renderConfigPanel(cfg) {
     </div>`;
     return;
   }
+  // Show the pinned batch state + a button to change it. This is the
+  // primary way to redirect workers from one batch to another mid-run.
+  const pinnedBatch = (cfg.active_batch_id || '').trim();
+  const allBatches = Array.from(new Set((state._summaryCache || []).map(b => b.batch_id))).filter(Boolean);
+  let pinControlsHtml = '';
+  if (pinnedBatch) {
+    pinControlsHtml = `
+      <div class="config-pill" style="grid-column: 1 / -1; border-color: var(--accent);">
+        <div class="config-pill-key" style="color: var(--accent);">📌 PINNED BATCH (workers focus only on this)</div>
+        <div class="config-pill-val" style="display:flex; align-items:center; gap:8px; justify-content:space-between;">
+          <code>${esc(pinnedBatch)}</code>
+          <button style="padding: 4px 10px; font-size: 10px;" id="unpinBatchBtn">Unpin (back to auto)</button>
+        </div>
+      </div>
+    `;
+  } else {
+    pinControlsHtml = `
+      <div class="config-pill" style="grid-column: 1 / -1;">
+        <div class="config-pill-key">📌 ACTIVE BATCH</div>
+        <div class="config-pill-val" style="display:flex; align-items:center; gap:8px; justify-content:space-between;">
+          <span>Auto-pick newest pending</span>
+          <select id="pinBatchSelect" style="min-width: 200px; padding: 4px 22px 4px 10px; font-size: 10px;">
+            <option value="">Pin a batch…</option>
+            ${allBatches.map(b => `<option value="${esc(b)}">${esc(b)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+    `;
+  }
+
+  pills.push(pinControlsHtml);
   pills.push(`<div class="config-meta">Pushed ${ago} by <strong style="color:var(--text-1);">${esc(cfg.updated_by || 'unknown')}</strong></div>`);
   wrap.innerHTML = pills.join('');
+
+  // Wire the pin/unpin controls.
+  $('unpinBatchBtn')?.addEventListener('click', async () => {
+    if (!confirm('Unpin this batch? Workers will revert to auto-picking the newest batch with pending work.')) return;
+    const r = await rpc('jobs:setActiveBatch', { batchId: null });
+    if (r?.ok) { alert('✓ Unpinned. Workers will switch within 30s.'); refreshAll(); }
+    else alert(`Unpin failed: ${r?.error || 'unknown'}`);
+  });
+  $('pinBatchSelect')?.addEventListener('change', async (ev) => {
+    const v = ev.target.value;
+    if (!v) return;
+    if (!confirm(`Pin all workers to batch "${v}"? Every armed worker will switch to this batch within 30s, regardless of which batch they're currently on.`)) {
+      ev.target.value = '';
+      return;
+    }
+    const r = await rpc('jobs:setActiveBatch', { batchId: v });
+    if (r?.ok) { alert(`✓ Workers will switch to batch "${v}" within 30s.`); refreshAll(); }
+    else alert(`Pin failed: ${r?.error || 'unknown'}`);
+  });
 }
 
 // ───────────── Commands ─────────────
@@ -415,6 +465,9 @@ async function refreshAll() {
   }
   // Clear any previous error banner on a successful refresh.
   document.querySelectorAll('.err-banner').forEach(el => el.remove());
+  // Cache the summary so render functions (e.g. config-panel pin
+  // dropdown) can list all batches without a second round-trip.
+  state._summaryCache = summaryResp.summary || [];
   renderBatchSelect(summaryResp.summary);
   renderBatchOverview(summaryResp.summary);
 

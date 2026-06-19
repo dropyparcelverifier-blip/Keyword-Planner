@@ -337,6 +337,12 @@ create table if not exists public.adbrain_worker_config (
 insert into public.adbrain_worker_config (id) values (1)
   on conflict (id) do nothing;
 
+-- Manager-pinned batch override. When set, every armed worker pulls
+-- ONLY from this batch instead of "newest pending". Lets the manager
+-- redirect the whole fleet from batch X to batch Y without re-uploading
+-- or touching each worker. Null = auto-pick newest (default behaviour).
+alter table public.adbrain_worker_config add column if not exists active_batch_id text;
+
 -- Refresh the schema cache so all the new endpoints (dashboard tables +
 -- worker config) work IMMEDIATELY.
 NOTIFY pgrst, 'reload schema';
