@@ -489,18 +489,29 @@ async function workerAutoPollTick() {
       workerId: state.workerId,
       chunkSize: state.continuousChunkSize || 5,
     }, (resp) => {
-      if (!resp?.ok) {
-        const err = String(resp?.error || 'unknown');
+      // Build the most-informative error string possible. Previously this
+      // collapsed to "unknown" whenever the response didn't have an
+      // explicit `.error` field — useless for debugging. Now we surface:
+      // - chrome.runtime.lastError if the SW died mid-flight
+      // - resp.message if present (e.g. "engine already running — already armed")
+      // - resp.error if present
+      // - the raw shape of resp if all else fails
+      let err = null;
+      if (chrome.runtime.lastError) {
+        err = `SW message error: ${chrome.runtime.lastError.message || JSON.stringify(chrome.runtime.lastError)}`;
+      } else if (!resp) {
+        err = 'No response from background (handler may have thrown without sendResponse)';
+      } else if (!resp.ok) {
+        err = resp.error || resp.message || `response without ok/error fields: ${JSON.stringify(resp).slice(0, 200)}`;
+      }
+      if (err) {
         if (err === _lastAutoPollErr) {
-          // Same failure as last tick. Increment + skip log to avoid spam.
           _lastAutoPollErrCount++;
-          // Surface a single dashboard activity entry every 10 ticks
-          // (~5 min) so the manager DOES see this is a persistent issue.
           if (_lastAutoPollErrCount === 10) {
             bufferActivity({
               level: 'err',
               source: 'autopoll',
-              message: `Worker "${state.workerId}" stuck for ~5 min on the same error: ${err.slice(0, 200)}`,
+              message: `Worker "${state.workerId}" stuck for ~5 min: ${err.slice(0, 300)}`,
             });
           }
           return;
@@ -508,18 +519,16 @@ async function workerAutoPollTick() {
         _lastAutoPollErr = err;
         _lastAutoPollErrCount = 1;
         pushLog(`Worker auto-poll: claim refused — ${err}`, 'err');
-        // First time seeing this error — surface to dashboard
-        // immediately so the manager knows the worker is stuck.
         bufferActivity({
           level: 'err',
           source: 'autopoll',
-          message: `Worker "${state.workerId}" cannot start: ${err.slice(0, 200)}`,
+          message: `Worker "${state.workerId}" cannot start: ${err.slice(0, 300)}`,
         });
-      } else {
-        // Success — reset the dedup tracker.
-        _lastAutoPollErr = '';
-        _lastAutoPollErrCount = 0;
+        return;
       }
+      // Success or benign "already running" — reset the dedup tracker.
+      _lastAutoPollErr = '';
+      _lastAutoPollErrCount = 0;
     });
   } catch (e) {
     pushLog(`Worker auto-poll error: ${e.message}`, 'err');
@@ -1789,7 +1798,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const startResult = await handleStart({ products, ...mergedRunOpts });
         sendResponse({ ok: true, claimed: jobs.length, batchId, startResult, centralConfig: !!centralConfig });
       } catch (e) {
-        sendResponse({ ok: false, error: e.message });
+        // Always send a useful error string. If e is a plain Error,
+        // .message works; if it's an object or null, fall back to
+        // toString / JSON / stack so we never collapse to "unknown".
+        const errStr = (e && e.message) || (e && e.toString && e.toString()) || JSON.stringify(e) || 'unspecified exception in autoConnectWorker';
+        sendResponse({ ok: false, error: errStr, stack: e?.stack?.split('\n')?.[1]?.trim() });
       }
     })();
     return true;
