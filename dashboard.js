@@ -201,6 +201,11 @@ function renderOutputStats(stats, errMsg) {
   const head = $('outputStatsHeader');
   if (!wrap || !head) return;
 
+  // Helper for the dashboard's dark theme. The card uses these
+  // tokens (defined in dashboard.html): --bg-3, --line-2, --text-1,
+  // --text-2, --success/--warn/--danger/--info + their *-soft variants.
+  const MONO = "'JetBrains Mono','Fira Code',Consolas,monospace";
+
   if (errMsg) {
     head.textContent = '⚠ error';
     wrap.innerHTML = `<div class="empty" style="padding: 12px 8px;">
@@ -220,28 +225,54 @@ function renderOutputStats(stats, errMsg) {
     return;
   }
 
-  const { totalKeywords, totalSkus, skusWithKeywords, avgKwPerSku, topSkus, skusWithZeroKw } = stats;
-  head.textContent = `${totalKeywords.toLocaleString()} rows · ${skusWithKeywords}/${totalSkus} SKUs producing`;
+  const {
+    totalKeywords, totalSkus, skusWithKeywords, avgKwPerSku,
+    topSkus, skusWithZeroKw,
+    skusDone, skusFailed, skusPending, skusClaimed,
+    mostRecentDoneAt, schemaDowngraded,
+  } = stats;
 
-  // Top-line counter row.
+  // Edge case: batch exists in the manager dropdown but no jobs yet
+  // (just created, before SKUs are uploaded).
+  if (totalSkus === 0) {
+    head.textContent = '0 rows · empty batch';
+    wrap.innerHTML = `<div class="empty" style="padding: 16px 8px;">
+      <div class="empty-icon" style="font-size: 24px;">📭</div>
+      <strong>Batch has no SKUs yet</strong>
+      Upload an Excel file on the manager PC and click "Push to AdBrain".
+    </div>`;
+    return;
+  }
+
+  const lastDoneStr = mostRecentDoneAt ? fmtTime(mostRecentDoneAt) : 'no SKU done yet';
+  head.textContent = `${totalKeywords.toLocaleString()} rows · ${skusWithKeywords}/${totalSkus} producing · last ${lastDoneStr}`;
+
+  // Top-line counter row. Uses the dashboard's actual dark theme
+  // tokens so the card matches every other card on the page.
   const counters = `
     <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px;">
       <div style="background: var(--success-soft); border: 1px solid var(--success); border-radius: 8px; padding: 8px 10px;">
-        <div style="font-size: 11px; color: var(--success); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Total rows</div>
+        <div style="font-size: 10px; color: var(--success); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Total rows</div>
         <div style="font-size: 20px; font-weight: 700; color: var(--success);">${totalKeywords.toLocaleString()}</div>
       </div>
-      <div style="background: var(--info-soft, #eef2ff); border: 1px solid var(--info, #6366f1); border-radius: 8px; padding: 8px 10px;">
-        <div style="font-size: 11px; color: var(--info, #4f46e5); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">SKUs total</div>
-        <div style="font-size: 20px; font-weight: 700; color: var(--info, #4f46e5);">${totalSkus}</div>
+      <div style="background: var(--info-soft); border: 1px solid var(--info); border-radius: 8px; padding: 8px 10px;">
+        <div style="font-size: 10px; color: var(--info); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">SKUs total</div>
+        <div style="font-size: 20px; font-weight: 700; color: var(--info);">${totalSkus}</div>
       </div>
-      <div style="background: var(--success-soft); border: 1px solid var(--success); border-radius: 8px; padding: 8px 10px;">
-        <div style="font-size: 11px; color: var(--success); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Producing</div>
-        <div style="font-size: 20px; font-weight: 700; color: var(--success);">${skusWithKeywords}</div>
+      <div style="background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 10px;">
+        <div style="font-size: 10px; color: var(--text-2); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Producing</div>
+        <div style="font-size: 20px; font-weight: 700; color: var(--text-1);">${skusWithKeywords}</div>
       </div>
-      <div style="background: var(--bg-elev, #fafafa); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;">
-        <div style="font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Avg / SKU</div>
-        <div style="font-size: 20px; font-weight: 700;">${avgKwPerSku}</div>
+      <div style="background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 10px;">
+        <div style="font-size: 10px; color: var(--text-2); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Avg / SKU</div>
+        <div style="font-size: 20px; font-weight: 700; color: var(--text-1);">${avgKwPerSku}</div>
       </div>
+    </div>
+    <div style="display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; font-size: 11px;">
+      <span style="background: var(--success-soft); color: var(--success); padding: 3px 8px; border-radius: 999px; font-weight: 600;">✓ ${skusDone} done</span>
+      <span style="background: var(--warn-soft); color: var(--warn); padding: 3px 8px; border-radius: 999px; font-weight: 600;">⚙ ${skusClaimed} in-flight</span>
+      <span style="background: var(--bg-3); color: var(--text-2); padding: 3px 8px; border-radius: 999px; font-weight: 600; border: 1px solid var(--line-2);">⋯ ${skusPending} pending</span>
+      ${skusFailed > 0 ? `<span style="background: var(--danger-soft); color: var(--danger); padding: 3px 8px; border-radius: 999px; font-weight: 600;">✗ ${skusFailed} failed</span>` : ''}
     </div>
   `;
 
@@ -254,47 +285,58 @@ function renderOutputStats(stats, errMsg) {
       ? 'var(--danger)'
       : s.status === 'claimed'
       ? 'var(--warn)'
-      : 'var(--muted)';
+      : 'var(--text-2)';
     const kwBadge = s.kwCount > 0
       ? `<span style="background: var(--success-soft); color: var(--success); padding: 2px 6px; border-radius: 4px; font-weight: 700;">${s.kwCount}</span>`
+      : s.status === 'pending' || s.status === 'claimed'
+      ? `<span style="color: var(--text-3);">—</span>`
       : `<span style="background: var(--danger-soft); color: var(--danger); padding: 2px 6px; border-radius: 4px; font-weight: 700;">0</span>`;
     const doneAt = s.doneAt ? fmtTime(s.doneAt) : '—';
     const worker = s.claimedBy ? esc(s.claimedBy) : '—';
     const name = esc(s.productName || s.sku || '—');
+    const reasonTip = s.failedReason ? ` title="${esc(s.failedReason)}"` : '';
     return `
-      <tr>
-        <td style="padding: 4px 6px; font-family: var(--mono); font-size: 11px;">${esc(s.sku)}</td>
-        <td style="padding: 4px 6px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${name}">${name}</td>
-        <td style="padding: 4px 6px;"><span style="color: ${statusClr}; font-weight: 600; font-size: 11px; text-transform: uppercase;">${esc(s.status)}</span></td>
-        <td style="padding: 4px 6px; font-family: var(--mono); font-size: 11px;">${worker}</td>
+      <tr style="border-bottom: 1px solid var(--line-1);"${reasonTip}>
+        <td style="padding: 4px 6px; font-family: ${MONO}; font-size: 11px; color: var(--text-1);">${esc(s.sku)}</td>
+        <td style="padding: 4px 6px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1);" title="${name}">${name}</td>
+        <td style="padding: 4px 6px;"><span style="color: ${statusClr}; font-weight: 600; font-size: 10px; text-transform: uppercase;">${esc(s.status)}</span></td>
+        <td style="padding: 4px 6px; font-family: ${MONO}; font-size: 11px; color: var(--text-2);">${worker}</td>
         <td style="padding: 4px 6px; text-align: right;">${kwBadge}</td>
-        <td style="padding: 4px 6px; font-size: 11px; color: var(--muted);">${doneAt}</td>
+        <td style="padding: 4px 6px; font-size: 11px; color: var(--text-3);">${doneAt}</td>
       </tr>
     `;
   }).join('');
 
+  // Bug-signal banners — surface things the user MUST know about.
   const zeroBanner = (skusWithZeroKw && skusWithZeroKw.length > 0) ? `
-    <div style="margin: 8px 0; padding: 8px 10px; background: var(--danger-soft); border: 1px solid var(--danger); border-radius: 6px; font-size: 12px;">
+    <div style="margin: 8px 0; padding: 8px 10px; background: var(--danger-soft); border: 1px solid var(--danger); border-radius: 6px; font-size: 12px; color: var(--text-1);">
       <strong style="color: var(--danger);">⚠ ${skusWithZeroKw.length} SKU(s) finished with zero keyword rows</strong> —
       likely KP failed silently or engine returned empty. Check the activity log for "KP FAILED" or "LOW YIELD" warnings.
+    </div>
+  ` : '';
+  const schemaBanner = schemaDowngraded ? `
+    <div style="margin: 8px 0; padding: 6px 10px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 6px; font-size: 11px; color: var(--text-1);">
+      <strong style="color: var(--warn);">ℹ Old schema detected</strong> —
+      <code>image_count</code> column missing. Run the latest <code>supabase_schema.sql</code> migration for richer stats.
     </div>
   ` : '';
 
   wrap.innerHTML = `
     ${counters}
     ${zeroBanner}
+    ${schemaBanner}
     <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
-      <thead style="background: var(--bg-elev, #fafafa); border-bottom: 1px solid var(--border);">
+      <thead style="background: var(--bg-3); border-bottom: 1px solid var(--line-2);">
         <tr>
-          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--muted);">SKU</th>
-          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--muted);">Product</th>
-          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--muted);">Status</th>
-          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--muted);">Worker</th>
-          <th style="text-align: right; padding: 6px; font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--muted);">Rows</th>
-          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--muted);">Done</th>
+          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 10px; text-transform: uppercase; color: var(--text-2);">SKU</th>
+          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 10px; text-transform: uppercase; color: var(--text-2);">Product</th>
+          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 10px; text-transform: uppercase; color: var(--text-2);">Status</th>
+          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 10px; text-transform: uppercase; color: var(--text-2);">Worker</th>
+          <th style="text-align: right; padding: 6px; font-weight: 600; font-size: 10px; text-transform: uppercase; color: var(--text-2);">Rows</th>
+          <th style="text-align: left; padding: 6px; font-weight: 600; font-size: 10px; text-transform: uppercase; color: var(--text-2);">Done</th>
         </tr>
       </thead>
-      <tbody>${rows || '<tr><td colspan="6" style="padding: 12px; text-align: center; color: var(--muted);">No SKUs in this batch yet</td></tr>'}</tbody>
+      <tbody>${rows || `<tr><td colspan="6" style="padding: 12px; text-align: center; color: var(--text-3);">No SKUs in this batch yet</td></tr>`}</tbody>
     </table>
   `;
 }

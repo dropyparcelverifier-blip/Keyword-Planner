@@ -812,35 +812,58 @@ export async function fetchBatchKeywordStats(batchId, limit = 50) {
   if (!batchId) return null;
   const { base, headers } = await _supabaseHeaders();
 
-  // Fetch all jobs for this batch (status + claim info per SKU).
-  const jobsUrl = `${base}/rest/v1/${JOBS_TABLE}`
-    + `?batch_id=eq.${encodeURIComponent(batchId)}`
-    + `&select=sku,product_name,product_url,status,claimed_by,failed_reason,done_at`
-    + `&order=id.asc`;
-  const jobsResp = await fetch(jobsUrl, {
-    method: 'GET',
-    headers: { ...headers, 'Range-Unit': 'items', 'Range': '0-999' },
-  });
-  if (!jobsResp.ok) {
-    const t = await jobsResp.text().catch(() => '');
-    throw new Error(`jobs fetch HTTP ${jobsResp.status}: ${t.slice(0, 150)}`);
-  }
-  const jobs = await jobsResp.json().catch(() => []);
-
-  // Fetch keyword count per product_url. Paginated to handle large batches.
+  // Fetch all jobs for this batch — paginated so batches with > 1000
+  // SKUs don't silently truncate. PostgREST default page cap is 1000.
   const PAGE = 1000;
+  let jobs = [];
   let from = 0;
-  const kwByUrl = new Map();   // product_url -> { count, withImages }
-  let totalKeywords = 0;
   for (;;) {
-    const url = `${base}/rest/v1/${SUPABASE_TABLE}`
+    const jobsUrl = `${base}/rest/v1/${JOBS_TABLE}`
       + `?batch_id=eq.${encodeURIComponent(batchId)}`
-      + `&select=product_url,image_count`;
-    const resp = await fetch(url, {
+      + `&select=sku,product_name,product_url,status,claimed_by,failed_reason,done_at`
+      + `&order=id.asc`;
+    const jobsResp = await fetch(jobsUrl, {
       method: 'GET',
       headers: { ...headers, 'Range-Unit': 'items', 'Range': `${from}-${from + PAGE - 1}` },
     });
-    if (!resp.ok) break;
+    if (!jobsResp.ok) {
+      const t = await jobsResp.text().catch(() => '');
+      throw new Error(`jobs fetch HTTP ${jobsResp.status}: ${t.slice(0, 150)}`);
+    }
+    const page = await jobsResp.json().catch(() => []);
+    if (!Array.isArray(page) || page.length === 0) break;
+    jobs = jobs.concat(page);
+    if (page.length < PAGE) break;
+    from += PAGE;
+    if (from > 50000) break;  // safety stop
+  }
+
+  // Fetch keyword count per product_url. Paginated to handle large
+  // batches. Defensive on schema: tries image_count first; if the
+  // column doesn't exist (old schema), falls back to product_url only.
+  let kwFrom = 0;
+  let kwSelect = 'product_url,image_count';
+  let kwSelectDowngraded = false;
+  const kwByUrl = new Map();   // product_url -> { count, withImages }
+  let totalKeywords = 0;
+  let mostRecentDoneAt = null;
+  for (;;) {
+    const url = `${base}/rest/v1/${SUPABASE_TABLE}`
+      + `?batch_id=eq.${encodeURIComponent(batchId)}`
+      + `&select=${kwSelect}`;
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: { ...headers, 'Range-Unit': 'items', 'Range': `${kwFrom}-${kwFrom + PAGE - 1}` },
+    });
+    if (!resp.ok) {
+      // Old schema may lack image_count — downgrade once and retry.
+      if (!kwSelectDowngraded && resp.status === 400) {
+        kwSelect = 'product_url';
+        kwSelectDowngraded = true;
+        continue;
+      }
+      break;
+    }
     const page = await resp.json().catch(() => []);
     if (!Array.isArray(page) || page.length === 0) break;
     for (const r of page) {
@@ -853,14 +876,19 @@ export async function fetchBatchKeywordStats(batchId, limit = 50) {
       totalKeywords++;
     }
     if (page.length < PAGE) break;
-    from += PAGE;
-    if (from > 50000) break;  // safety stop
+    kwFrom += PAGE;
+    if (kwFrom > 200000) break;  // safety stop
   }
 
   // Build per-SKU breakdown. Includes ALL jobs (so we can see the
-  // zero-keyword cases too — those are the bugs).
+  // zero-keyword cases too — those are the bugs). Track the most
+  // recent done_at while iterating so the dashboard can show a
+  // "last activity" heartbeat.
   const perSku = jobs.map(j => {
     const stats = kwByUrl.get(j.product_url) || { count: 0, withImages: 0 };
+    if (j.done_at && (!mostRecentDoneAt || j.done_at > mostRecentDoneAt)) {
+      mostRecentDoneAt = j.done_at;
+    }
     return {
       sku: j.sku || '—',
       productName: j.product_name || '—',
@@ -879,15 +907,25 @@ export async function fetchBatchKeywordStats(batchId, limit = 50) {
 
   const skusWithKw = perSku.filter(s => s.kwCount > 0).length;
   const skusZero = perSku.filter(s => s.kwCount === 0 && s.status !== 'pending' && s.status !== 'claimed');
+  const skusDone = perSku.filter(s => s.status === 'done').length;
+  const skusFailed = perSku.filter(s => s.status === 'failed').length;
+  const skusPending = perSku.filter(s => s.status === 'pending').length;
+  const skusClaimed = perSku.filter(s => s.status === 'claimed').length;
 
   return {
     batchId,
     totalKeywords,
     totalSkus: jobs.length,
     skusWithKeywords: skusWithKw,
+    skusDone,
+    skusFailed,
+    skusPending,
+    skusClaimed,
     avgKwPerSku: skusWithKw > 0 ? Math.round(totalKeywords / skusWithKw) : 0,
     topSkus: perSku.slice(0, limit),
     skusWithZeroKw: skusZero.slice(0, limit),
+    mostRecentDoneAt,
+    schemaDowngraded: kwSelectDowngraded,
     fetchedAt: new Date().toISOString(),
   };
 }
