@@ -28,6 +28,7 @@ import {
   saveWorkerConfig,
   workerConfigToRunOpts,
   cleanupOldData,
+  fetchBatchKeywordStats,
 } from './modules/discovery-jobs.js';
 import {
   STORAGE_KEY_SERVICE_KEY,
@@ -1690,6 +1691,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // on. Pass batchId=null to clear the pin and revert to "newest
   // pending" auto-pick. Every armed worker will pick up the change
   // on its next auto-poll tick (within 30s).
+  // Live per-batch keyword-output stats for the dashboard.
+  if (action === 'dashboard:batchKeywordStats') {
+    (async () => {
+      try {
+        const stats = await fetchBatchKeywordStats(msg.batchId, msg.limit || 50);
+        sendResponse({ ok: true, stats });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
   // Manager triggers cleanup of old activity log + acked commands.
   // Activity log retention default 7 days, acked commands default 1 day.
   // Keyword data + job rows are NEVER auto-deleted (user data).
