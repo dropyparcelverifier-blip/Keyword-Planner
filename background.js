@@ -681,6 +681,34 @@ async function flushActivityBuffer() {
   }
 }
 
+// Auto-migration: when a manager PC has a locally-saved KP URL (from
+// before auto-push existed) but the Supabase worker_config row has no
+// kp_url set, push the local one up. Fires once on connection-health
+// success when we detect this mismatch. Saves the user from having to
+// click Save Settings just to migrate their existing config.
+let _kpUrlMigrationDone = false;
+async function maybeAutoMigrateKpUrl() {
+  if (_kpUrlMigrationDone) return;
+  try {
+    const data = await chrome.storage.local.get(['adbrainKpUrl']);
+    const localKpUrl = (data.adbrainKpUrl || '').trim();
+    if (!localKpUrl || !/\/aw\/keywordplanner\b/.test(localKpUrl)) return;
+    // Local has a valid KP URL. Check what the central config has.
+    const cfg = await fetchWorkerConfig().catch(() => null);
+    if (cfg && cfg.kp_url && /\/aw\/keywordplanner\b/.test(cfg.kp_url)) {
+      // Central already has a valid KP URL — no migration needed.
+      _kpUrlMigrationDone = true;
+      return;
+    }
+    // Push the local KP URL to central. Other config fields untouched.
+    await saveWorkerConfig({ kp_url: localKpUrl }, 'auto-migration');
+    pushLog(`Auto-migrated local KP URL to central worker_config (workers will pick it up on next claim)`, 'ok');
+    _kpUrlMigrationDone = true;
+  } catch (e) {
+    // Quiet failure — manager can still manually push via Save Settings.
+  }
+}
+
 // Ping Supabase with a tiny query (HEAD on the jobs table) to verify
 // connectivity + auth + schema cache. Updates state.connectionHealth.
 // Cheap — should complete in 100-300ms over a healthy connection.
@@ -713,6 +741,9 @@ async function pingConnectionHealth() {
         lastCheckedAt: new Date().toISOString(),
         error: null,
       };
+      // Connection is healthy — opportunistically migrate any local
+      // KP URL up to worker_config if it hasn't been pushed yet.
+      maybeAutoMigrateKpUrl();
     } else {
       state.connectionHealth = {
         ok: false, latencyMs,
