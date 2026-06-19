@@ -463,6 +463,11 @@ try {
   chrome.alarms.create(WORKER_AUTOPOLL_ALARM, { periodInMinutes: 0.5, delayInMinutes: 0.4 });
 } catch {}
 
+// Track repeated identical failure reasons so we don't spam the log
+// every 30s with the same "no KP URL" message.
+let _lastAutoPollErr = '';
+let _lastAutoPollErrCount = 0;
+
 async function workerAutoPollTick() {
   try {
     await coldStart;
@@ -475,14 +480,47 @@ async function workerAutoPollTick() {
     // Check if there's a batch with pending work.
     const batchId = await getActiveBatchId();
     if (!batchId) return;  // nothing to do
-    // Found work — fire autoConnectWorker. Don't await; the handler
-    // returns response via callback channel, and we don't need it here.
+    // Found work — fire autoConnectWorker. We DO await the response so
+    // we can detect known failures (no KP URL, etc.) and log them once
+    // instead of spamming the activity log every 30s.
     pushLog(`Worker auto-poll: found pending batch "${batchId}" — claiming`, 'ok');
     chrome.runtime.sendMessage({
       action: 'jobs:autoConnectWorker',
       workerId: state.workerId,
       chunkSize: state.continuousChunkSize || 5,
-    }, () => { /* fire and forget */ });
+    }, (resp) => {
+      if (!resp?.ok) {
+        const err = String(resp?.error || 'unknown');
+        if (err === _lastAutoPollErr) {
+          // Same failure as last tick. Increment + skip log to avoid spam.
+          _lastAutoPollErrCount++;
+          // Surface a single dashboard activity entry every 10 ticks
+          // (~5 min) so the manager DOES see this is a persistent issue.
+          if (_lastAutoPollErrCount === 10) {
+            bufferActivity({
+              level: 'err',
+              source: 'autopoll',
+              message: `Worker "${state.workerId}" stuck for ~5 min on the same error: ${err.slice(0, 200)}`,
+            });
+          }
+          return;
+        }
+        _lastAutoPollErr = err;
+        _lastAutoPollErrCount = 1;
+        pushLog(`Worker auto-poll: claim refused — ${err}`, 'err');
+        // First time seeing this error — surface to dashboard
+        // immediately so the manager knows the worker is stuck.
+        bufferActivity({
+          level: 'err',
+          source: 'autopoll',
+          message: `Worker "${state.workerId}" cannot start: ${err.slice(0, 200)}`,
+        });
+      } else {
+        // Success — reset the dedup tracker.
+        _lastAutoPollErr = '';
+        _lastAutoPollErrCount = 0;
+      }
+    });
   } catch (e) {
     pushLog(`Worker auto-poll error: ${e.message}`, 'err');
   }
