@@ -681,6 +681,56 @@ export async function acknowledgeCommand(commandId, workerId) {
 }
 
 // ============================================================================
+// CLEANUP — manager-initiated maintenance of activity log + old commands
+// ============================================================================
+
+// Cleans up table rows older than the given retention policy. Returns
+// counts of deleted rows per category. Safe to run any time — only
+// touches rows OLDER than the cutoffs, never current data.
+export async function cleanupOldData({ logDays = 7, commandsDays = 1 } = {}) {
+  const { base, headers } = await _supabaseHeaders();
+  const result = { activityLog: 0, ackedCommands: 0, errors: [] };
+
+  // Delete activity log entries older than logDays.
+  try {
+    const cutoff = new Date(Date.now() - logDays * 86400000).toISOString();
+    const url = `${base}/rest/v1/${ACTIVITY_LOG_TABLE}?ts=lt.${encodeURIComponent(cutoff)}`;
+    const resp = await fetch(url, {
+      method: 'DELETE',
+      headers: { ...headers, 'Prefer': 'return=representation' },
+    });
+    if (!resp.ok) {
+      const t = await resp.text().catch(() => '');
+      result.errors.push(`activity log: HTTP ${resp.status}: ${t.slice(0, 150)}`);
+    } else {
+      const rows = await resp.json().catch(() => []);
+      result.activityLog = Array.isArray(rows) ? rows.length : 0;
+    }
+  } catch (e) { result.errors.push(`activity log: ${e.message}`); }
+
+  // Delete acked worker commands older than commandsDays.
+  try {
+    const cutoff = new Date(Date.now() - commandsDays * 86400000).toISOString();
+    const url = `${base}/rest/v1/${COMMANDS_TABLE}`
+      + `?acknowledged_at=not.is.null`
+      + `&acknowledged_at=lt.${encodeURIComponent(cutoff)}`;
+    const resp = await fetch(url, {
+      method: 'DELETE',
+      headers: { ...headers, 'Prefer': 'return=representation' },
+    });
+    if (!resp.ok) {
+      const t = await resp.text().catch(() => '');
+      result.errors.push(`commands: HTTP ${resp.status}: ${t.slice(0, 150)}`);
+    } else {
+      const rows = await resp.json().catch(() => []);
+      result.ackedCommands = Array.isArray(rows) ? rows.length : 0;
+    }
+  } catch (e) { result.errors.push(`commands: ${e.message}`); }
+
+  return result;
+}
+
+// ============================================================================
 // MANAGER-CONTROLLED WORKER CONFIG
 // ============================================================================
 

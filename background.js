@@ -27,6 +27,7 @@ import {
   fetchWorkerConfig,
   saveWorkerConfig,
   workerConfigToRunOpts,
+  cleanupOldData,
 } from './modules/discovery-jobs.js';
 import {
   STORAGE_KEY_SERVICE_KEY,
@@ -1689,6 +1690,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // on. Pass batchId=null to clear the pin and revert to "newest
   // pending" auto-pick. Every armed worker will pick up the change
   // on its next auto-poll tick (within 30s).
+  // Manager triggers cleanup of old activity log + acked commands.
+  // Activity log retention default 7 days, acked commands default 1 day.
+  // Keyword data + job rows are NEVER auto-deleted (user data).
+  if (action === 'jobs:cleanup') {
+    (async () => {
+      try {
+        const result = await cleanupOldData({
+          logDays:      Math.max(1, Number(msg.logDays) || 7),
+          commandsDays: Math.max(1, Number(msg.commandsDays) || 1),
+        });
+        sendResponse({ ok: true, ...result });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
   if (action === 'jobs:setActiveBatch') {
     (async () => {
       try {
