@@ -551,6 +551,34 @@ $('stopAllBtn').addEventListener('click', async () => {
   if (!confirm('Stop all worker PCs? Each worker will finish its current product, then halt.')) return;
   await sendCommand(null, 'stop');  // broadcast
 });
+// Cleanup — delete old activity log + acked worker commands. Manager
+// data (jobs + keyword rows) is NEVER auto-deleted.
+$('cleanupBtn').addEventListener('click', async () => {
+  if (!confirm(
+    'Delete:\n\n' +
+    '• Activity log entries older than 7 days\n' +
+    '• Worker commands acked more than 1 day ago\n\n' +
+    'Keyword data + job rows are NEVER deleted.\n\n' +
+    'Continue?'
+  )) return;
+  $('cleanupBtn').disabled = true;
+  $('cleanupBtn').textContent = '🧹 Cleaning…';
+  const r = await rpc('jobs:cleanup', { logDays: 7, commandsDays: 1 });
+  $('cleanupBtn').disabled = false;
+  $('cleanupBtn').textContent = '🧹 Cleanup';
+  if (!r?.ok) {
+    alert(`Cleanup failed: ${r?.error || 'unknown'}`);
+    return;
+  }
+  const errs = (r.errors && r.errors.length > 0) ? `\n\nWith errors:\n${r.errors.join('\n')}` : '';
+  alert(
+    `✓ Cleaned up:\n\n` +
+    `• ${r.activityLog} old activity log entries\n` +
+    `• ${r.ackedCommands} acked commands` + errs
+  );
+  refreshAll();
+});
+
 // Wake all — broadcast an instant "check for work" command to every
 // worker. Workers that are armed but idle (waiting for the next
 // auto-poll tick) immediately claim and start. Useful right after the
