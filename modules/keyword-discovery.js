@@ -3960,24 +3960,40 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // engine bails after the one product SERP load and finishes in 2-3 min
       // with almost no keywords. This rescues the run instead of silently
       // producing nothing.
-      if (round1Seeds.length === 0 && productName) {
-        const fallbackSeeds = [
-          productName,
-          `${productName} review`,
-          `${productName} price`,
-          `${productName} best`,
-        ];
-        for (const fs of fallbackSeeds) {
-          if (report.size >= productCap) break;
-          const r = addRow(fs, 'fallback_no_kp', '');
-          if (r) round1Seeds.push(r);
+      if (round1Seeds.length === 0) {
+        // Guard against empty productName — happens when URL slug
+        // parsing failed or the page had no usable title. Without
+        // this guard fallback seeds become `["", " review", " price",
+        // " best"]` which are useless searches.
+        const seedBase = (productName && productName.trim().length > 0)
+          ? productName.trim()
+          : (p.sku || cleanUrl.split('/').pop() || '').replace(/[^a-z0-9\s-]/gi, ' ').replace(/[-_]+/g, ' ').trim();
+        if (seedBase) {
+          const fallbackSeeds = [
+            seedBase,
+            `${seedBase} review`,
+            `${seedBase} price`,
+            `${seedBase} best`,
+          ];
+          for (const fs of fallbackSeeds) {
+            if (report.size >= productCap) break;
+            const r = addRow(fs, 'fallback_no_kp', '');
+            if (r) round1Seeds.push(r);
+          }
+          onProgress?.({
+            currentProduct: productName,
+            currentSource: 'round1',
+            currentAction: `⚠ KP + PAA both empty — using ${round1Seeds.length} fallback seed(s) from "${seedBase}". Yield will be low (~10-30 kw). Check KP URL / Google Ads login if this happens on every product.`,
+            logKind: 'warn',
+          });
+        } else {
+          onProgress?.({
+            currentProduct: productName,
+            currentSource: 'round1',
+            currentAction: `⚠ KP + PAA both empty AND no usable product name / SKU / URL slug for fallback seeds. Product will yield 0 keywords. Check the product file's "Product URL" + "SKU" columns.`,
+            logKind: 'err',
+          });
         }
-        onProgress?.({
-          currentProduct: productName,
-          currentSource: 'round1',
-          currentAction: `⚠ KP + PAA both empty — using ${round1Seeds.length} fallback seed(s) derived from product name. Yield will be low (~10-30 kw). Check KP URL / Google Ads login if this happens on every product.`,
-          logKind: 'warn',
-        });
       }
 
       onProgress?.({

@@ -1316,8 +1316,37 @@ mgrApplyRole(localStorage.getItem(MGR_ROLE_KEY) || 'both');
 // Inline credentials card. Hides when both serviceKey + supabaseUrl
 // are populated so daily use isn't visually cluttered. First-time
 // setup happens here without a Settings-tab detour.
+// Read-only "what's actually configured" panel for workers — shows the
+// effective KP URL + match profile etc. Workers can't see the Settings
+// tab, so without this they have no way to verify what the manager
+// pushed. Falls back silently if the chrome.storage read fails.
+function mgrShowEffectiveConfig() {
+  const wrap = $('mgrEffectiveConfig');
+  if (!wrap) return;
+  chrome.storage.local.get(['adbrainKpUrl', 'adbrainMatchProfile'], (data) => {
+    const kp = (data.adbrainKpUrl || '').trim();
+    const prof = data.adbrainMatchProfile || '—';
+    if (!kp) {
+      wrap.innerHTML = `<div class="hint" style="color: var(--warn);">⚠ No Keyword Planner URL set. Apply a setup code from the manager OR ask manager to Save Settings (auto-pushes KP URL).</div>`;
+      return;
+    }
+    const safeKp = String(kp).slice(0, 80).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    const valid = /\/aw\/keywordplanner\b/.test(kp);
+    const validIcon = valid ? '✓' : '⚠';
+    const validNote = valid ? '' : ' (this does not look like a Keyword Planner URL — expected /aw/keywordplanner path)';
+    wrap.innerHTML = `
+      <div style="font-size: 10px; color: var(--muted); margin-bottom: 4px;">EFFECTIVE CONFIG (from manager or local fallback)</div>
+      <div style="font-size: 10px; color: var(--text); font-family: 'JetBrains Mono', monospace; word-break: break-all; line-height: 1.4;">
+        ${validIcon} KP URL: ${safeKp}${kp.length > 80 ? '…' : ''}${validNote ? '<span style="color: var(--warn);">' + validNote + '</span>' : ''}<br>
+        ⚙ Match profile: ${prof}
+      </div>
+    `;
+  });
+}
+
 function mgrCheckCreds() {
   chrome.runtime.sendMessage({ action: 'jobs:credsStatus' }, (resp) => {
+    mgrShowEffectiveConfig();
     if (!resp?.ok) return;
     const card = $('mgrCredsCard');
     const status = $('mgrCredsStatus');

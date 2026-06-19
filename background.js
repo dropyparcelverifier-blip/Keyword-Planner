@@ -165,6 +165,11 @@ const state = {
   // Cleared by Stop (user explicitly opted out). Survives engine
   // completion, browser restart, and SW death.
   workerArmed: false,
+  // userStoppedArm: set true when the user explicitly clicks Stop on
+  // this PC. Honored by the Wake command — manager broadcast wake
+  // doesn't re-arm a PC that the local user has explicitly stopped.
+  // Cleared on autoConnect (user explicitly armed it again).
+  userStoppedArm: false,
   // Connection-health snapshot. Populated by pingConnectionHealth (every
   // 60s alarm + on demand). The popup + dashboard show this so the user
   // knows whether Supabase is reachable from THIS PC. ok=false = creds
@@ -210,6 +215,7 @@ const coldStart = (async () => {
     'adbrainActivityBuffer',
     'adbrainPendingPushes',
     'adbrainWorkerArmed',
+    'adbrainUserStoppedArm',
   ]);
   // Restore activity buffer from before SW death so we don't lose recent
   // events that hadn't been pushed to Supabase yet.
@@ -231,6 +237,7 @@ const coldStart = (async () => {
   if (typeof data.adbrainContinuousClaim === 'boolean')      state.continuousClaim = data.adbrainContinuousClaim;
   if (typeof data.adbrainContinuousChunkSize === 'number')   state.continuousChunkSize = data.adbrainContinuousChunkSize;
   if (typeof data.adbrainWorkerArmed === 'boolean')          state.workerArmed = data.adbrainWorkerArmed;
+  if (typeof data.adbrainUserStoppedArm === 'boolean')       state.userStoppedArm = data.adbrainUserStoppedArm;
   if (Array.isArray(data[STORAGE_KEY_LAST_REPORT]))   state.report = data[STORAGE_KEY_LAST_REPORT];
   if (data[STORAGE_KEY_LAST_BATCH])                   state.batchId = data[STORAGE_KEY_LAST_BATCH];
   if (data[STORAGE_KEY_LAST_STATUS])                  state.lastStatus = data[STORAGE_KEY_LAST_STATUS];
@@ -524,11 +531,23 @@ function enqueuePendingPush(productUrl, rows, batchId) {
 
 async function flushPendingPushes() {
   if (_pendingPushes.length === 0) return;
+  // Skip retries when the connection is provably down — would just
+  // spam Supabase + log with no chance of success. Health-ping alarm
+  // will mark it ok=true again the moment Supabase comes back, and
+  // this tick will resume normally.
+  if (state.connectionHealth?.ok === false) {
+    return;
+  }
   // Process one entry per tick — if Supabase is rate-limited we don't
   // want to hammer it 50 times in a row.
   const entry = _pendingPushes[0];
   if (entry.attempts >= PENDING_PUSH_MAX_ATTEMPTS) {
-    pushLog(`Push retry exhausted for ${entry.productUrl} after ${entry.attempts} attempts — dropping ${entry.rows.length} row(s). Last error: ${entry.lastError || 'unknown'}`, 'err');
+    const dropMsg = `Push retry exhausted for ${entry.productUrl} after ${entry.attempts} attempts — dropping ${entry.rows.length} row(s). Last error: ${entry.lastError || 'unknown'}`;
+    pushLog(dropMsg, 'err');
+    // Also surface the drop event to the dashboard activity log so the
+    // manager sees this PC dropped data — otherwise this loss is
+    // invisible outside this PC.
+    bufferActivity({ level: 'err', source: 'push', message: dropMsg, productUrl: entry.productUrl });
     _pendingPushes.shift();
     _persistPendingPushes();
     return;
@@ -537,8 +556,16 @@ async function flushPendingPushes() {
   try {
     const r = await pushToAdBrain(entry.rows);
     if (r.failed > 0) {
-      entry.lastError = `${r.failed}/${r.success + r.failed} rows failed`;
-      pushLog(`Push retry ${entry.attempts}/${PENDING_PUSH_MAX_ATTEMPTS} for ${entry.productUrl}: ${entry.lastError} — will retry`, 'err');
+      entry.lastError = `${r.failed}/${r.success + r.failed} rows failed: ${(r.errors || []).slice(0, 1).join('') || 'unknown'}`;
+      // Detect unrecoverable errors (data shape problems, not network).
+      // No point retrying these — fast-forward attempts so the next
+      // tick drops the entry and surfaces the loss to dashboard.
+      if (/constraint|violates|invalid input|type mismatch|22P02|23502|23505/i.test(entry.lastError)) {
+        entry.attempts = PENDING_PUSH_MAX_ATTEMPTS;
+        pushLog(`Push retry for ${entry.productUrl} hit unrecoverable error (${entry.lastError}) — fast-forwarding to drop`, 'err');
+      } else {
+        pushLog(`Push retry ${entry.attempts}/${PENDING_PUSH_MAX_ATTEMPTS} for ${entry.productUrl}: ${entry.lastError} — will retry`, 'err');
+      }
       _persistPendingPushes();
       return;  // leave at head of queue for next tick
     }
@@ -602,12 +629,17 @@ async function flushActivityBuffer() {
   try {
     const r = await pushActivityLog(slice);
     if (r.error) {
-      // On push failure, re-buffer (capped) so we don't lose every
-      // entry permanently to one transient network error.
-      _activityBuffer.unshift(...slice.slice(0, 100));
+      // On push failure, re-buffer the OLDEST entries (the buffer is
+      // FIFO; oldest at index 0). Take up to ACTIVITY_BUFFER_CAP so
+      // we don't drop everything to one transient network error.
+      // Previously this only kept the first 100 of however-many we
+      // had — for a 500-entry buffer we'd silently lose 400 entries.
+      const keep = slice.slice(0, ACTIVITY_BUFFER_CAP);
+      _activityBuffer.unshift(...keep);
     }
   } catch {
-    _activityBuffer.unshift(...slice.slice(0, 100));
+    const keep = slice.slice(0, ACTIVITY_BUFFER_CAP);
+    _activityBuffer.unshift(...keep);
   }
 }
 
@@ -679,12 +711,19 @@ async function pollWorkerCommands() {
           state.stopRequested = true;
           bufferActivity({ level: 'warn', source: 'cmd', message: `Pause command received — halting (no resumable pause primitive yet).` });
         } else if (c.command === 'wake') {
-          // Manager broadcast "wake up and check for work". Re-arms
-          // the worker and triggers an immediate auto-poll tick.
-          state.workerArmed = true;
-          await chrome.storage.local.set({ adbrainWorkerArmed: true }).catch(() => {});
-          bufferActivity({ level: 'ok', source: 'cmd', message: `Wake command received — re-armed; will auto-claim next chunk.` });
-          setTimeout(() => workerAutoPollTick().catch(() => {}), 200);
+          // Manager broadcast "wake up and check for work". Triggers an
+          // immediate auto-poll tick — but does NOT override an
+          // explicit user Stop. If state.userStoppedArm is true (set
+          // by the Stop handler), the worker stays disarmed; user
+          // must explicitly click Connect on the worker PC to re-arm.
+          if (state.userStoppedArm) {
+            bufferActivity({ level: 'warn', source: 'cmd', message: `Wake ignored — this PC was explicitly stopped by its user. Click Connect & start working on the worker PC to re-arm.` });
+          } else {
+            state.workerArmed = true;
+            await chrome.storage.local.set({ adbrainWorkerArmed: true }).catch(() => {});
+            bufferActivity({ level: 'ok', source: 'cmd', message: `Wake command received — armed; will auto-claim next chunk.` });
+            setTimeout(() => workerAutoPollTick().catch(() => {}), 200);
+          }
         } else if (c.command === 'resume') {
           // Re-enable continuous-claim and kick off a fresh auto-connect
           // cycle so this worker starts pulling jobs again. No-op if
@@ -1361,9 +1400,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // Connect click to start polling again.
     state.continuousClaim = false;
     state.workerArmed = false;
+    state.userStoppedArm = true;
     chrome.storage.local.set({
       adbrainContinuousClaim: false,
       adbrainWorkerArmed: false,
+      adbrainUserStoppedArm: true,
     }).catch(() => {});
     sendResponse({ ok: true });
     return false;
@@ -1577,6 +1618,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       try {
         const workerId = (msg.workerId || state.workerId || '').trim();
         if (!workerId) throw new Error('Set a Worker ID first.');
+        // Bail clearly if the engine is already running. Without this
+        // check, a re-apply of setup code or a stray Wake command would
+        // silently return "already running" from handleStart with no
+        // user-visible feedback.
+        if (state.running || state.starting) {
+          pushLog(`Auto-connect ignored: engine already running. Worker stays armed; will pick up next chunk when this one finishes.`, 'info');
+          sendResponse({ ok: true, claimed: 0, message: 'engine already running — already armed' });
+          return;
+        }
         const chunkSize = Math.max(1, Math.min(50, Number(msg.chunkSize) || 5));
         const explicitBatch = (msg.batchId || '').trim();
         const batchId = explicitBatch || (await getActiveBatchId());
@@ -1593,11 +1643,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         state.continuousChunkSize = chunkSize;
         state.workerId = workerId;
         state.workerArmed = true;
+        // User explicitly armed this PC — clear the "user stopped"
+        // flag so future Wake broadcasts will be honored again.
+        state.userStoppedArm = false;
         await chrome.storage.local.set({
           [STORAGE_KEY_WORKER_ID]: workerId,
           adbrainContinuousClaim: true,
           adbrainContinuousChunkSize: chunkSize,
           adbrainWorkerArmed: true,
+          adbrainUserStoppedArm: false,
         }).catch(() => {});
         // Release any stale claims from offline workers first.
         await releaseStaleJobs(10).catch(() => null);
