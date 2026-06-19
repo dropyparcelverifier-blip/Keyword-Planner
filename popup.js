@@ -433,9 +433,15 @@ $('saveSettings').addEventListener('click', () => {
         if (resp?.ok) {
           $('settingsSaved').textContent = '✓ Saved + pushed to all workers';
         } else {
-          $('settingsSaved').textContent = `Saved locally (push to workers failed: ${resp?.error || 'check Connection'})`;
+          // Detect schema-missing errors and give the user the EXACT fix.
+          const err = resp?.error || 'unknown';
+          if (/PGRST205|adbrain_worker_config|not.*found.*schema cache/i.test(err)) {
+            $('settingsSaved').textContent = '⚠ Saved locally. Supabase schema not migrated — run supabase_schema.sql in your Supabase SQL Editor, then "NOTIFY pgrst, \'reload schema\';"';
+          } else {
+            $('settingsSaved').textContent = `Saved locally (push failed: ${err.slice(0, 80)})`;
+          }
         }
-        setTimeout(() => { $('settingsSaved').textContent = ''; }, 3500);
+        setTimeout(() => { $('settingsSaved').textContent = ''; }, 6000);
       });
     }
   );
@@ -1290,6 +1296,23 @@ document.querySelectorAll('.role-btn').forEach(b => {
 });
 mgrApplyRole(localStorage.getItem(MGR_ROLE_KEY) || 'both');
 
+// First-launch nudge: if the user has never explicitly chosen a role,
+// pulse the role banner so they notice it. Setting localStorage on
+// first interaction with any role button stops the pulse.
+(function nudgeRoleFirstLaunch() {
+  if (localStorage.getItem('adbrainRolePicked')) return;
+  const banner = document.querySelector('.role-banner');
+  if (!banner) return;
+  banner.style.transition = 'box-shadow 0.6s ease-in-out';
+  banner.style.boxShadow = '0 0 0 2px var(--accent), 0 0 16px var(--accent-soft)';
+  document.querySelectorAll('.role-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      localStorage.setItem('adbrainRolePicked', '1');
+      banner.style.boxShadow = '';
+    }, { once: true });
+  });
+})();
+
 // Inline credentials card. Hides when both serviceKey + supabaseUrl
 // are populated so daily use isn't visually cluttered. First-time
 // setup happens here without a Settings-tab detour.
@@ -1401,12 +1424,56 @@ $('mgrApplySetupBtn')?.addEventListener('click', () => {
   const r = $('mgrApplySetupResult');
   const raw = $('mgrApplySetupCode').value.trim();
   if (!raw) { setQResult(r, 'Paste the setup code first.', 'error'); return; }
+  setQResult(r, 'Applying setup code…', 'info');
   chrome.runtime.sendMessage({ action: 'jobs:importSetupCode', code: raw }, (resp) => {
     if (!resp?.ok) { setQResult(r, `Apply failed: ${resp?.error || 'invalid code'}`, 'error'); return; }
-    const kpNote = resp.applied?.kpUrl ? ' Keyword Planner URL also configured.' : '';
-    setQResult(r, `✓ Setup applied — Supabase connected.${kpNote} You can now click Connect & start working.`, 'success');
     $('mgrApplySetupCode').value = '';
     mgrCheckCreds();
+
+    // ONE-PASTE WORKER ONBOARDING:
+    // If we're in Worker mode (or Both), auto-generate a Worker ID if
+    // none is set yet AND auto-fire Connect so the worker is immediately
+    // armed and waiting for work. No extra clicks. User pasted the code;
+    // the system does the rest.
+    const role = (document.body.dataset.mgrRole || 'both').toLowerCase();
+    if (role === 'worker' || role === 'both') {
+      const wInput = $('mgrWorkerId');
+      let wId = (wInput?.value || '').trim();
+      if (!wId) {
+        // Generate a short readable ID: "PC-" + 4 hex chars
+        wId = 'PC-' + Math.random().toString(16).slice(2, 6).toUpperCase();
+        if (wInput) wInput.value = wId;
+        chrome.runtime.sendMessage({ action: 'jobs:setWorkerId', workerId: wId });
+      }
+      setQResult(r, `✓ Setup applied. Auto-arming this PC as worker "${wId}"…`, 'info');
+      // Fire autoConnect — this arms the worker so it auto-polls for
+      // work every 30s without any further interaction.
+      const runOpts = (typeof readRunOpts === 'function') ? readRunOpts() : {};
+      chrome.runtime.sendMessage(
+        { action: 'jobs:autoConnectWorker', workerId: wId, chunkSize: 5, runOpts },
+        (cr) => {
+          if (!cr?.ok) {
+            setQResult(r,
+              `✓ Setup applied but couldn't auto-arm: ${cr?.error || 'unknown'}. Click "Connect & start working" manually.`,
+              'warn');
+            return;
+          }
+          if (cr.claimed === 0) {
+            setQResult(r,
+              `✓ Done. This PC is now armed as "${wId}" and will auto-claim work as the manager uploads it. No batches in queue right now.`,
+              'success');
+          } else {
+            setQResult(r,
+              `✓ Done. This PC is now armed as "${wId}" and immediately claimed ${cr.claimed} job(s) from batch "${cr.batchId}". Engine starting.`,
+              'success');
+          }
+        }
+      );
+    } else {
+      // Manager role — no worker auto-arm needed.
+      const kpNote = resp.applied?.kpUrl ? ' Keyword Planner URL also configured.' : '';
+      setQResult(r, `✓ Setup applied — Supabase connected.${kpNote}`, 'success');
+    }
   });
 });
 
