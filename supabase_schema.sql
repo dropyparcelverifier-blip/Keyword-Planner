@@ -343,6 +343,24 @@ insert into public.adbrain_worker_config (id) values (1)
 -- or touching each worker. Null = auto-pick newest (default behaviour).
 alter table public.adbrain_worker_config add column if not exists active_batch_id text;
 
+-- ============ Data-feature columns (merged from session updates) ============
+-- Per-zone FOUND image counts on the keyword's SERP (popular products /
+-- sponsored-shopping / knowledge panel / organic …), matched or not.
+alter table public.adbrain_discovered_keywords add column if not exists serp_zone_counts text;
+-- dropy.in (our own store) as a seller on the keyword's Google Shopping / SERP.
+alter table public.adbrain_discovered_keywords add column if not exists dropy_is_seller boolean default false;
+alter table public.adbrain_discovered_keywords add column if not exists dropy_on_serp   boolean default false;
+-- Matched-link verification — destination pages opened + confirmed to carry our product.
+alter table public.adbrain_discovered_keywords add column if not exists link_checked_count  int default 0;
+alter table public.adbrain_discovered_keywords add column if not exists link_verified_count int default 0;
+alter table public.adbrain_discovered_keywords add column if not exists matched_links  text;
+alter table public.adbrain_discovered_keywords add column if not exists verified_links text;
+-- Keyword classification.
+alter table public.adbrain_discovered_keywords add column if not exists keyword_relevance text;   -- high/medium/low/sibling-brand
+alter table public.adbrain_discovered_keywords add column if not exists buying_intent     text;   -- high/medium/low
+alter table public.adbrain_discovered_keywords add column if not exists faq               boolean default false;
+alter table public.adbrain_discovered_keywords add column if not exists competition       text;   -- KP competition surfaced per keyword
+
 -- Refresh the schema cache so all the new endpoints (dashboard tables +
 -- worker config) work IMMEDIATELY.
 NOTIFY pgrst, 'reload schema';

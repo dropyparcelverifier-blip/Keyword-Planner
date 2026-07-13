@@ -28,6 +28,24 @@
     ],
     seedDialogHeadings: ['discover new keywords', 'find new keywords', 'start with keywords'],
     getResultsButtonTexts: ['Get results', 'Get keyword ideas'],
+    // "Get search volume and forecasts for your keywords" card on the KP home.
+    // Used by the metrics-backfill flow (KP_GET_METRICS) to look up avg
+    // monthly searches / competition / bid range for keywords that did NOT
+    // come from KP's Discover flow (autosuggest, PAA, related, amazon).
+    forecastCardTexts: [
+      'Get search volume and forecasts',
+      'Search volume and forecasts',
+      'Get search volume',
+    ],
+    // Tab/nav item that switches the forecasts tool to the historical-metrics
+    // table (the view that carries the same columns as the ideas grid).
+    historicalMetricsTabTexts: ['Historical metrics', 'Historical plan metrics'],
+    // Placeholder / aria-label hints for the multi-keyword paste box.
+    metricsPasteHints: [
+      'enter keywords', 'one keyword per line', 'copy and paste',
+      'enter or paste', 'add keywords', 'paste keywords',
+    ],
+    getStartedButtonTexts: ['Get started', 'Get results'],
     // Text on the results page that returns to the input pane. We try these
     // in order between seeds when the chip-input isn't immediately findable.
     backToInputTexts: [
@@ -74,6 +92,21 @@
         return false;
       }
       runKPWebsiteFlow(productUrl, msg.maxResults || 200, msg.hydrateTimeoutMs || 45000, msg.tableTimeoutMs || 60000)
+        .then(result => sendResponse(result))
+        .catch(err => sendResponse({ ok: false, error: err.message, keywords: [] }));
+      return true;
+    }
+    if (msg?.type === 'KP_GET_METRICS') {
+      // Backfill flow — paste a batch of keywords into "Get search volume and
+      // forecasts", switch to Historical metrics, scrape the metric columns.
+      const keywords = Array.isArray(msg.keywords)
+        ? msg.keywords.filter(k => typeof k === 'string' && k.trim())
+        : [];
+      if (keywords.length === 0) {
+        sendResponse({ ok: false, error: 'no keywords provided', keywords: [] });
+        return false;
+      }
+      runKPMetricsFlow(keywords, msg.maxResults || (keywords.length + 50), msg.hydrateTimeoutMs || 45000, msg.tableTimeoutMs || 90000)
         .then(result => sendResponse(result))
         .catch(err => sendResponse({ ok: false, error: err.message, keywords: [] }));
       return true;
@@ -1142,5 +1175,114 @@
     const keywords = await scrapeIdeasTable(maxResults, websiteTimeout);
     kpLog(`website fallback scraped ${keywords.length} keyword(s)`, 'ok');
     return keywords;
+  }
+
+  // ----- "Get search volume and forecasts" (metrics backfill) flow -----
+  //
+  // Runs on a freshly-loaded KP home shell. Pastes a batch of keywords into
+  // the "Get search volume and forecasts" tool, switches to the Historical
+  // metrics view, and scrapes avg-monthly-searches / competition / bid range
+  // using the SAME table extractor as the ideas flow (identical columns).
+  //
+  // Brittle by nature — same caveat as the Discover flow. If Google changes
+  // the card / tab / paste-box copy, update the SELECTORS added above.
+  async function runKPMetricsFlow(keywords, maxResults, hydrateTimeoutMs, tableTimeoutMs) {
+    const list = Array.isArray(keywords)
+      ? keywords.map(k => String(k || '').trim()).filter(Boolean)
+      : [];
+    if (list.length === 0) return { ok: false, error: 'no keywords provided', keywords: [] };
+    try {
+      kpLog(`starting metrics flow for ${list.length} keyword(s)`);
+      await waitForReact(hydrateTimeoutMs);
+      await openSearchVolumeForecasts(list);
+      await switchToHistoricalMetrics();
+      const out = await scrapeIdeasTable(maxResults, Math.max(tableTimeoutMs || 60000, 90000));
+      kpLog(`metrics flow → ${out.length} row(s) scraped`, 'ok');
+      return { ok: true, keywords: out };
+    } catch (e) {
+      kpLog(`metrics flow FAILED: ${e.message}`, 'err');
+      return { ok: false, error: e.message, keywords: [] };
+    }
+  }
+
+  async function openSearchVolumeForecasts(list) {
+    await dismissOverlays();
+
+    // Step 1: click the "Get search volume and forecasts" card.
+    kpLog('looking for "Get search volume and forecasts" card');
+    const card = await waitFor(
+      () => findByText(
+        'a, button, [role="button"], [role="link"], material-card, [jsname], span, div',
+        SELECTORS.forecastCardTexts
+      ),
+      { timeoutMs: 30000, name: '"Search volume and forecasts" card' }
+    );
+    const target = findRealClickTarget(card) || card;
+    kpLog(`clicking "${(target.innerText || target.textContent || '').trim().slice(0, 50)}"`);
+    await aggressiveClick(target);
+    await humanPause(2000, 0.3);
+
+    // Step 2: find the multi-keyword paste box and paste the list. Prefer a
+    // <textarea> (the tool accepts one keyword per line); fall back to any
+    // visible input whose label/placeholder hints at keyword entry.
+    kpLog('looking for keyword paste input');
+    const input = await waitFor(() => {
+      const els = Array.from(document.querySelectorAll(
+        'textarea, input[type="text"], input:not([type]), [contenteditable="true"], [role="combobox"]'
+      )).filter(visible).filter(el => !el.closest('header, [role="banner"], nav, [role="navigation"]'));
+      const ta = els.find(el => el.tagName === 'TEXTAREA');
+      if (ta) return ta;
+      const hints = SELECTORS.metricsPasteHints;
+      for (const el of els) {
+        const blob = `${(el.getAttribute('aria-label') || '')} ${(el.getAttribute('placeholder') || '')}`.toLowerCase();
+        if (hints.some(h => blob.includes(h))) return el;
+      }
+      return null;
+    }, { timeoutMs: 20000, name: 'KP keyword paste input' });
+
+    await humanClick(input);
+    setNativeValue(input, '');
+    await humanPause(150);
+    // One keyword per line — the tool's canonical multi-keyword format.
+    setNativeValue(input, list.join('\n'));
+    await humanPause(300);
+    kpLog(`pasted ${list.length} keyword(s) into metrics input`);
+    // Some variants need an Enter to commit before the button enables.
+    ['keydown', 'keypress', 'keyup'].forEach(type => {
+      input.dispatchEvent(new KeyboardEvent(type, {
+        key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
+      }));
+    });
+    await humanPause(300);
+
+    // Step 3: click "Get started" (a.k.a. "Get results").
+    const btn = await waitFor(
+      () => {
+        const b = findByText('button, [role="button"]', SELECTORS.getStartedButtonTexts);
+        if (!b) return null;
+        if (b.hasAttribute('disabled') || b.getAttribute('aria-disabled') === 'true') return null;
+        return b;
+      },
+      { timeoutMs: 20000, name: 'enabled Get started button (metrics mode)' }
+    );
+    kpLog('clicking "Get started" for metrics', 'ok');
+    await humanClick(btn);
+    await humanPause(1800, 0.3);
+  }
+
+  async function switchToHistoricalMetrics() {
+    // The forecasts tool opens on the Forecast view; the avg-monthly-searches
+    // / competition / bid columns live under the "Historical metrics" tab.
+    const tab = findByText(
+      '[role="tab"], a, button, div[tabindex], span[tabindex], span, div',
+      SELECTORS.historicalMetricsTabTexts
+    );
+    if (tab) {
+      kpLog('switching to "Historical metrics" tab');
+      await aggressiveClick(findRealClickTarget(tab) || tab);
+      await humanPause(1800, 0.3);
+    } else {
+      kpLog('"Historical metrics" tab not found — scraping current view (may already be historical)', 'err');
+    }
   }
 })();
