@@ -481,8 +481,31 @@
       alt:       ctx.alt       || '',
       titleAttr: ctx.titleAttr || '',
       linkText:  ctx.linkText  || '',
+      // Destination page URL for this result (used by the engine's optional
+      // matched-link verification). Empty when the nearest anchor is a
+      // Google-internal link with no unwrappable destination.
+      link:      ctx.link      || '',
       source,
     });
+  }
+
+  // Resolve a SERP anchor href to the real destination page. Unwraps Google
+  // redirect wrappers (/url?q=, /aclk?...&adurl=, imgrefurl) and skips
+  // google.com self-links so the engine only ever fetches real retailer pages.
+  function resolveDestinationHref(href) {
+    if (!href) return '';
+    try {
+      const u = new URL(href, location.href);
+      if (/(^|\.)google\.[a-z.]+$/i.test(u.hostname)) {
+        for (const key of ['q', 'url', 'adurl', 'imgrefurl']) {
+          const v = u.searchParams.get(key);
+          if (v && /^https?:\/\//i.test(v)) return v;
+        }
+        return ''; // google-internal, no unwrappable destination
+      }
+      if (u.protocol === 'http:' || u.protocol === 'https:') return u.toString();
+    } catch {}
+    return '';
   }
 
   // Strategy 1 — Google's class names rotate every few months. Find the
@@ -1000,7 +1023,11 @@
       container.querySelector('.VwiC3b, .yXK7lf, .lEBKkf, .lyLwlc')?.innerText ||
       container.querySelector('div[data-content-feature]')?.innerText || '';
     const linkText = (snippet || '').trim().slice(0, 300);
-    return { seller, price, title, linkText };
+    // Destination link for the organic result — nearest result anchor.
+    const resultAnchor =
+      container.querySelector('a.yuRUbf, a[jsname], .yuRUbf a[href], h3 a[href], a[href]');
+    const link = resolveDestinationHref(resultAnchor?.href);
+    return { seller, price, title, linkText, link };
   }
 
   // Organic-result image collector — the additional layer for the
@@ -1050,6 +1077,7 @@
           alt:       img.getAttribute?.('alt') || '',
           titleAttr: img.getAttribute?.('title') || '',
           linkText:  ctx.linkText  || '',
+          link:      ctx.link      || '',
           source:    'organic',
         });
       }
@@ -1085,6 +1113,7 @@
         alt:       '',
         titleAttr: (el.getAttribute('title') || '').slice(0, 220),
         linkText:  '',
+        link:      resolveDestinationHref(el.closest('a[href]')?.href),
         source:    'background_image',
       });
     });
@@ -1223,9 +1252,11 @@
     // Nearest outbound link's text — for shopping cards this is usually the
     // full product card label / merchant title.
     let linkText = '';
+    let link = '';
     const nearestLink = img.closest('a[href]');
     if (nearestLink) {
       linkText = (nearestLink.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 220);
+      link = resolveDestinationHref(nearestLink.href);
     }
 
     return {
@@ -1235,6 +1266,7 @@
       alt,
       titleAttr,
       linkText,
+      link,
     };
   }
 
@@ -1343,6 +1375,7 @@
         alt:       ctx.alt,
         titleAttr: ctx.titleAttr,
         linkText:  ctx.linkText,
+        link:      ctx.link || '',
       });
     }
     return out;

@@ -203,6 +203,35 @@ function isLowSignalKpMeta(kpMeta) {
   return noVol && noComp;
 }
 
+// ============ Keyword classification signals ============
+// Derived per keyword for the export columns:
+//   keyword_relevance — how tightly the keyword ties to THIS product (from the
+//                       classifyKeyword tier already stored on the row).
+//   buying_intent     — purchase-readiness (from intent/topic/funnel).
+//   faq               — is it a question / informational FAQ-style query.
+//   competition       — surfaced from KP competition (Low/Medium/High).
+const _QUESTION_RE = /^(is|can|does|do|did|are|was|were|what|how|why|which|where|when|who|whom|whose|will|would|should|could|may|might)\b/i;
+
+function deriveBuyingIntent(intent, topic, funnel) {
+  if (intent === 'transactional' || topic === 'price' || topic === 'availability') return 'high';
+  if (intent === 'commercial' || funnel === 'mid') return 'medium';
+  return 'low';
+}
+function isFaqKeyword(keyword) {
+  const s = String(keyword || '').trim();
+  if (!s) return false;
+  return _QUESTION_RE.test(s) || s.includes('?');
+}
+function deriveKeywordRelevance(tier) {
+  switch (tier) {
+    case 'brand_product':   return 'high';
+    case 'generic_product': return 'medium';
+    case 'anchor_only':     return 'low';
+    case 'brand_other':     return 'sibling-brand';
+    default:                return '';
+  }
+}
+
 export function simplifyForKP(name) {
   if (!name) return name;
   let s = String(name);
@@ -898,6 +927,41 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
     return { ok: false, error: seedErrors.join(' | ') || 'no keywords scraped', keywords: [] };
   }
   return { ok: true, keywords: accumulated, errors: seedErrors };
+}
+
+// ============ KP metrics lookup (Search volume & forecasts) ============
+// Backfills KP metrics (avg monthly searches / competition / bid range) for a
+// batch of keywords that did NOT originate from KP's Discover flow —
+// autosuggest, PAA, related-search, amazon. Drives KP's "Get search volume
+// and forecasts" tool + its Historical-metrics view; reuses the same table
+// scraper kp.js already uses for the ideas table.
+// Returns { ok, metrics: [{ kw, monthlySearches, competition, bidLow, bidHigh }] }.
+async function getKeywordPlannerMetrics(keywords, kpUrl, log) {
+  log = log || (() => {});
+  const list = Array.from(new Set(
+    (Array.isArray(keywords) ? keywords : [])
+      .map(k => String(k || '').trim())
+      .filter(Boolean)
+  ));
+  if (list.length === 0) return { ok: true, metrics: [] };
+  try {
+    const tabId = await Worker.navigate(kpUrl);
+    await sleep(randInt(2500, 4000));
+    const ready = await pingContentScript(tabId, 'KP_PING', 15, 1000);
+    if (!ready) return { ok: false, error: 'KP content script never responded', metrics: [] };
+    const resp = await chrome.tabs.sendMessage(tabId, {
+      type: 'KP_GET_METRICS',
+      keywords: list,
+      maxResults: list.length + 50,
+      hydrateTimeoutMs: KP_HYDRATE_TIMEOUT_MS,
+      tableTimeoutMs:   KP_TABLE_TIMEOUT_MS,
+    });
+    if (!resp?.ok) return { ok: false, error: resp?.error || 'unknown', metrics: [] };
+    const metrics = Array.isArray(resp.keywords) ? resp.keywords : [];
+    return { ok: true, metrics };
+  } catch (e) {
+    return { ok: false, error: e.message, metrics: [] };
+  }
 }
 
 // ============ CLIP image matching ============
@@ -1700,6 +1764,9 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
           alt:       item.alt       || '',
           titleAttr: item.titleAttr || '',
           linkText:  item.linkText  || '',
+          // Destination page URL for this result — used by the optional
+          // matched-link verification step.
+          link:      item.link      || '',
           // Carry the source-region tag so we can compute a
           // matched-only zone breakdown (separate from sourceBreakdown
           // which counts ALL captured thumbs).
@@ -1721,6 +1788,7 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
   let matchedEmbeddings  = [];
   let matchedSellers     = [];
   let matchedPrices      = [];
+  let matchedLinks       = [];
   let urlMatchCount = 0;
   let scored = 0;
   const tierBreakdown = { cache: 0, dhash: 0, clip: 0 };
@@ -1742,6 +1810,7 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
     matchedEmbeddings.push(emb);
     matchedSellers.push(ctx.seller);
     matchedPrices.push(ctx.price);
+    matchedLinks.push(ctx.link || '');
     // dHash veto path stashes a tier on the ctx so we pick it up here.
     if (quality === 'clean' && ctx._matchQuality) {
       quality = ctx._matchQuality;
@@ -2046,6 +2115,7 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
     matchedConfidences,
     matchedEmbeddings,
     matchedSellers,
+    matchedLinks,
     matchedPrices,
     matchedQualities,
     urlMatchCount,
@@ -2207,6 +2277,21 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
   const onRowAdded    = opts.onRowAdded    || (async () => {});
   const onProductDone = opts.onProductDone || (async () => {});
   const batchId       = opts.batchId       || String(Date.now());
+
+  // ----- Data-feature knobs (default ON) -----
+  // alwaysExpandAutosuggest: fetch autosuggest for EVERY keyword and SERP-cycle
+  //   each suggestion, regardless of whether the parent matched (removes the
+  //   image-guided expansion optimisation → more coverage, longer runs).
+  const alwaysExpandAutosuggest = opts.alwaysExpandAutosuggest !== false;
+  // backfillKpMetrics: after discovery, run ONE KP "Search volume" scrape per
+  //   product to fill kp_* columns on non-KP rows (autosuggest/PAA/related/amazon).
+  const backfillKpMetrics = opts.backfillKpMetrics !== false;
+  // maxAmazonKeywords: cap on keywords per product entering the Amazon Round.
+  const maxAmazonKeywords = Math.max(1, opts.maxAmazonKeywords || 30);
+  // verifyMatchedLinks: open each matched result's destination page and re-check
+  //   it carries our product image (bounded to matched links only).
+  const verifyMatchedLinks = opts.verifyMatchedLinks !== false;
+  const maxLinkVerify = Math.max(1, opts.maxLinkVerify || 5);
 
   if (!kpUrl) throw new Error('Keyword Planner URL is required (Settings tab).');
 
@@ -3235,6 +3320,10 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           intent,
           topic,
           funnel,
+          // Keyword-classification columns.
+          buyingIntent: deriveBuyingIntent(intent, topic, funnel),
+          isFaq: isFaqKeyword(keyword),
+          keywordRelevance: '', // set after tier is classified below
           frequency: 1,
           adRating: 0,
           // Internal-only: marker for KP rows with no volume + no competition.
@@ -3263,6 +3352,8 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         } else {
           row.tier = '';
         }
+        // Product-relevance label derived from the tier just assigned.
+        row.keywordRelevance = deriveKeywordRelevance(row.tier);
         // Brand-only rows are sibling-brand products. Their sellers (when
         // we eventually look at them) aren't carrying OUR product — they're
         // a different product from the same brand. Distinct from both
@@ -3500,6 +3591,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             row.matchedConfidences   = serpData.matchedConfidences;
             row.matchedSellers       = serpData.matchedSellers || [];
             row.matchedPrices        = serpData.matchedPrices  || [];
+            row.matchedLinks         = serpData.matchedLinks   || [];
             row.matchedQualities     = serpData.matchedQualities || [];
             row._matchedEmbeddings   = serpData.matchedEmbeddings || [];
             // image_count semantics: CONFIRMED matches only. A thumbnail
@@ -3610,6 +3702,12 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
               .sort((a, b) => b[1] - a[1])
               .map(([k, v]) => `${k}:${v}`)
               .join(' | ');
+            // Per-zone FOUND image counts (all thumbnails captured, matched or
+            // not) — e.g. "shopping_carousel:8 | popular_products:6 | organic:4".
+            row.foundZoneCounts = Object.entries(serpData.sourceBreakdown || {})
+              .sort((a, b) => b[1] - a[1])
+              .map(([k, v]) => `${k}:${v}`)
+              .join(' | ');
             const _tCap = serpData.thumbCount || 0;
             const _tMatched = serpData.count || 0;
             const _tUnv = serpData.unverifiedCount || 0;
@@ -3627,6 +3725,13 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             // selling something else on the same query — still useful as
             // competitive intel, but materially different data.
             row.seller_type = (row.imageCount || 0) > 0 ? 'product_sellers' : 'competitor_sellers';
+            // Dropy-as-seller check. dropy.in is our own store; surface whether
+            // it shows up as a seller on this keyword's Google (Shopping) SERP.
+            const _isDropy = (d) => typeof d === 'string' && /(^|[./@])dropy\b|dropy\.in/i.test(d);
+            row.dropyIsSeller = (row.matchedSellers || []).some(_isDropy);
+            row.dropyOnSerp   = row.dropyIsSeller ||
+              (row.sellers || []).some(s => _isDropy(s && s.domain)) ||
+              (row.matchedSellers || []).some(_isDropy);
             // Confidence stats so adRating has match_confidence_max to work with
             const confs = (row.matchedConfidences || []).filter(c => typeof c === 'number');
             row.match_confidence_max = confs.length ? Math.max(...confs) : 0;
@@ -3648,6 +3753,43 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                 tier: row.tier,
                 _brandOnly: !!row._brandOnly,
               });
+            }
+            // ----- Matched-link verification -----
+            // For each result whose thumbnail already matched our product,
+            // open its destination page, pull that page's product image, and
+            // re-run CLIP to confirm the landing page really carries our
+            // product. Bounded to matched links + maxLinkVerify (0-match
+            // keywords cost nothing). Uses fetch, not a tab navigation.
+            if (verifyMatchedLinks && productFps && productFps.length > 0) {
+              const uniqueLinks = Array.from(new Set(
+                (row.matchedLinks || []).filter(u => typeof u === 'string' && /^https?:\/\//i.test(u))
+              )).slice(0, maxLinkVerify);
+              if (uniqueLinks.length > 0) {
+                let checked = 0, verified = 0;
+                const verifiedLinks = [];
+                for (const link of uniqueLinks) {
+                  if (shouldStop()) break;
+                  try {
+                    const destImages = await getProductImages(link, () => {});
+                    if (!destImages || destImages.length === 0) { checked++; continue; }
+                    const results = await matchImages(productFps, destImages, clipThreshold);
+                    const isMatch = Array.isArray(results) && results.some(r => r && r.isMatch);
+                    checked++;
+                    if (isMatch) { verified++; verifiedLinks.push(link); }
+                  } catch { checked++; }
+                  await sleep(randInt(600, 1500));
+                }
+                row.linkCheckedCount  = checked;
+                row.linkVerifiedCount = verified;
+                row.linkVerified      = verified > 0;
+                row.verifiedLinks     = verifiedLinks;
+                onProgress?.({
+                  currentProduct: productName,
+                  currentSource: 'verify',
+                  currentAction: `${label} "${row.keyword}" — link verify: ${verified}/${checked} destination page(s) confirmed carry our product`,
+                  logKind: verified > 0 ? 'ok' : undefined,
+                });
+              }
             }
             // Image-guided expansion: only push related searches into the
             // queue if our product is actually visible on this SERP (or the
@@ -3759,7 +3901,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         const _captureKw = String(row.keyword || '').toLowerCase();
         const _captureHasBrand = !!productContext && (productContext.brandAliases || [])
           .some(a => a && a.length > 2 && _captureKw.includes(a));
-        if (!row._brandOnly && !_captureHasBrand && (row.imageCount || 0) === 0) {
+        if (!alwaysExpandAutosuggest && !row._brandOnly && !_captureHasBrand && (row.imageCount || 0) === 0) {
           onProgress?.({
             currentProduct: productName,
             currentSource: 'autosuggest',
@@ -3845,7 +3987,8 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         const kwLowerFinal = String(row.keyword || '').toLowerCase();
         const hasBrandFinal = !!productContext && (productContext.brandAliases || []).some(a =>
           a && a.length > 2 && kwLowerFinal.includes(a));
-        const expansionEligible = !!row._brandOnly
+        const expansionEligible = alwaysExpandAutosuggest
+          || !!row._brandOnly
           || hasBrandFinal
           || (row.imageCount || 0) > 0
           || row._expansionEligible === true;
@@ -4312,7 +4455,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       //   4. Record top competitor listings.
       //   5. For each Amazon-suggested keyword that passes the relevance
       //      gate, run the standard per-row cycle (Google SERP + match).
-      const MAX_AMAZON_TOP_KEYWORDS = 10;
+      const MAX_AMAZON_TOP_KEYWORDS = maxAmazonKeywords;
       const AMAZON_PER_SUGGEST_CAP   = 6;
       if (!shouldStop() && report.size < productCap) {
         // Amazon search list: product name first, then every KP keyword that
@@ -4356,6 +4499,11 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         // 2) All KP rows that survived the relevance filter.
         for (const r of productRows) {
           if (r.source === 'kp_idea' || r.source === 'kp_reexpand') pushParent(r);
+        }
+        // Autosuggest rows also enter the Amazon Round (after KP ideas, which
+        // keep priority within the cap) so long-tail queries get Amazon data.
+        for (const r of productRows) {
+          if (r.source === 'autosuggest') pushParent(r);
         }
         // Cap: KP-driven runs return ~20-30 ideas; limit to keep Amazon Round
         // bounded to a few minutes.
@@ -4657,6 +4805,77 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             currentAction: `Amazon Round complete: ${amazonStored} new keyword(s) added, ${amazonRejected} filtered`,
             logKind: 'ok',
           });
+        }
+      }
+
+      // ----- KP metrics backfill (R4) -----
+      // Autosuggest / PAA / related-search / amazon rows never went through KP,
+      // so their kp_* columns are empty. Collect every metric-less row and run
+      // ONE KP "Search volume and forecasts" scrape to backfill, then re-score.
+      if (backfillKpMetrics && !shouldStop() && kpUrl && report.size < productCap) {
+        const needMetrics = [];
+        const seenBf = new Set();
+        for (const row of productRows) {
+          if (String(row.kpMonthlySearches || '').trim() ||
+              String(row.kpCompetition     || '').trim()) continue;
+          if (row._brandOnly) continue;
+          const k = String(row.keyword || '').toLowerCase().trim();
+          if (!k || seenBf.has(k)) continue;
+          seenBf.add(k);
+          needMetrics.push(row);
+        }
+        const BF_CAP = 300;
+        if (needMetrics.length > 0) {
+          const capped = needMetrics.slice(0, BF_CAP);
+          if (needMetrics.length > BF_CAP) {
+            onProgress?.({ currentProduct: productName, currentSource: 'kp metrics',
+              currentAction: `KP metrics backfill: ${needMetrics.length} keywords need metrics — capping to ${BF_CAP} this product`, logKind: 'err' });
+          }
+          onProgress?.({ currentProduct: productName, currentSource: 'kp metrics',
+            currentAction: `KP metrics backfill: looking up ${capped.length} metric-less keyword(s) via KP "Search volume and forecasts"`, logKind: 'ok' });
+          const metricsResp = await getKeywordPlannerMetrics(
+            capped.map(r => r.keyword), kpUrl,
+            (m) => onProgress?.({ currentProduct: productName, currentSource: 'kp metrics', currentAction: m }));
+          if (metricsResp.ok && metricsResp.metrics.length > 0) {
+            const byKw = new Map();
+            for (const m of metricsResp.metrics) {
+              const kw = typeof m === 'string' ? m : m?.kw;
+              if (kw) byKw.set(String(kw).toLowerCase().trim(), m);
+            }
+            let filled = 0;
+            for (const row of capped) {
+              const m = byKw.get(String(row.keyword || '').toLowerCase().trim());
+              if (!m || typeof m === 'string') continue;
+              let changed = false;
+              if (m.monthlySearches && !row.kpMonthlySearches) { row.kpMonthlySearches = m.monthlySearches; changed = true; }
+              if (m.competition     && !row.kpCompetition)     { row.kpCompetition     = m.competition;     changed = true; }
+              if (m.bidLow          && !row.kpBidLow)          { row.kpBidLow          = m.bidLow;          changed = true; }
+              if (m.bidHigh         && !row.kpBidHigh)         { row.kpBidHigh         = m.bidHigh;         changed = true; }
+              if (!changed) continue;
+              filled++;
+              if (typeof opts.computeAdRating === 'function') {
+                row.adRating = opts.computeAdRating({
+                  frequency: row.frequency || 1,
+                  image_count: row.imageCount || 0,
+                  total_thumbs: row.totalThumbs || 0,
+                  match_confidence_max: row.match_confidence_max || 0,
+                  totalSellers: row.totalSellers || 0,
+                  source: row.source,
+                  funnel: row.funnel,
+                  kp_monthly_searches: row.kpMonthlySearches,
+                  seller_type: row.seller_type,
+                  tier: row.tier,
+                  _brandOnly: !!row._brandOnly,
+                });
+              }
+              await onRowAdded(row);
+            }
+            onProgress?.({ currentProduct: productName, currentSource: 'kp metrics',
+              currentAction: `KP metrics backfill: filled ${filled}/${capped.length} keyword(s) with KP volume/competition/bids`, logKind: 'ok' });
+          } else {
+            onProgress?.({ currentProduct: productName, currentSource: 'kp metrics',
+              currentAction: `KP metrics backfill: no metrics returned${metricsResp.error ? ` (${metricsResp.error})` : ''}`, logKind: 'err' });
+          }
         }
       }
 

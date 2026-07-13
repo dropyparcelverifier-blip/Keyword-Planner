@@ -154,6 +154,11 @@ function rowsForExport(report) {
       intent: r.intent || '',
       topic: r.topic || '',
       funnel: r.funnel || '',
+      // Keyword-classification columns.
+      keyword_relevance: r.keywordRelevance || '',   // high / medium / low / sibling-brand
+      buying_intent:     r.buyingIntent     || '',   // high / medium / low
+      faq:               r.isFaq ? 'yes' : '',       // question / FAQ-style query
+      competition:       r.kpCompetition    || '',   // KP competition: Low / Medium / High
       // --- Image-match signal ---
       image_count: r.imageCount,
       // total_thumbs is the per-keyword denominator for visibility_pct: every
@@ -168,13 +173,22 @@ function rowsForExport(report) {
       // Which SERP zones the matched thumbnails came from
       // ("knowledge_panel:5 | organic:3") + total-found vs matched audit.
       match_sources:    r.matchSources    || '',
+      // Per-zone FOUND image counts (all thumbnails, matched or not) across
+      // popular products / sponsored-shopping / knowledge panel / organic etc.
+      serp_zone_counts: r.foundZoneCounts || '',
       thumbs_captured:  r.thumbsCaptured  || '',
+      // Matched-link verification: matched destination pages opened + confirmed.
+      link_checked_count:  r.linkCheckedCount  || 0,
+      link_verified_count: r.linkVerifiedCount || 0,
       match_confidence_max: typeof r.match_confidence_max === 'number' ? r.match_confidence_max : max,
       match_confidence_avg: typeof r.match_confidence_avg === 'number' ? r.match_confidence_avg : avg,
       match_confidence_min: typeof r.match_confidence_min === 'number' ? r.match_confidence_min : min,
       // --- Seller signal (per keyword's SERP) ---
       total_sellers: r.totalSellers || 0,
       seller_type:   r.seller_type || '',
+      // dropy.in (our own store) as a seller on this keyword's Shopping/SERP.
+      dropy_is_seller: r.dropyIsSeller ? 'yes' : '',
+      dropy_on_serp:   r.dropyOnSerp   ? 'yes' : '',
       sellers_on_serp: safeCell(allSellersList),
       seller_titles:   safeCell(sellerTitlesList),
       ads_on_serp:   r.adsOnSerp    || 0,
@@ -209,6 +223,9 @@ function rowsForExport(report) {
       matched_qualities:  safeCell((r.matchedQualities || []).join(' | ')),
       ambiguous_match_count: r.ambiguousMatchCount || 0,
       pack_variant_count:    r.packVariantCount     || 0,
+      // Destination links for matched results + which of them verified.
+      matched_links:  safeCell((r.matchedLinks  || []).filter(Boolean).join(' | ')),
+      verified_links: safeCell((r.verifiedLinks || []).filter(Boolean).join(' | ')),
       product_url:   r.productUrl,
       product_image: r.productImage,
     };
@@ -243,9 +260,49 @@ function fileSlug(sku, productName) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// Export-shaped flat rows (product columns on every row) — reusable by other
+// callers that need the full row set for a report.
+export function buildExportRows(report) {
+  return rowsForExport(report);
+}
+
+// Product-level fields — constant across a product's rows, so they're written
+// ONCE in a header block per file instead of repeated on every keyword row.
+const PRODUCT_FIELD_LABELS = [
+  ['batch_id',      r => r.batchId],
+  ['sku',           r => r.sku || ''],
+  ['product_name',  r => r.productName || ''],
+  ['priority',      r => r.priority],
+  ['product_url',   r => r.productUrl || ''],
+  ['product_image', r => r.productImage || ''],
+];
+const _PRODUCT_KEYS = new Set(PRODUCT_FIELD_LABELS.map(([label]) => label));
+function productInfoAOA(rawRows) {
+  const r0 = rawRows[0] || {};
+  return PRODUCT_FIELD_LABELS.map(([label, get]) => [label, get(r0)]);
+}
+function keywordRowsForExport(rawRows) {
+  return rowsForExport(rawRows).map(full => {
+    const out = {};
+    for (const k in full) if (!_PRODUCT_KEYS.has(k)) out[k] = full[k];
+    return out;
+  });
+}
+// One worksheet per product: product-info header block, blank spacer, then the
+// keyword table (product columns stripped). Product context appears once.
+function productWorksheet(rawRows) {
+  const info = productInfoAOA(rawRows);
+  const ws = XLSX.utils.aoa_to_sheet(info);
+  const kwRows = keywordRowsForExport(rawRows);
+  if (kwRows.length > 0) {
+    XLSX.utils.sheet_add_json(ws, kwRows, { origin: `A${info.length + 2}` });
+  }
+  return ws;
+}
+
 // Builds a CSV data: URL with UTF-8 BOM so Excel reads non-ASCII correctly.
 function csvDataUrl(rows) {
-  const ws = XLSX.utils.json_to_sheet(rowsForExport(rows));
+  const ws = productWorksheet(rows);
   const csv = XLSX.utils.sheet_to_csv(ws);
   const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
   const body = new TextEncoder().encode(csv);
@@ -256,7 +313,7 @@ function csvDataUrl(rows) {
 }
 
 function xlsxDataUrl(rows) {
-  const ws = XLSX.utils.json_to_sheet(rowsForExport(rows));
+  const ws = productWorksheet(rows);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Discovery');
   const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
@@ -412,6 +469,10 @@ export async function pushToAdBrain(report) {
         intent: r.intent || null,
         topic:  r.topic  || null,
         funnel: r.funnel || null,
+        keyword_relevance: r.keywordRelevance || null,
+        buying_intent:     r.buyingIntent     || null,
+        faq:               !!r.isFaq,
+        competition:       r.kpCompetition    || null,
         image_count: r.imageCount,
         total_thumbs: r.totalThumbs || r.total_thumbs || 0,
         visibility_pct: (() => {
@@ -427,6 +488,11 @@ export async function pushToAdBrain(report) {
         match_confidence_min: typeof r.match_confidence_min === 'number' ? r.match_confidence_min : min,
         total_sellers: r.totalSellers || 0,
         seller_type:   r.seller_type || null,
+        dropy_is_seller: !!r.dropyIsSeller,
+        dropy_on_serp:   !!r.dropyOnSerp,
+        serp_zone_counts: r.foundZoneCounts || null,
+        link_checked_count:  r.linkCheckedCount  || 0,
+        link_verified_count: r.linkVerifiedCount || 0,
         ads_on_serp:   r.adsOnSerp    || 0,
         sellers_on_serp: allSellersList,
         seller_titles:   sellerTitlesList,
@@ -443,6 +509,8 @@ export async function pushToAdBrain(report) {
         matched_qualities:   (r.matchedQualities || []).join(' | ') || null,
         ambiguous_match_count: r.ambiguousMatchCount || 0,
         pack_variant_count:    r.packVariantCount    || 0,
+        matched_links:  (r.matchedLinks  || []).filter(Boolean).join(' | ') || null,
+        verified_links: (r.verifiedLinks || []).filter(Boolean).join(' | ') || null,
         autosuggest_count: r.autosuggestCount,
         autosuggestions: (r.autosuggestions || []).join(' | '),
         amazon_suggest_count: r.amazon_suggest_count || 0,
