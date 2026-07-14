@@ -562,13 +562,29 @@ function stopDashPolling() {
 
 async function refreshDashboard() {
   try {
-    const [summary, workers, activity, failed, timeline] = await Promise.all([
+    const [summary, workers, roster, activity, failed, timeline] = await Promise.all([
       api.jobsSummary(),
       api.jobsWorkerStats(),
+      api.workersList().catch(() => ({ workers: [] })),
       api.activityGet(state.activeBatch, 120),
       api.failedJobs(state.activeBatch).catch(() => ({ rows: [] })),
       api.keywordsTimeline(state.activeBatch).catch(() => ({ buckets: [] })),
     ]);
+    // Merge fleet: workers with jobs history (workers.workers) + workers
+    // that only heartbeat but haven't claimed yet (roster.workers). The
+    // roster ensures armed-idle workers are visible in the fleet — they
+    // used to show as '0 online' because the jobs-derived stats can't
+    // see workers who've never touched a job.
+    const jobsWorkerIds = new Set((workers.workers || []).map(w => w.worker_id));
+    const idleFromRoster = (roster.workers || []).filter(w => !jobsWorkerIds.has(w.worker_id))
+      .map(w => ({
+        worker_id: w.worker_id,
+        batch_id: null,
+        total_touched: 0, done_count: 0, failed_count: 0, in_flight: 0,
+        done: 0, failed: 0,
+        last_heartbeat: w.last_seen,
+      }));
+    workers.workers = [...(workers.workers || []), ...idleFromRoster];
     state.batches = summary.batches || [];
     // Detect newly-connected workers (first time we see this worker_id)
     // and pop a friendly toast so the manager knows their install worked.

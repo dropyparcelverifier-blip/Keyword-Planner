@@ -677,6 +677,39 @@ async function run() {
   const mfV = await fetchNoAuth('/worker/manifest.json');
   assert(mfV.body.includes('"version": "1.1.0"'),              '20j.13 manifest version bumped so Chrome auto-reloads');
 
+  // ===== 20k. RELIABILITY FIXES =====
+  // Direct call replaces the SW-to-SW sendMessage that intermittently
+  // failed with 'Receiving end does not exist'. The refactor extracts
+  // the auto-connect body to _doAutoConnectWorker and workerAutoPollTick
+  // now calls it directly instead of sending a chrome.runtime.sendMessage.
+  const bgSrcK = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
+  assert(bgSrcK.includes('async function _doAutoConnectWorker'), '20k.1 _doAutoConnectWorker extracted');
+  // workerAutoPollTick should now await the direct call, not sendMessage.
+  const pollTickBody = bgSrcK.substring(bgSrcK.indexOf('async function workerAutoPollTick'));
+  const pollTickEnd = pollTickBody.indexOf('\n}\n');
+  const pollTickFn = pollTickBody.substring(0, pollTickEnd);
+  assert(pollTickFn.includes('await _doAutoConnectWorker'),
+    '20k.2 workerAutoPollTick calls _doAutoConnectWorker directly (no SW self-message)');
+  assert(!pollTickFn.includes(`chrome.runtime.sendMessage({`),
+    '20k.3 workerAutoPollTick no longer uses chrome.runtime.sendMessage to itself');
+
+  // Worker heartbeat endpoint
+  const hbNoId = await req('POST', '/api/workers/heartbeat', {});
+  assertEq(hbNoId.status, 400, '20k.4 heartbeat requires workerId');
+  const hbOK = await req('POST', '/api/workers/heartbeat', { workerId: 'PC-ROSTER1' });
+  assertEq(hbOK.status, 200, '20k.5 heartbeat 200');
+  const rosterList = await req('GET', '/api/workers/list');
+  assertEq(rosterList.status, 200, '20k.6 workers/list 200');
+  assert(rosterList.data.workers.some(w => w.worker_id === 'PC-ROSTER1'), '20k.7 heartbeat upserts worker into roster');
+
+  // Worker client sends heartbeat every auto-poll
+  assert(bgSrcK.includes('sendWorkerHeartbeat(state.workerId)'), '20k.8 background.js pings heartbeat every auto-poll');
+  const djSrc = readFileSync(resolve(REPO, 'modules/discovery-jobs.js'), 'utf-8');
+  assert(djSrc.includes('export async function sendWorkerHeartbeat'), '20k.9 sendWorkerHeartbeat exported from client');
+
+  // Dashboard merges idle-from-roster into worker fleet
+  assert(appJs.body.includes('idleFromRoster'), '20k.10 dashboard merges roster into fleet render');
+
   // ===== 20d. INSTALLER AUTO-ARM =====
   // The installer must bake the current token + KP URL into the PS script
   // and write a worker-config.json into the worker's extension dir so the

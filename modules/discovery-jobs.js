@@ -253,6 +253,17 @@ export function workerConfigToRunOpts(cfg) {
 }
 
 // MANAGER UI: live keyword-output stats per SKU for a batch.
+// Lightweight worker roster ping. Called by the worker's 30s auto-poll
+// alarm regardless of claim outcome so the manager can distinguish
+// 'armed and alive but no work' from 'gone'. Silent on error — the
+// manager will just miss a heartbeat, not the end of the world.
+export async function sendWorkerHeartbeat(workerId) {
+  if (!workerId) return { ok: false };
+  try {
+    return await _post('/api/workers/heartbeat', { workerId });
+  } catch { return { ok: false }; }
+}
+
 export async function fetchBatchKeywordStats(batchId, limit = 50) {
   if (!batchId) return null;
   const [jobsR, kwR] = await Promise.all([

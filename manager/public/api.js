@@ -43,6 +43,7 @@ export const api = {
   jobsSummary:       ()                => _fetch('/api/jobs/summary'),
   jobsPerProduct:    (batchId)         => _fetch(`/api/jobs/per-product?batchId=${encodeURIComponent(batchId)}`),
   jobsWorkerStats:   ()                => _fetch('/api/jobs/worker-stats'),
+  workersList:       ()                => _fetch('/api/workers/list'),
   jobsActiveWorkers: (batchId)         => _fetch(`/api/jobs/active-workers?batchId=${encodeURIComponent(batchId)}`),
   jobsActiveBatch:   ()                => _fetch('/api/jobs/active-batch'),
   jobsRequeue:       (jobId)           => _fetch('/api/jobs/requeue', { method: 'POST', body: { jobId } }),
