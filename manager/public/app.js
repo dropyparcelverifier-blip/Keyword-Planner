@@ -279,7 +279,7 @@ async function refreshDashboard() {
 function populateBatchSelects() {
   // Populate dashboard + config + downloads selects with current batches.
   const opts = state.batches.map(b => `<option value="${esc(b.batch_id)}">${esc(b.batch_id)} — ${b.total} SKUs</option>`).join('');
-  for (const id of ['dashBatchSelect', 'pinBatchSelect', 'downloadBatchSelect', 'anBatchSelect']) {
+  for (const id of ['dashBatchSelect', 'pinBatchSelect', 'downloadBatchSelect', 'anBatchSelect', 'deleteBatchSelect']) {
     const el = $(id);
     if (!el) continue;
     const cur = el.value;
@@ -450,6 +450,31 @@ $('pinBatchBtn').addEventListener('click', async () => {
 $('unpinBatchBtn').addEventListener('click', async () => {
   try { await api.activeBatchPin(null); setResult($('pinBatchResult'), '✓ Unpinned. Workers pick newest pending batch.', 'ok'); state.activeBatchPinned = null; $('pinBatchSelect').value = ''; }
   catch (e) { setResult($('pinBatchResult'), `Unpin failed: ${e.message}`, 'err'); }
+});
+$('deleteBatchBtn').addEventListener('click', async () => {
+  const b = $('deleteBatchSelect').value;
+  if (!b) { setResult($('deleteBatchResult'), 'Pick a batch to delete.', 'warn'); return; }
+  if (!confirm(`Delete batch "${b}"? This wipes every job, keyword row, and activity entry for it. Cannot be undone.`)) return;
+  try {
+    const r = await api.deleteBatch(b);
+    setResult($('deleteBatchResult'), `✓ Deleted batch "${b}" — ${r.deletedJobs} job(s) + ${r.deletedKeywords} keyword(s) + ${r.deletedActivity} activity row(s).`, 'ok');
+    await loadConfigForm();
+  } catch (e) { setResult($('deleteBatchResult'), `Delete failed: ${e.message}`, 'err'); }
+});
+// Reset-everything guard: button only enables when user types RESET exactly.
+$('resetConfirmInput').addEventListener('input', () => {
+  $('resetAllBtn').disabled = $('resetConfirmInput').value !== 'RESET';
+});
+$('resetAllBtn').addEventListener('click', async () => {
+  if ($('resetConfirmInput').value !== 'RESET') return;
+  if (!confirm('LAST WARNING — this wipes every batch, every keyword row, every activity entry, every command. Only worker config (KP URL, token, pacing) is preserved. Continue?')) return;
+  try {
+    const r = await api.resetAll();
+    setResult($('resetAllResult'), `✓ Reset complete — deleted ${r.deletedJobs} jobs, ${r.deletedKeywords} keywords, ${r.deletedActivity} activity rows, ${r.deletedCommands} commands.`, 'ok');
+    $('resetConfirmInput').value = '';
+    $('resetAllBtn').disabled = true;
+    await loadConfigForm();
+  } catch (e) { setResult($('resetAllResult'), `Reset failed: ${e.message}`, 'err'); }
 });
 $('cleanupBtn').addEventListener('click', async () => {
   const logDays = parseInt($('cleanupLogDays').value, 10) || 0;

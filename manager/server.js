@@ -189,6 +189,16 @@ const Q = {
   requeue: db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, failed_reason=NULL WHERE id=?`),
   cleanupActivity: db.prepare(`DELETE FROM activity_log WHERE ts < ?`),
   cleanupCommands: db.prepare(`DELETE FROM worker_commands WHERE acknowledged_at IS NOT NULL AND acknowledged_at < ?`),
+  // Per-batch delete: wipes jobs + keywords + activity for one batch_id.
+  deleteBatchJobs:     db.prepare(`DELETE FROM jobs         WHERE batch_id = ?`),
+  deleteBatchKeywords: db.prepare(`DELETE FROM keywords     WHERE batch_id = ?`),
+  deleteBatchActivity: db.prepare(`DELETE FROM activity_log WHERE batch_id = ?`),
+  // Full reset: wipes ALL rows from operational tables. Keeps worker_config
+  // so KP URL / manager token / pinned batch survive the reset.
+  wipeJobs:     db.prepare(`DELETE FROM jobs`),
+  wipeKeywords: db.prepare(`DELETE FROM keywords`),
+  wipeActivity: db.prepare(`DELETE FROM activity_log`),
+  wipeCommands: db.prepare(`DELETE FROM worker_commands`),
   newestPendingBatch: db.prepare(`SELECT batch_id FROM jobs WHERE status='pending' GROUP BY batch_id ORDER BY MAX(created_at) DESC LIMIT 1`),
   batchHasPending: db.prepare(`SELECT 1 FROM jobs WHERE batch_id=? AND status='pending' LIMIT 1`),
   existsActiveUrl: db.prepare(`SELECT 1 FROM jobs WHERE product_url=? AND batch_id<>? AND status IN ('pending','claimed','done') LIMIT 1`),
@@ -561,6 +571,42 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true });
     }
 
+    // ----- Destructive: delete a batch (jobs + keywords + activity) -----
+    if (m === 'POST' && p === '/api/jobs/delete-batch') {
+      const b = await readJson(req);
+      const batchId = String(b.batchId || '').trim();
+      if (!batchId) return send(res, 400, { ok: false, error: 'batchId required' });
+      let j = 0, k = 0, a = 0;
+      db.exec('BEGIN');
+      try {
+        j = Q.deleteBatchJobs.run(batchId).changes;
+        k = Q.deleteBatchKeywords.run(batchId).changes;
+        a = Q.deleteBatchActivity.run(batchId).changes;
+        // If the deleted batch was pinned, unpin so workers stop trying to claim it.
+        const cfgRow = Q.getConfig.get();
+        if (cfgRow?.active_batch_id === batchId) Q.setActiveBatch.run(null);
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      return send(res, 200, { ok: true, batchId, deletedJobs: j, deletedKeywords: k, deletedActivity: a });
+    }
+    // ----- Destructive: nuke everything except worker_config -----
+    if (m === 'POST' && p === '/api/reset-all') {
+      const b = await readJson(req);
+      // Belt-and-suspenders confirm: clients must send {confirm:'RESET'}.
+      if (b.confirm !== 'RESET') return send(res, 400, { ok: false, error: "safety: send {confirm:'RESET'} to proceed" });
+      let j = 0, k = 0, a = 0, c = 0;
+      db.exec('BEGIN');
+      try {
+        j = Q.wipeJobs.run().changes;
+        k = Q.wipeKeywords.run().changes;
+        a = Q.wipeActivity.run().changes;
+        c = Q.wipeCommands.run().changes;
+        // Also unpin any pinned batch — it no longer exists.
+        Q.setActiveBatch.run(null);
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      return send(res, 200, { ok: true, deletedJobs: j, deletedKeywords: k, deletedActivity: a, deletedCommands: c });
+    }
     if (m === 'POST' && p === '/api/cleanup') {
       const b = await readJson(req);
       const a = Q.cleanupActivity.run(now() - (b.logDays ?? 7) * 86400000);

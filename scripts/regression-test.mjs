@@ -566,6 +566,57 @@ async function run() {
   // The install one-liner should show up in the workers tab.
   assert(idx.body.includes('installOneLiner'), '20c.20 install one-liner element in index.html');
 
+  // ===== 20e. DELETE-BATCH + RESET =====
+  // Confirm batch-A is present with jobs+keywords+activity (from earlier tests)
+  const preSum = await req('GET', '/api/jobs/summary');
+  const hasA = preSum.data.batches.some(b => b.batch_id === BATCH_A);
+  assert(hasA, '20e.1 BATCH_A present before delete');
+
+  // Refuse delete without batchId
+  const noArg = await req('POST', '/api/jobs/delete-batch', {});
+  assertEq(noArg.status, 400, '20e.2 delete-batch without batchId = 400');
+
+  // Delete BATCH_A — should remove jobs + keywords + activity
+  const del = await req('POST', '/api/jobs/delete-batch', { batchId: BATCH_A });
+  assertEq(del.status, 200, '20e.3 delete-batch returns 200');
+  assert(del.data.deletedJobs > 0, '20e.4 delete removed jobs');
+  const kwAfter = await req('GET', `/api/keywords?batchId=${BATCH_A}`);
+  assertEq(kwAfter.data.total, 0, '20e.5 keywords empty after batch delete');
+  const postSum = await req('GET', '/api/jobs/summary');
+  assert(!postSum.data.batches.some(b => b.batch_id === BATCH_A), '20e.6 batch gone from summary');
+
+  // Worker config must survive batch delete
+  const cfgAfter = await req('GET', '/api/config');
+  assert(cfgAfter.data.ok === true, '20e.7 worker_config still readable');
+
+  // Reset-all requires the exact confirm token
+  const noConfirm = await req('POST', '/api/reset-all', {});
+  assertEq(noConfirm.status, 400, '20e.8 reset-all without confirm = 400');
+  const wrongConfirm = await req('POST', '/api/reset-all', { confirm: 'yes' });
+  assertEq(wrongConfirm.status, 400, '20e.9 reset-all with wrong confirm = 400');
+
+  // Upload something, push a keyword + activity, then reset — everything gone
+  await req('POST', '/api/jobs/upload', {
+    batchId: 'reset-test-batch',
+    products: [{ url: 'https://dropy.in/products/reset-test' }],
+  });
+  await req('POST', '/api/keywords', { rows: [{ batch_id: 'reset-test-batch', keyword: 'x', product_url: 'https://dropy.in/products/reset-test' }] });
+  await req('POST', '/api/activity', { batchId: 'reset-test-batch', events: [{ message: 'test event' }] });
+
+  const reset = await req('POST', '/api/reset-all', { confirm: 'RESET' });
+  assertEq(reset.status, 200, '20e.10 reset-all with correct confirm succeeds');
+  assert(reset.data.deletedJobs > 0, '20e.11 reset deleted jobs');
+
+  const sumAfter = await req('GET', '/api/jobs/summary');
+  assertEq(sumAfter.data.batches.length, 0, '20e.12 summary empty after reset');
+
+  const actAfter = await req('GET', '/api/activity?limit=100');
+  assertEq(actAfter.data.events.length, 0, '20e.13 activity empty after reset');
+
+  // Worker config MUST survive the reset (KP URL, token, etc.)
+  const cfgSurvive = await req('GET', '/api/config');
+  assertEq(cfgSurvive.status, 200, '20e.14 worker_config survives reset-all');
+
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
   const [s1, w1, a1] = await Promise.all([
