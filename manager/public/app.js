@@ -108,21 +108,70 @@ $('uploadFile').addEventListener('change', async (e) => {
   try { wb = XLSX.read(buf, { type: 'array' }); }
   catch (err) { setResult($('uploadResult'), `Failed to parse: ${err.message}`, 'err'); return; }
   const sheet = wb.Sheets[wb.SheetNames[0]];
-  const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
-  const products = rows.map(r => ({
-    url:          String(r.url || r.product_url || r.URL || r.Url || r.link || '').trim(),
-    sku:          r.sku != null ? String(r.sku).trim() : null,
-    product_name: r.product_name || r.name || r.title || r.productName || null,
-    priority:     Number.isFinite(Number(r.priority)) ? Number(r.priority) : 100,
-    handles:      r.handles || null,
-    brands:       r.brands || null,
-  })).filter(p => p.url);
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+  // Case-insensitive, whitespace-tolerant column matching — ported from
+  // the extension's popup.js so any sheet that worked in the extension
+  // also works here. Users write "Product URL" / "Product Name" /
+  // "SKU Code" / etc.; we normalise column headers before matching.
+  const products = [];
+  let invalidUrl = 0, missingUrl = 0, sawSkuColumn = false;
+  for (const row of rows) {
+    let urlVal = '', nameVal = '', priVal = '', skuVal = '', handlesVal = '', brandVal = '';
+    for (const k of Object.keys(row)) {
+      const kl = String(k).toLowerCase().trim();
+      const v = row[k] == null ? '' : String(row[k]).trim();
+      if (!urlVal && (kl === 'product url' || kl === 'producturl' || kl === 'url' || kl === 'product_url' || kl === 'link')) urlVal = v;
+      if (!nameVal && (kl === 'product name' || kl === 'productname' || kl === 'product_name' || kl === 'name' || kl === 'title')) nameVal = v;
+      if (!priVal && (kl === 'priority' || kl === 'pri' || kl === 'priroty' || kl === 'prioty' || kl === 'priorty' || kl === 'rank' || kl === 'order')) priVal = v;
+      if (!brandVal && (kl === 'brand' || kl === 'brands' || kl === 'brand name' || kl === 'brandname' || kl === 'manufacturer' || kl === 'maker')) brandVal = v;
+      if (!skuVal) {
+        const isSkuCol =
+          kl === 'sku' || kl === 'product sku' || kl === 'productsku' || kl === 'item sku' ||
+          kl === 'item number' || kl === 'itemnumber' || kl === 'item id' || kl === 'itemid' ||
+          kl === 'product code' || kl === 'productcode' || kl === 'product id' || kl === 'productid' ||
+          kl === 'product number' || kl === 'productnumber' || kl === 'item code' || kl === 'itemcode' ||
+          /\bsku\b/.test(kl) || kl.endsWith('_sku') || kl.endsWith('-sku');
+        if (isSkuCol) { skuVal = v; if (v) sawSkuColumn = true; }
+      }
+      if (!handlesVal && (kl === 'handles' || kl === 'handle' || kl === 'extra seeds' || kl === 'seeds' || kl === 'extra keywords' || kl === 'keywords')) handlesVal = v;
+    }
+    if (!urlVal) { missingUrl++; continue; }
+    let isValid = false;
+    try { const u = new URL(urlVal); isValid = u.protocol === 'http:' || u.protocol === 'https:'; } catch {}
+    if (!isValid) { invalidUrl++; continue; }
+    const priorityNum = parseInt(priVal, 10);
+    products.push({
+      url:          urlVal,
+      sku:          skuVal || null,
+      product_name: nameVal || null,
+      priority:     (priorityNum === 1 || priorityNum === 2 || priorityNum === 3) ? priorityNum : 100,
+      handles:      handlesVal || null,
+      brands:       brandVal || null,
+    });
+  }
   state.parsedProducts = products;
+
   const dupes = products.length !== new Set(products.map(p => p.url)).size;
+  // Diagnostic banner — tells user WHY rows were rejected instead of a
+  // silent "0 parsed" that leaves them guessing.
+  const notes = [];
+  if (invalidUrl) notes.push(`${invalidUrl} row(s) rejected — value wasn't a valid http(s) URL`);
+  if (missingUrl) notes.push(`${missingUrl} row(s) had no URL column value`);
+  if (!sawSkuColumn && products.length > 0) notes.push('⚠ no SKU column detected — CSV export will use product-name slugs');
+  // If NO products AND we saw rows, show the column headers we DID find
+  // so the user can see exactly what got imported vs what we look for.
+  let debugHeaders = '';
+  if (products.length === 0 && rows.length > 0) {
+    const headers = Object.keys(rows[0] || {});
+    debugHeaders = `<br><small style="color:var(--text-3);">First-row columns seen in file: <code>${headers.map(h => esc(h)).join(', ') || '(none)'}</code>. Rename your URL column to <code>Product URL</code> or <code>url</code>.</small>`;
+  }
   $('uploadPreview').innerHTML = `
     <div class="banner ${products.length > 0 ? 'ok' : 'warn'}" style="margin-top:10px;">
-      Parsed <strong>${products.length}</strong> product URLs from ${file.name}
+      Parsed <strong>${products.length}</strong> product URLs from ${esc(file.name)}
+      ${notes.length ? `<br><small>${notes.map(esc).join(' • ')}</small>` : ''}
       ${dupes ? `<br><small>⚠ Duplicate URLs in file — manager will keep the last occurrence.</small>` : ''}
+      ${debugHeaders}
     </div>
     <div style="max-height: 180px; overflow: auto; margin-top: 8px;">
       <table class="tbl">
