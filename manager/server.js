@@ -303,6 +303,16 @@ $mgr    = '${managerBase}'
 $root   = Join-Path $env:LOCALAPPDATA 'AdBrainWorker'
 $extDir = Join-Path $root 'extension'
 $prof   = Join-Path $root 'profile'
+$isReinstall = Test-Path (Join-Path $extDir 'manifest.json')
+
+# Wipe the extension dir before re-downloading. Guarantees we don't
+# leave orphaned files from an older WORKER_FILES set (renamed modules,
+# etc.) that would confuse Chrome on reload. Profile dir is kept — that
+# holds Chrome's login state, cookies, extension chrome.storage.
+if ($isReinstall) {
+  Write-Host '[AdBrain] Existing install detected — wiping old extension files...' -ForegroundColor Yellow
+  Remove-Item -Path $extDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 New-Item -ItemType Directory -Force -Path $extDir | Out-Null
 New-Item -ItemType Directory -Force -Path $prof   | Out-Null
 
@@ -374,30 +384,122 @@ $lnk.Description = 'AdBrain Discovery worker'
 $lnk.Save()
 Write-Host "[AdBrain] Startup shortcut placed: $lnkPath" -ForegroundColor Green
 
-# First launch: point Chrome at chrome://extensions so the user can do
-# Load Unpacked without hunting. Future launches use the plain shortcut
-# above and open a blank tab silently.
-$firstRunArgs = ('--user-data-dir="{0}" --load-extension="{1}" --new-window "chrome://extensions"' -f $prof, $extDir)
-Start-Process -FilePath $chrome -ArgumentList $firstRunArgs
+# First-time install: point Chrome at chrome://extensions so the user
+# can do Load Unpacked without hunting. Reinstalls skip this — user
+# just needs to click reload on the extension card in an already-open
+# chrome://extensions tab.
+if (-not $isReinstall) {
+  $firstRunArgs = ('--user-data-dir="{0}" --load-extension="{1}" --new-window "chrome://extensions"' -f $prof, $extDir)
+  Start-Process -FilePath $chrome -ArgumentList $firstRunArgs
+}
 Write-Host ''
 Write-Host '===================================================================' -ForegroundColor Yellow
-Write-Host ' ONE-TIME SETUP — just TWO steps, all on this worker PC:' -ForegroundColor Yellow
-Write-Host '  1) Chrome should have opened chrome://extensions automatically.' -ForegroundColor Yellow
-Write-Host '     If not, open that URL yourself in the Chrome window that opened.' -ForegroundColor Yellow
-Write-Host '     Toggle "Developer mode" ON (top-right corner).' -ForegroundColor Yellow
-Write-Host ''
-Write-Host '  2) Click "Load unpacked" and select this folder:' -ForegroundColor Yellow
-Write-Host ("     $extDir") -ForegroundColor Cyan
-Write-Host '===================================================================' -ForegroundColor Yellow
-Write-Host ''
-Write-Host "That's it. The extension reads worker-config.json (already written" -ForegroundColor Green
-Write-Host "next to the extension files) and auto-arms itself with the manager" -ForegroundColor Green
-Write-Host "URL + token + KP URL baked in. No setup code to paste. No role" -ForegroundColor Green
-Write-Host "picker. It starts claiming work within 30 seconds." -ForegroundColor Green
-Write-Host ""
-Write-Host "Every future Windows login auto-launches Chrome silently and" -ForegroundColor Green
-Write-Host "the extension resumes automatically. You can close this window." -ForegroundColor Green
+if ($isReinstall) {
+  Write-Host ' REINSTALL — just ONE step to pick up the new version:' -ForegroundColor Yellow
+  Write-Host '  * Go to chrome://extensions on this PC' -ForegroundColor Yellow
+  Write-Host '  * Find "AdBrain Discovery" and click the reload (redo) icon' -ForegroundColor Yellow
+  Write-Host '    (Or click "Remove" + "Load unpacked" again if you prefer.)' -ForegroundColor Yellow
+  Write-Host ("    Extension folder: $extDir") -ForegroundColor Cyan
+  Write-Host '===================================================================' -ForegroundColor Yellow
+  Write-Host ''
+  Write-Host 'Your existing chrome.storage (worker id, armed state, today baseline)' -ForegroundColor Green
+  Write-Host 'survives the reload — no need to reconfigure. worker-config.json' -ForegroundColor Green
+  Write-Host 'was refreshed with the current manager URL + token + KP URL.' -ForegroundColor Green
+} else {
+  Write-Host ' ONE-TIME SETUP — just TWO steps, all on this worker PC:' -ForegroundColor Yellow
+  Write-Host '  1) Chrome should have opened chrome://extensions automatically.' -ForegroundColor Yellow
+  Write-Host '     If not, open that URL yourself in the Chrome window that opened.' -ForegroundColor Yellow
+  Write-Host '     Toggle "Developer mode" ON (top-right corner).' -ForegroundColor Yellow
+  Write-Host ''
+  Write-Host '  2) Click "Load unpacked" and select this folder:' -ForegroundColor Yellow
+  Write-Host ("     $extDir") -ForegroundColor Cyan
+  Write-Host '===================================================================' -ForegroundColor Yellow
+  Write-Host ''
+  Write-Host "That's it. The extension reads worker-config.json (already written" -ForegroundColor Green
+  Write-Host "next to the extension files) and auto-arms itself with the manager" -ForegroundColor Green
+  Write-Host "URL + token + KP URL baked in. No setup code to paste. No role" -ForegroundColor Green
+  Write-Host "picker. It starts claiming work within 30 seconds." -ForegroundColor Green
+  Write-Host ""
+  Write-Host "Every future Windows login auto-launches Chrome silently and" -ForegroundColor Green
+  Write-Host "the extension resumes automatically. You can close this window." -ForegroundColor Green
+}
 `;
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-cache' });
+  res.end(script);
+}
+
+// PowerShell uninstaller. Removes everything the installer put down:
+// startup shortcut, extension folder, and (with -Full) the Chrome profile
+// dir too. Doesn't touch chrome://extensions — user still has to click
+// "Remove" on the card since the extension is loaded via --load-extension
+// from the now-missing folder (Chrome will silently drop it on next launch).
+function serveWorkerUninstaller(req, res, url) {
+  const managerBase = `${url.protocol}//${req.headers.host}`;
+  const script = `# AdBrain worker UNINSTALLER — generated by manager at ${managerBase}
+# Usage:
+#   irm ${managerBase}/uninstall-worker.ps1 | iex
+# or with the -Full flag to also wipe the Chrome profile (cookies etc):
+#   $script = irm ${managerBase}/uninstall-worker.ps1
+#   iex "& { $script } -Full"
+
+param([switch]$Full = $false)
+$ErrorActionPreference = 'Continue'
+$root    = Join-Path $env:LOCALAPPDATA 'AdBrainWorker'
+$startup = [Environment]::GetFolderPath('Startup')
+$lnkPath = Join-Path $startup 'AdBrain Worker.lnk'
+
+# 1) Remove the Startup shortcut so Chrome no longer auto-launches on login.
+if (Test-Path $lnkPath) {
+  Remove-Item -Path $lnkPath -Force -ErrorAction SilentlyContinue
+  Write-Host "[AdBrain] Removed Startup shortcut" -ForegroundColor Green
+} else {
+  Write-Host "[AdBrain] No Startup shortcut found (already removed)" -ForegroundColor Yellow
+}
+
+# 2) Remove extension files. Chrome will silently drop the loaded
+#    extension on its next launch once the folder is gone.
+$extDir = Join-Path $root 'extension'
+if (Test-Path $extDir) {
+  Remove-Item -Path $extDir -Recurse -Force -ErrorAction SilentlyContinue
+  Write-Host "[AdBrain] Removed extension folder: $extDir" -ForegroundColor Green
+} else {
+  Write-Host "[AdBrain] No extension folder found" -ForegroundColor Yellow
+}
+
+# 3) Chrome profile dir — only if -Full. Preserves the profile by default
+#    since it's isolated to this extension and users may not want to lose
+#    Google login state / cookies from it.
+if ($Full) {
+  $prof = Join-Path $root 'profile'
+  if (Test-Path $prof) {
+    Remove-Item -Path $prof -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "[AdBrain] Removed Chrome profile: $prof" -ForegroundColor Green
+  }
+}
+
+# 4) Top-level AdBrainWorker dir (empty at this point unless -Full skipped
+#    the profile removal, in which case just leave it).
+if (Test-Path $root) {
+  if (-not (Get-ChildItem -Path $root -Force -ErrorAction SilentlyContinue)) {
+    Remove-Item -Path $root -Force -ErrorAction SilentlyContinue
+    Write-Host "[AdBrain] Removed empty $root" -ForegroundColor Green
+  } elseif (-not $Full) {
+    Write-Host "[AdBrain] Kept $root (Chrome profile still there — pass -Full to wipe it too)" -ForegroundColor Yellow
+  }
+}
+
+Write-Host ''
+Write-Host '===================================================================' -ForegroundColor Cyan
+Write-Host ' UNINSTALL COMPLETE' -ForegroundColor Cyan
+Write-Host '===================================================================' -ForegroundColor Cyan
+Write-Host ' Final step (Chrome-side):' -ForegroundColor Cyan
+Write-Host '   Open chrome://extensions and click "Remove" on the AdBrain card.' -ForegroundColor Cyan
+Write-Host '   Chrome auto-drops it on next launch anyway, but Remove is cleaner.' -ForegroundColor Cyan
+Write-Host ''
+Write-Host ' Re-install anytime with:' -ForegroundColor Cyan
+Write-Host ("   irm $mgr/install-worker.ps1 | iex" -f '') -ForegroundColor Green
+Write-Host '===================================================================' -ForegroundColor Cyan
+`.replace('$mgr', managerBase);
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-cache' });
   res.end(script);
 }
@@ -421,6 +523,7 @@ const server = http.createServer(async (req, res) => {
   // strictly limited to a static allowlist (WORKER_FILES) below — no arbitrary
   // path access even if the request contains ../ escapes.
   if (m === 'GET' && p === '/install-worker.ps1') return serveWorkerInstaller(req, res, url);
+  if (m === 'GET' && p === '/uninstall-worker.ps1') return serveWorkerUninstaller(req, res, url);
   if (m === 'GET' && p === '/worker-files.json') return send(res, 200, { ok: true, files: WORKER_FILES });
   if (m === 'GET' && p.startsWith('/worker/')) {
     const rel = p.replace(/^\/worker\//, '');

@@ -656,6 +656,27 @@ async function run() {
   assert(popupJs.includes('renderRecent'),           '20i.12 recent SKUs renderer defined');
   assert(popupJs.includes('POLL_INTERVAL_MS'),       '20i.13 poll-cycle constant defined');
 
+  // ===== 20j. INSTALLER / UNINSTALLER =====
+  // Reinstall detection in installer
+  assert(ps.body.includes('isReinstall'),                     '20j.1 installer detects existing install');
+  assert(ps.body.includes('wiping old extension files'),      '20j.2 installer wipes old ext folder');
+  assert(ps.body.includes('REINSTALL'),                       '20j.3 installer prints reinstall-specific instructions');
+  assert(ps.body.includes('if (-not $isReinstall)'),          '20j.4 installer skips Chrome relaunch on reinstall');
+  // Uninstaller endpoint
+  const un = await fetchNoAuth('/uninstall-worker.ps1');
+  assertEq(un.status, 200, '20j.5 GET /uninstall-worker.ps1 returns 200');
+  assert(un.body.includes('UNINSTALLER'),                      '20j.6 uninstaller script identifies itself');
+  assert(un.body.includes('AdBrain Worker.lnk'),               '20j.7 uninstaller removes Startup shortcut');
+  assert(un.body.includes('Remove-Item -Path $extDir'),        '20j.8 uninstaller removes extension folder');
+  assert(un.body.includes('[switch]$Full'),                    '20j.9 uninstaller supports -Full flag for profile wipe');
+  // UI wiring for uninstall command
+  assert(idx.body.includes('id="uninstallOneLiner"'),          '20j.10 uninstall one-liner element in Workers tab');
+  assert(idx.body.includes('id="uninstallFullOneLiner"'),      '20j.11 uninstall -Full variant in Workers tab');
+  assert(appJs.body.includes('uninstallOneLiner'),             '20j.12 app.js wires uninstall command');
+  // manifest version bumped
+  const mfV = await fetchNoAuth('/worker/manifest.json');
+  assert(mfV.body.includes('"version": "1.1.0"'),              '20j.13 manifest version bumped so Chrome auto-reloads');
+
   // ===== 20d. INSTALLER AUTO-ARM =====
   // The installer must bake the current token + KP URL into the PS script
   // and write a worker-config.json into the worker's extension dir so the

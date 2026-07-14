@@ -471,10 +471,31 @@
               <li>Chrome opens automatically → visit <code>chrome://extensions</code></li>
               <li>Toggle <strong>Developer mode</strong> on (top-right)</li>
               <li>Click <strong>Load unpacked</strong> → pick <code>%LOCALAPPDATA%\AdBrainWorker\extension</code></li>
-              <li>Open the extension popup → role <strong>Worker</strong></li>
-              <li>Come back here → copy the setup code below → paste into the extension</li>
+              <li>That's it — extension auto-arms from bundled config.</li>
             </ol>
             <div style="margin-top: 8px; color: var(--success);">✓ From then on, every login auto-launches Chrome with the extension armed. No clicks needed.</div>
+          </div>
+          <div style="margin-top: 10px; padding: 10px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 6px; font-size: 12px; color: var(--text-1);">
+            <strong style="color: var(--warn);">🔄 Reinstall / update?</strong>
+            Re-running the command above is safe. The installer detects existing files, wipes the old <code>extension/</code> folder, re-downloads the current version, and rewrites <code>worker-config.json</code>. Then just click ↻ reload on the AdBrain card in <code>chrome://extensions</code>.
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <span class="card-icon">🗑</span>
+          <span class="card-title" style="color: var(--danger);">Uninstall worker</span>
+          <span class="card-sub">removes files + Startup shortcut on the worker PC</span>
+        </div>
+        <div class="card-body">
+          <div class="hint">Run this on the worker PC to fully remove the extension files, Startup auto-launch shortcut, and (optionally) the dedicated Chrome profile. After it finishes you still need to open <code>chrome://extensions</code> and click <strong>Remove</strong> on the AdBrain card.</div>
+          <div class="row" style="margin-top: 10px;">
+            <div class="setup-code" id="uninstallOneLiner" style="flex: 1; min-width: 300px;">Loading…</div>
+            <button id="copyUninstallBtn" class="secondary">Copy</button>
+          </div>
+          <div class="hint" style="margin-top: 8px;">Or wipe the Chrome profile too (Google login state, cookies) — copy this variant instead:
+            <div class="setup-code" id="uninstallFullOneLiner" style="margin-top: 6px;">Loading…</div>
           </div>
         </div>
       </div>
