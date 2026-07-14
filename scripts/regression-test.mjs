@@ -826,6 +826,34 @@ async function run() {
   const rosterAfterReset = await req('GET', '/api/workers/list');
   assertEq((rosterAfterReset.data.workers || []).length, 0, '20l.11 workers roster wiped by reset');
 
+  // ===== 20m. FLEET UX + RECONNECT + ERRORS CARD =====
+  // Reconnect command — the escape hatch for stopped-by-user workers.
+  const bgSrcM = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
+  assert(bgSrcM.includes("c.command === 'reconnect'"), '20m.1 worker handles reconnect command');
+  assert(bgSrcM.includes('userStoppedArm = false'),    '20m.2 reconnect clears userStoppedArm');
+  assert(appJs.body.includes('data-cmd="reconnect"'),   '20m.3 fleet grid has reconnect button');
+  assert(idx.body.includes('Force reconnect'),          '20m.4 broadcast dropdown offers force reconnect');
+
+  // Activity log source-color CSS
+  assert(cssR.body.includes('.log-line .src[data-src="kp"]'),   '20m.5 KP source color');
+  assert(cssR.body.includes('.log-line .src[data-src="serp"]'), '20m.6 SERP source color');
+  assert(cssR.body.includes('.log-line .src[data-src="cmd"]'),  '20m.7 cmd source color');
+  assert(appJs.body.includes('data-src="${esc(src)}"'),          '20m.8 activity log emits data-src for color match');
+
+  // Current-step per-worker column
+  assert(appJs.body.includes('stageFor'),                        '20m.9 stageFor mapper defined');
+  assert(appJs.body.includes('w._lastActivity'),                 '20m.10 worker enriched with latest activity');
+
+  // Activity endpoint accepts level filter
+  const errApi = await req('GET', '/api/activity?level=err&limit=10');
+  assertEq(errApi.status, 200, '20m.11 activity endpoint accepts level=err');
+  assert(Array.isArray(errApi.data.events), '20m.12 level filter returns events array');
+
+  // Errors card in dashboard
+  assert(idx.body.includes('id="errorsCard"'), '20m.13 errors card element');
+  assert(appJs.body.includes('renderErrorsCard'), '20m.14 renderErrorsCard defined');
+  assert(appJs.body.includes('activityErrors'), '20m.15 activityErrors api wrapper called');
+
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
   const [s1, w1, a1] = await Promise.all([

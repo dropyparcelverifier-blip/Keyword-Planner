@@ -224,6 +224,17 @@
               <div id="failedList"></div>
             </div>
           </div>
+
+          <div class="card" id="errorsCard" style="display:none;">
+            <div class="card-head">
+              <span class="card-icon">🐛</span>
+              <span class="card-title" style="color: var(--danger);">Errors reported by workers</span>
+              <span class="card-sub" id="errorsSub">—</span>
+            </div>
+            <div class="card-body" style="max-height: 280px; overflow: auto; padding: 6px 12px;">
+              <div id="errorsList"></div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -538,6 +549,7 @@
             </select>
             <select id="cmdName">
               <option value="wake">Wake — start claiming work</option>
+              <option value="reconnect">Force reconnect — override manual Stop</option>
               <option value="pause">Pause — stop after current SKU</option>
               <option value="resume">Resume — continue</option>
               <option value="stop">Stop — cancel and disarm</option>
