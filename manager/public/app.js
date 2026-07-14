@@ -21,7 +21,24 @@ const state = {
   batches: [],
   activeBatchPinned: null,
   setupCode: '',
+  seenWorkerIds: new Set(),  // for new-worker-connect toast
+  timelineTimer: null,        // dashboard throughput refresh
 };
+
+// ─────────── Persistent UI state ───────────
+// Small helper — keeps tab/batch/interval/filters across page reloads
+// so users don't lose context on refresh. Namespaced key so it doesn't
+// collide with anything else on localStorage.
+const UI_STATE_KEY = 'adbrainManagerUIv1';
+function loadUI() {
+  try { return JSON.parse(localStorage.getItem(UI_STATE_KEY) || '{}') || {}; }
+  catch { return {}; }
+}
+function saveUI(patch) {
+  const cur = loadUI();
+  const next = { ...cur, ...patch };
+  try { localStorage.setItem(UI_STATE_KEY, JSON.stringify(next)); } catch {}
+}
 
 // ─────────── Utility ───────────
 function fmtTime(v) {
@@ -79,20 +96,140 @@ function toast(msg, kind = 'info', opts = {}) {
   return { close };
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  COMMAND PALETTE — Ctrl/Cmd+K
+// ═══════════════════════════════════════════════════════════════
+const cmdk = { open: false, query: '', activeIdx: 0, results: [] };
+
+function cmdkClose() {
+  cmdk.open = false;
+  $('cmdkRoot').style.display = 'none';
+  $('cmdkRoot').innerHTML = '';
+}
+
+function cmdkOpen() {
+  cmdk.open = true;
+  cmdk.query = '';
+  cmdk.activeIdx = 0;
+  const root = $('cmdkRoot');
+  root.style.display = '';
+  root.innerHTML = `
+    <div class="cmdk-backdrop" id="cmdkBackdrop">
+      <div class="cmdk-panel" onclick="event.stopPropagation()">
+        <input class="cmdk-input" id="cmdkInput" placeholder="Search batches, workers, actions…" autocomplete="off" />
+        <div class="cmdk-list" id="cmdkList"></div>
+        <div class="cmdk-hint">
+          <span><kbd>↑</kbd><kbd>↓</kbd> to navigate</span>
+          <span><kbd>enter</kbd> to select</span>
+          <span><kbd>esc</kbd> to close</span>
+        </div>
+      </div>
+    </div>`;
+  $('cmdkBackdrop').addEventListener('click', cmdkClose);
+  const input = $('cmdkInput');
+  input.focus();
+  input.addEventListener('input', () => { cmdk.query = input.value; cmdk.activeIdx = 0; cmdkRender(); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); cmdkClose(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); cmdk.activeIdx = Math.min(cmdk.results.length - 1, cmdk.activeIdx + 1); cmdkRender(); }
+    else if (e.key === 'ArrowUp')   { e.preventDefault(); cmdk.activeIdx = Math.max(0, cmdk.activeIdx - 1); cmdkRender(); }
+    else if (e.key === 'Enter') { e.preventDefault(); const r = cmdk.results[cmdk.activeIdx]; if (r) { cmdkClose(); r.action(); } }
+  });
+  cmdkRender();
+}
+
+function cmdkRender() {
+  const list = $('cmdkList');
+  if (!list) return;
+  const q = cmdk.query.trim().toLowerCase();
+
+  // Build the full command set: static (tabs, actions) + dynamic (batches, workers).
+  const items = [];
+  const tabs = [
+    { key: '1', tab: 'upload',    icon: '📤', label: 'Go to Upload' },
+    { key: '2', tab: 'dashboard', icon: '📊', label: 'Go to Dashboard' },
+    { key: '3', tab: 'analytics', icon: '📈', label: 'Go to Analytics' },
+    { key: '4', tab: 'config',    icon: '⚙',  label: 'Go to Config' },
+    { key: '5', tab: 'workers',   icon: '🔗', label: 'Go to Workers' },
+    { key: '6', tab: 'downloads', icon: '📦', label: 'Go to Downloads' },
+  ];
+  for (const t of tabs) items.push({
+    icon: t.icon, label: t.label, meta: t.key,
+    action: () => document.querySelector(`.tab[data-tab="${t.tab}"]`).click(),
+  });
+  const actions = [
+    { icon: '📢', label: 'Wake all workers',     meta: 'broadcast', action: async () => { try { await api.commandsSend(null, 'wake'); toast('Wake sent to all workers', 'ok'); } catch (e) { toast(e.message, 'err'); } } },
+    { icon: '▶',  label: 'Resume all workers',    meta: 'broadcast', action: async () => { try { await api.commandsSend(null, 'resume'); toast('Resume sent', 'ok'); } catch (e) { toast(e.message, 'err'); } } },
+    { icon: '⏸', label: 'Pause all workers',    meta: 'broadcast', action: async () => { try { await api.commandsSend(null, 'pause'); toast('Pause sent', 'ok'); } catch (e) { toast(e.message, 'err'); } } },
+    { icon: '↻',  label: 'Re-queue all failed jobs', meta: 'action', action: async () => { if (!confirm('Re-queue every failed job across all batches?')) return; try { const r = await api.requeueAllFailed(''); toast(`${r.updated} job(s) back to pending`, 'ok'); } catch (e) { toast(e.message, 'err'); } } },
+    { icon: '🧹', label: 'Cleanup old activity + commands', meta: 'action', action: () => { document.querySelector('.tab[data-tab="config"]').click(); setTimeout(() => $('cleanupBtn')?.scrollIntoView({behavior:'smooth', block:'center'}), 60); } },
+    { icon: '🗑', label: 'Delete a batch',    meta: 'danger', action: () => { document.querySelector('.tab[data-tab="config"]').click(); setTimeout(() => $('deleteBatchSelect')?.scrollIntoView({behavior:'smooth', block:'center'}), 60); } },
+    { icon: '💥', label: 'Reset everything', meta: 'danger', action: () => { document.querySelector('.tab[data-tab="config"]').click(); setTimeout(() => $('resetAllBtn')?.scrollIntoView({behavior:'smooth', block:'center'}), 60); } },
+  ];
+  items.push(...actions);
+
+  // Dynamic: batches
+  for (const b of state.batches) {
+    items.push({
+      icon: '📋',
+      label: `Focus batch ${b.batch_id}`,
+      meta: `${b.done}/${b.total} done`,
+      action: () => {
+        document.querySelector('.tab[data-tab="dashboard"]').click();
+        setTimeout(() => {
+          const sel = $('dashBatchSelect');
+          if (sel && Array.from(sel.options).some(o => o.value === b.batch_id)) {
+            sel.value = b.batch_id;
+            sel.dispatchEvent(new Event('change'));
+          }
+        }, 80);
+      },
+    });
+  }
+  // Dynamic: workers
+  for (const w of state.workers) {
+    items.push({
+      icon: '🖥️',
+      label: `Worker ${w.worker_id}`,
+      meta: `${w.in_flight || 0} in flight · ${w.done || 0} done`,
+      action: () => { document.querySelector('.tab[data-tab="dashboard"]').click(); },
+    });
+  }
+
+  // Simple substring filter (case-insensitive) across label + meta.
+  cmdk.results = q ? items.filter(it => (it.label + ' ' + (it.meta || '')).toLowerCase().includes(q)) : items;
+  if (cmdk.activeIdx >= cmdk.results.length) cmdk.activeIdx = Math.max(0, cmdk.results.length - 1);
+
+  if (cmdk.results.length === 0) {
+    list.innerHTML = `<div class="cmdk-empty">No results for "${esc(q)}"</div>`;
+    return;
+  }
+  list.innerHTML = cmdk.results.slice(0, 50).map((it, i) => `
+    <div class="cmdk-item ${i === cmdk.activeIdx ? 'active' : ''}" data-idx="${i}">
+      <span class="icon">${it.icon}</span>
+      <span class="label">${esc(it.label)}</span>
+      <span class="meta">${esc(it.meta || '')}</span>
+    </div>`).join('');
+  list.querySelectorAll('.cmdk-item').forEach(el => {
+    el.addEventListener('mouseover', () => { cmdk.activeIdx = parseInt(el.dataset.idx, 10); cmdkRender(); });
+    el.addEventListener('click', () => { const r = cmdk.results[parseInt(el.dataset.idx, 10)]; if (r) { cmdkClose(); r.action(); } });
+  });
+}
+
 // ─────────── Keyboard shortcuts ───────────
 // 1-6 jump to a tab. Ctrl+K focuses the analytics search (if on that tab).
 // Ignored while typing in a form field.
 document.addEventListener('keydown', (e) => {
-  const tag = (e.target?.tagName || '').toLowerCase();
-  if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-  if (e.ctrlKey || e.altKey || e.metaKey) {
-    if (e.ctrlKey && e.key === 'k') {
-      e.preventDefault();
-      document.querySelector('.tab[data-tab="analytics"]').click();
-      setTimeout(() => $('anSearch')?.focus(), 50);
-    }
+  // Ctrl/Cmd+K = command palette. Works even when a form field is focused.
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    if (cmdk.open) cmdkClose(); else cmdkOpen();
     return;
   }
+  if (cmdk.open) return;  // palette handles its own keys
+  const tag = (e.target?.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
   const map = { '1': 'upload', '2': 'dashboard', '3': 'analytics', '4': 'config', '5': 'workers', '6': 'downloads' };
   const tab = map[e.key];
   if (tab) {
@@ -108,6 +245,7 @@ document.querySelectorAll('.tab').forEach(btn => {
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');
     $(`panel-${btn.dataset.tab}`).classList.add('active');
+    saveUI({ tab: btn.dataset.tab });
     if (btn.dataset.tab === 'dashboard') startDashPolling();
     else stopDashPolling();
     if (btn.dataset.tab === 'analytics') refreshAnalyticsTab();
@@ -271,10 +409,12 @@ $('uploadBtn').addEventListener('click', async () => {
 // ═══════════════════════════════════════════════════════════════
 $('dashBatchSelect').addEventListener('change', () => {
   state.activeBatch = $('dashBatchSelect').value;
+  saveUI({ batch: state.activeBatch });
   refreshDashboard();
 });
 $('dashRefreshInterval').addEventListener('change', () => {
   state.dashIntervalMs = parseInt($('dashRefreshInterval').value, 10) || 0;
+  saveUI({ interval: state.dashIntervalMs });
   startDashPolling();
 });
 $('dashRefreshBtn').addEventListener('click', refreshDashboard);
@@ -302,16 +442,29 @@ function stopDashPolling() {
 
 async function refreshDashboard() {
   try {
-    const [summary, workers, activity] = await Promise.all([
+    const [summary, workers, activity, failed, timeline] = await Promise.all([
       api.jobsSummary(),
       api.jobsWorkerStats(),
       api.activityGet(state.activeBatch, 120),
+      api.failedJobs(state.activeBatch).catch(() => ({ rows: [] })),
+      api.keywordsTimeline(state.activeBatch).catch(() => ({ buckets: [] })),
     ]);
     state.batches = summary.batches || [];
+    // Detect newly-connected workers (first time we see this worker_id)
+    // and pop a friendly toast so the manager knows their install worked.
+    const seenIds = state.seenWorkerIds;
+    for (const w of (workers.workers || [])) {
+      if (!seenIds.has(w.worker_id)) {
+        if (seenIds.size > 0) toast(`Worker ${w.worker_id} online`, 'ok', { title: 'Worker connected' });
+        seenIds.add(w.worker_id);
+      }
+    }
     state.workers = workers.workers || [];
     renderBatchOverview();
     renderWorkerFleet();
     renderActivity(activity.events || []);
+    renderFailedCard(failed.rows || []);
+    renderTrendChart(timeline);
     populateBatchSelects();
     // Output stats card only when a batch is selected.
     if (state.activeBatch) {
@@ -429,6 +582,65 @@ function renderWorkerFleet() {
     });
   });
 }
+
+function renderFailedCard(rows) {
+  const card = $('failedCard');
+  const list = $('failedList');
+  const sub = $('failedSub');
+  if (!rows || rows.length === 0) {
+    if (card) card.style.display = 'none';
+    return;
+  }
+  card.style.display = '';
+  sub.textContent = `${rows.length} row(s)${state.activeBatch ? ` in ${state.activeBatch}` : ' across all batches'}`;
+  list.innerHTML = `<table class="tbl">
+    <thead><tr><th>SKU</th><th>Product</th><th>Reason</th><th>Worker</th><th class="num">Attempts</th></tr></thead>
+    <tbody>${rows.slice(0, 100).map(f => `
+      <tr>
+        <td class="mono">${esc(f.sku || '—')}</td>
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(f.product_url || '')}">${esc(f.product_name || f.product_url || '—')}</td>
+        <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--danger);" title="${esc(f.failed_reason || '')}">${esc((f.failed_reason || '').slice(0, 80) || '—')}</td>
+        <td class="mono">${esc(f.claimed_by || '—')}</td>
+        <td class="num">${f.attempts || 0}</td>
+      </tr>`).join('')}</tbody></table>`;
+}
+
+function renderTrendChart(timeline) {
+  const chart = $('trendChart');
+  const sub = $('trendSub');
+  if (!chart) return;
+  const buckets = timeline?.buckets || [];
+  // Build a 24-hour grid: for each of the last 24 hours, look up the row count.
+  const nowHour = Math.floor(Date.now() / 3600000) * 3600000;
+  const counts = [];
+  const byBucket = new Map(buckets.map(b => [Number(b.bucket), Number(b.n)]));
+  let total = 0;
+  for (let i = 23; i >= 0; i--) {
+    const bucket = nowHour - i * 3600000;
+    const n = byBucket.get(bucket) || 0;
+    counts.push({ hour: bucket, n });
+    total += n;
+  }
+  const max = Math.max(1, ...counts.map(c => c.n));
+  sub.textContent = `${total.toLocaleString()} rows in the last 24h`;
+  chart.innerHTML = counts.map(c => {
+    const pct = Math.max(2, Math.round((c.n / max) * 100));
+    const isNow = c.hour === nowHour;
+    const label = new Date(c.hour).toLocaleTimeString([], { hour: '2-digit' });
+    return `<div class="trend-bar ${isNow ? 'now' : ''}" style="height: ${pct}%;" title="${label}: ${c.n} rows"></div>`;
+  }).join('');
+}
+
+// Wire bulk-requeue button (declared in HTML, so wire once at boot).
+$('requeueAllFailedBtn')?.addEventListener('click', async () => {
+  const scope = state.activeBatch ? `batch "${state.activeBatch}"` : 'ALL batches';
+  if (!confirm(`Re-queue every failed job in ${scope}?`)) return;
+  try {
+    const r = await api.requeueAllFailed(state.activeBatch || '');
+    toast(`${r.updated} job(s) back to pending`, 'ok', { title: 'Re-queued' });
+    refreshDashboard();
+  } catch (e) { toast(e.message, 'err', { title: 'Re-queue failed' }); }
+});
 
 function renderActivity(events) {
   const el = $('activityLog');
@@ -970,7 +1182,25 @@ function renderAnalyticsTable(rows) {
 }
 
 // ─────────── Boot ───────────
-// Start on dashboard tab if URL has #dashboard, else stay on Upload.
-if (location.hash === '#dashboard') {
-  document.querySelector('.tab[data-tab="dashboard"]').click();
-}
+// Restore last-viewed tab + selected batch + refresh interval from
+// localStorage so a browser reload doesn't lose the user's context.
+(function bootRestoreUI() {
+  const saved = loadUI();
+  if (saved.interval != null) {
+    state.dashIntervalMs = saved.interval;
+    const iv = $('dashRefreshInterval');
+    if (iv) iv.value = String(saved.interval);
+  }
+  if (saved.batch) {
+    state.activeBatch = saved.batch;
+    // dashBatchSelect is populated later, but restore analytics batch too
+    analytics.batchId = saved.batch;
+  }
+  // Tab restore last — needs to happen AFTER dashBatchSelect exists so
+  // dashboard init sees the saved batch.
+  if (location.hash === '#dashboard') {
+    document.querySelector('.tab[data-tab="dashboard"]').click();
+  } else if (saved.tab && document.querySelector(`.tab[data-tab="${saved.tab}"]`)) {
+    document.querySelector(`.tab[data-tab="${saved.tab}"]`).click();
+  }
+})();

@@ -568,6 +568,49 @@ async function run() {
   assert(popupHtml.includes('id="statusPill"'), '20f.21 worker status pill present');
   assert(popupHtml.includes('id="openManager"'), '20f.22 open-manager-dashboard footer link present');
 
+  // ===== 20g. UX/ANALYTICS OVERHAUL =====
+  // Command palette
+  assert(idx.body.includes('id="cmdkRoot"'),  '20g.1 command palette root in index');
+  assert(cssR.body.includes('.cmdk-panel'),   '20g.2 cmdk CSS defined');
+  assert(appJs.body.includes('function cmdkOpen'), '20g.3 cmdkOpen() defined');
+  assert(appJs.body.includes(`e.key.toLowerCase() === 'k'`), '20g.4 Ctrl/Cmd+K bound');
+
+  // Persistent state
+  assert(appJs.body.includes(`localStorage.getItem(UI_STATE_KEY`), '20g.5 UI state persistence via localStorage');
+  assert(appJs.body.includes(`saveUI({ tab:`),   '20g.6 tab change persists');
+  assert(appJs.body.includes(`saveUI({ batch:`), '20g.7 batch change persists');
+
+  // Trend chart + failed card
+  assert(idx.body.includes('id="trendChart"'), '20g.8 trend chart element');
+  assert(cssR.body.includes('.trend-bar'),     '20g.9 trend bar CSS');
+  assert(idx.body.includes('id="failedCard"'), '20g.10 failed jobs card element');
+  assert(idx.body.includes('requeueAllFailedBtn'), '20g.11 bulk requeue button');
+
+  // Sticky headers + skeleton
+  assert(cssR.body.includes('.tbl thead th'),  '20g.12 sticky-header CSS');
+  assert(cssR.body.includes('.skeleton'),      '20g.13 skeleton loader CSS');
+
+  // Worker popup enhancements
+  assert(popupHtml.includes('id="todayDone"'),    '20g.14 worker today-done counter');
+  assert(popupHtml.includes('id="todayKw"'),      '20g.15 worker today-kw counter');
+  assert(popupHtml.includes('id="workerSparkline"'), '20g.16 worker sparkline element');
+  assert(popupJs.includes('refreshToday'),         '20g.17 worker refreshToday() defined');
+  assert(popupJs.includes('adbrainTodayBaseline'), '20g.18 worker persists today baseline in storage');
+
+  // New server endpoints for the enhancements
+  const failedApi = await req('GET', '/api/jobs/failed');
+  assertEq(failedApi.status, 200, '20g.19 GET /api/jobs/failed 200');
+  assert(Array.isArray(failedApi.data?.rows), '20g.20 /api/jobs/failed returns rows[]');
+
+  const timelineApi = await req('GET', '/api/keywords/timeline');
+  assertEq(timelineApi.status, 200, '20g.21 GET /api/keywords/timeline 200');
+  assert(Array.isArray(timelineApi.data?.buckets), '20g.22 timeline returns buckets[]');
+  assert(typeof timelineApi.data?.since === 'number', '20g.23 timeline returns since epoch-ms');
+
+  const requeueBulk = await req('POST', '/api/jobs/requeue-all-failed', {});
+  assertEq(requeueBulk.status, 200, '20g.24 POST /api/jobs/requeue-all-failed 200');
+  assert(typeof requeueBulk.data?.updated === 'number', '20g.25 bulk requeue returns update count');
+
   // ===== 20d. INSTALLER AUTO-ARM =====
   // The installer must bake the current token + KP URL into the PS script
   // and write a worker-config.json into the worker's extension dir so the
