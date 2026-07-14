@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AdBrain Manager</title>
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body>
+  <div class="topbar">
+    <span class="brand"><span class="icon">◆</span> AdBrain Manager</span>
+    <span class="spacer"></span>
+    <input class="token" id="tokenInput" type="password" placeholder="Manager token (optional)" autocomplete="off" />
+    <button class="secondary small" id="saveTokenBtn">Save token</button>
+    <span class="health" id="healthPill" title="Click to recheck">checking…</span>
+  </div>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="upload">📤 Upload</button>
+    <button class="tab" data-tab="dashboard">📊 Dashboard</button>
+    <button class="tab" data-tab="config">⚙ Config</button>
+    <button class="tab" data-tab="workers">🔗 Workers</button>
+    <button class="tab" data-tab="downloads">📦 Downloads</button>
+  </nav>
+
+  <main>
+    <!-- ================= UPLOAD ================= -->
+    <section class="panel active" id="panel-upload">
+      <div class="card">
+        <div class="card-head">
+          <span class="card-icon">📤</span>
+          <span class="card-title">Upload products to queue</span>
+          <span class="card-sub">Excel (.xlsx) or CSV</span>
+        </div>
+        <div class="card-body">
+          <label class="field">
+            <span class="lbl">Batch ID</span>
+            <input type="text" id="uploadBatchId" placeholder="Auto-generate from timestamp if blank" />
+            <div class="hint">Workers claim work per batch. Reuse the same ID to append more SKUs to an existing batch.</div>
+          </label>
+          <label class="field">
+            <span class="lbl">Product file</span>
+            <input type="file" id="uploadFile" accept=".xlsx,.xls,.csv" />
+            <div class="hint">Required columns: <code>url</code> (or <code>product_url</code>). Optional: <code>sku</code>, <code>product_name</code>, <code>priority</code>, <code>handles</code>, <code>brands</code>.</div>
+          </label>
+          <div id="uploadPreview"></div>
+          <div class="row">
+            <button id="uploadBtn" disabled>Upload to queue</button>
+            <button class="secondary" id="clearUploadBtn">Clear</button>
+          </div>
+          <div id="uploadResult"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= DASHBOARD ================= -->
+    <section class="panel" id="panel-dashboard">
+      <div class="row" style="margin-bottom: 12px;">
+        <label style="display:flex; align-items:center; gap:8px;">
+          <span class="lbl" style="margin:0;">Batch:</span>
+          <select id="dashBatchSelect" style="min-width: 220px;"></select>
+        </label>
+        <label style="display:flex; align-items:center; gap:8px;">
+          <span class="lbl" style="margin:0;">Refresh:</span>
+          <select id="dashRefreshInterval">
+            <option value="5000">5s</option>
+            <option value="10000" selected>10s</option>
+            <option value="30000">30s</option>
+            <option value="60000">60s</option>
+            <option value="0">Manual</option>
+          </select>
+        </label>
+        <button class="small secondary" id="dashRefreshBtn">Refresh now</button>
+        <span class="spacer" style="flex:1;"></span>
+        <button class="small danger" id="wakeAllBtn">📢 Wake all workers</button>
+        <button class="small secondary" id="resumeAllBtn">▶ Resume all</button>
+      </div>
+
+      <div class="grid-2">
+        <!-- Batch overview + output stats -->
+        <div class="col">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">📋</span>
+              <span class="card-title">Batches</span>
+              <span class="card-sub" id="batchCountLabel">—</span>
+            </div>
+            <div class="card-body" style="max-height: 260px; overflow: auto;">
+              <div id="batchOverview"><div class="empty"><div class="empty-icon">📭</div>No batches yet — upload some products.</div></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">📦</span>
+              <span class="card-title">Output uploaded to manager</span>
+              <span class="card-sub" id="outputStatsHeader">—</span>
+            </div>
+            <div class="card-body" style="max-height: 400px; overflow: auto;">
+              <div id="outputStatsPanel"><div class="empty">Pick a batch above.</div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Workers + activity -->
+        <div class="col">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">🖥️</span>
+              <span class="card-title">Worker fleet</span>
+              <span class="card-sub" id="workerCountLabel">—</span>
+            </div>
+            <div class="card-body" style="max-height: 240px; overflow: auto;">
+              <div id="workerGrid"><div class="empty">No workers seen yet.</div></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">📜</span>
+              <span class="card-title">Activity log</span>
+              <span class="card-sub">latest 120 events</span>
+            </div>
+            <div class="card-body">
+              <div class="log" id="activityLog"><div class="empty">No activity yet.</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= CONFIG ================= -->
+    <section class="panel" id="panel-config">
+      <div class="card">
+        <div class="card-head">
+          <span class="card-icon">📌</span>
+          <span class="card-title">Pin active batch</span>
+        </div>
+        <div class="card-body">
+          <div class="hint">Force every armed worker to switch to this batch within ~30s. Leave blank to unpin (workers pick the newest pending batch automatically).</div>
+          <div class="row" style="margin-top: 10px;">
+            <select id="pinBatchSelect" style="min-width: 260px;"></select>
+            <button id="pinBatchBtn">Pin</button>
+            <button class="secondary" id="unpinBatchBtn">Unpin</button>
+          </div>
+          <div id="pinBatchResult"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <span class="card-icon">🎯</span>
+          <span class="card-title">Worker config — pushed to every worker</span>
+        </div>
+        <div class="card-body">
+          <label class="field">
+            <span class="lbl">Keyword Planner URL</span>
+            <input type="text" id="cfgKpUrl" placeholder="https://ads.google.com/aw/keywordplanner/…" />
+            <div class="hint">Required. Workers load this URL to run KP scrapes. Without it, engine can't run.</div>
+          </label>
+          <div class="grid-2">
+            <label class="field">
+              <span class="lbl">Max KP per product</span>
+              <input type="number" id="cfgKpMax" min="1" max="10000" value="5000" />
+            </label>
+            <label class="field">
+              <span class="lbl">Match profile</span>
+              <select id="cfgMatchProfile">
+                <option value="loose">Loose (high recall)</option>
+                <option value="normal" selected>Normal (default)</option>
+                <option value="strict">Strict (high precision)</option>
+              </select>
+            </label>
+          </div>
+          <div class="grid-2">
+            <label class="field">
+              <span class="lbl">Chunk size</span>
+              <input type="number" id="cfgChunkSize" min="1" max="50" value="8" />
+            </label>
+            <label class="field">
+              <span class="lbl">CLIP threshold (0.60–0.92)</span>
+              <input type="number" id="cfgClipThreshold" min="60" max="92" value="72" />
+            </label>
+          </div>
+          <div class="row">
+            <button id="saveConfigBtn">Save + push to all workers</button>
+          </div>
+          <div id="saveConfigResult"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <span class="card-icon">🧹</span>
+          <span class="card-title">Cleanup old data</span>
+        </div>
+        <div class="card-body">
+          <div class="hint">Retention purge — activity log rows and acknowledged commands older than the cutoff are deleted. Jobs and keyword results are kept.</div>
+          <div class="grid-2" style="margin-top: 10px;">
+            <label class="field">
+              <span class="lbl">Activity log — keep last N days</span>
+              <input type="number" id="cleanupLogDays" min="0" max="90" value="7" />
+            </label>
+            <label class="field">
+              <span class="lbl">Acked commands — keep last N days</span>
+              <input type="number" id="cleanupCommandsDays" min="0" max="30" value="1" />
+            </label>
+          </div>
+          <div class="row">
+            <button class="danger" id="cleanupBtn">Run cleanup</button>
+          </div>
+          <div id="cleanupResult"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= WORKERS ================= -->
+    <section class="panel" id="panel-workers">
+      <div class="card">
+        <div class="card-head">
+          <span class="card-icon">🔗</span>
+          <span class="card-title">Generate setup code for a worker</span>
+        </div>
+        <div class="card-body">
+          <div class="hint">Workers paste this into the extension's popup <strong>Apply setup code</strong> box to connect. Also carries the KP URL you saved above so workers don't have to configure that themselves.</div>
+          <label class="field">
+            <span class="lbl">Manager URL (used by workers)</span>
+            <input type="text" id="workerManagerUrl" placeholder="http://this-pc.tailnet.ts.net:8787" />
+            <div class="hint">Auto-filled with this browser's URL. Change if workers reach the manager via a different hostname/IP.</div>
+          </label>
+          <div class="row">
+            <button id="genSetupBtn">Generate setup code</button>
+            <button class="secondary" id="copySetupBtn" disabled>Copy</button>
+          </div>
+          <div id="setupCodeWrap" style="margin-top: 10px;"></div>
+          <div class="banner warn" style="margin-top: 10px; display:none;" id="setupCodeWarn">
+            ⚠ Code contains your manager token. Share over encrypted channels only — Signal, WhatsApp, Telegram secret chat. Treat it like a password.
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <span class="card-icon">📡</span>
+          <span class="card-title">Send command to worker(s)</span>
+        </div>
+        <div class="card-body">
+          <div class="row">
+            <select id="cmdWorker">
+              <option value="">All workers (broadcast)</option>
+            </select>
+            <select id="cmdName">
+              <option value="wake">Wake — start claiming work</option>
+              <option value="pause">Pause — stop after current SKU</option>
+              <option value="resume">Resume — continue</option>
+              <option value="stop">Stop — cancel and disarm</option>
+              <option value="release_claims">Release claims — hand SKUs back to queue</option>
+            </select>
+            <button id="sendCmdBtn">Send</button>
+          </div>
+          <div id="sendCmdResult"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= DOWNLOADS ================= -->
+    <section class="panel" id="panel-downloads">
+      <div class="card">
+        <div class="card-head">
+          <span class="card-icon">📦</span>
+          <span class="card-title">Download batch results as CSVs</span>
+        </div>
+        <div class="card-body">
+          <div class="hint">Fetches every keyword row for the selected batch and writes one CSV per SKU. Zip is downloaded — one file per product. No extension needed.</div>
+          <div class="row" style="margin-top: 10px;">
+            <select id="downloadBatchSelect" style="min-width: 260px;"></select>
+            <button id="downloadCsvBtn">Download as ZIP</button>
+          </div>
+          <div id="downloadResult"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/public/app.js"></script>
+</body>
+</html>

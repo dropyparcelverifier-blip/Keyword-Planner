@@ -125,13 +125,16 @@ function tokenOk(req, url) {
   return false;
 }
 function serveStatic(res, urlPath) {
-  const rel = urlPath === '/' ? 'dashboard.html' : urlPath.replace(/^\/+/, '');
+  const rel = urlPath === '/' ? 'index.html' : urlPath.replace(/^\/+/, '');
   const file = path.join(PUBLIC_DIR, rel);
   if (!file.startsWith(PUBLIC_DIR)) return send(res, 403, 'forbidden');
   fs.readFile(file, (err, data) => {
     if (err) return send(res, 404, 'not found');
     const ext = path.extname(file).toLowerCase();
-    const type = ext === '.html' ? 'text/html; charset=utf-8' : ext === '.js' ? 'text/javascript' : ext === '.css' ? 'text/css' : 'application/octet-stream';
+    const type = ext === '.html' ? 'text/html; charset=utf-8'
+      : ext === '.js' || ext === '.mjs' ? 'text/javascript'
+      : ext === '.css' ? 'text/css'
+      : 'application/octet-stream';
     res.writeHead(200, { 'Content-Type': type }); res.end(data);
   });
 }
@@ -209,7 +212,7 @@ const server = http.createServer(async (req, res) => {
   if (m === 'OPTIONS') return send(res, 204, '');
 
   // Static dashboard.
-  if (m === 'GET' && (p === '/' || p === '/dashboard.html' || p.startsWith('/public/') || p === '/favicon.ico')) {
+  if (m === 'GET' && (p === '/' || p === '/index.html' || p.startsWith('/public/') || p === '/favicon.ico')) {
     if (p === '/favicon.ico') return send(res, 204, '');
     return serveStatic(res, p.startsWith('/public') ? p.replace(/^\/public/, '') : p);
   }
