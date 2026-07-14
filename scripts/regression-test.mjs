@@ -535,6 +535,39 @@ async function run() {
   assert(missingFromAllowlist.size === 0,
     `20c.21 every import target is in WORKER_FILES (missing: ${Array.from(missingFromAllowlist).join(', ') || 'none'})`);
 
+  // ===== 20f. UI POLISH SURFACES =====
+  // Toasts, keyboard shortcuts, progress bars, source colors, per-worker actions.
+  assert(idx.body.includes('id="toastStack"'), '20f.1 toast stack in index');
+  assert(appJs.body.includes('function toast('), '20f.2 toast() defined in app.js');
+  assert(cssR.body.includes('.toast-stack'), '20f.3 toast CSS in styles.css');
+  assert(cssR.body.includes('@keyframes toastIn'), '20f.4 toast animations defined');
+
+  assert(idx.body.includes('<kbd>1</kbd>'), '20f.5 keyboard shortcut hint 1 rendered');
+  assert(idx.body.includes('<kbd>6</kbd>'), '20f.6 keyboard shortcut hint 6 rendered');
+  assert(appJs.body.includes(`'1': 'upload'`), '20f.7 shortcut map defined in app.js');
+  assert(appJs.body.includes('Ctrl+K') || appJs.body.includes("e.key === 'k'"), '20f.8 Ctrl+K analytics-focus hook wired');
+
+  assert(cssR.body.includes('.progress-fill'), '20f.9 progress-bar CSS defined');
+  assert(appJs.body.includes('class="progress"'), '20f.10 batch overview uses progress bars');
+
+  assert(cssR.body.includes('.chip.src-kp'), '20f.11 source-color CSS for KP');
+  assert(cssR.body.includes('.chip.src-autosuggest'), '20f.12 source-color CSS for autosuggest');
+  assert(cssR.body.includes('.chip.src-serp'), '20f.13 source-color CSS for SERP');
+  assert(appJs.body.includes('srcClassFor'), '20f.14 source-color mapper in analytics');
+
+  assert(appJs.body.includes('worker-actions'), '20f.15 per-worker action buttons wired');
+  assert(appJs.body.includes("data-cmd=\"release_claims\""), '20f.16 release-claims per-worker action');
+
+  // Worker popup slim-down — the extension is now worker-only.
+  const popupHtml = readFileSync(resolve(REPO, 'popup.html'), 'utf-8');
+  const popupJs = readFileSync(resolve(REPO, 'popup.js'), 'utf-8');
+  assert(popupHtml.length < 20000, `20f.17 popup.html trimmed (got ${popupHtml.length} bytes)`);
+  assert(popupJs.length < 20000, `20f.18 popup.js trimmed (got ${popupJs.length} bytes)`);
+  assert(!popupHtml.includes('data-role="manager"'), '20f.19 no manager role picker in popup');
+  assert(!popupHtml.includes('mgrSaveCredsBtn'), '20f.20 no manager creds card in popup');
+  assert(popupHtml.includes('id="statusPill"'), '20f.21 worker status pill present');
+  assert(popupHtml.includes('id="openManager"'), '20f.22 open-manager-dashboard footer link present');
+
   // ===== 20d. INSTALLER AUTO-ARM =====
   // The installer must bake the current token + KP URL into the PS script
   // and write a worker-config.json into the worker's extension dir so the

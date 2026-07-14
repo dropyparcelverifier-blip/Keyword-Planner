@@ -53,6 +53,54 @@ function setResult(el, msg, kind = 'info') {
   el.innerHTML = msg ? `<div class="banner ${kind}" style="margin-top:10px;">${esc(msg)}</div>` : '';
 }
 
+// ─────────── Toast notifications ───────────
+// Non-blocking pop-ups in the top-right corner. Auto-dismiss after 4s
+// unless kind==='err' (7s so users can read the error). Click × to close.
+function toast(msg, kind = 'info', opts = {}) {
+  const stack = $('toastStack');
+  if (!stack) return;
+  const icon = kind === 'ok' ? '✓' : kind === 'warn' ? '⚠' : kind === 'err' ? '×' : 'ℹ';
+  const el = document.createElement('div');
+  el.className = `toast ${kind}`;
+  const titleHtml = opts.title ? `<div class="toast-title">${esc(opts.title)}</div>` : '';
+  el.innerHTML = `<span class="toast-icon">${icon}</span>
+    <div class="toast-body">${titleHtml}${esc(msg)}</div>
+    <button class="toast-close" title="Dismiss">×</button>`;
+  stack.appendChild(el);
+  const ttl = kind === 'err' ? 7000 : 4000;
+  const close = () => {
+    if (el._closed) return;
+    el._closed = true;
+    el.classList.add('closing');
+    setTimeout(() => el.remove(), 200);
+  };
+  el.querySelector('.toast-close').addEventListener('click', close);
+  if (!opts.sticky) setTimeout(close, ttl);
+  return { close };
+}
+
+// ─────────── Keyboard shortcuts ───────────
+// 1-6 jump to a tab. Ctrl+K focuses the analytics search (if on that tab).
+// Ignored while typing in a form field.
+document.addEventListener('keydown', (e) => {
+  const tag = (e.target?.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+  if (e.ctrlKey || e.altKey || e.metaKey) {
+    if (e.ctrlKey && e.key === 'k') {
+      e.preventDefault();
+      document.querySelector('.tab[data-tab="analytics"]').click();
+      setTimeout(() => $('anSearch')?.focus(), 50);
+    }
+    return;
+  }
+  const map = { '1': 'upload', '2': 'dashboard', '3': 'analytics', '4': 'config', '5': 'workers', '6': 'downloads' };
+  const tab = map[e.key];
+  if (tab) {
+    e.preventDefault();
+    document.querySelector(`.tab[data-tab="${tab}"]`)?.click();
+  }
+});
+
 // ─────────── Tabs ───────────
 document.querySelectorAll('.tab').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -205,12 +253,14 @@ $('uploadBtn').addEventListener('click', async () => {
   setResult($('uploadResult'), 'Uploading…', 'info');
   try {
     const r = await api.jobsUpload(batchId, state.parsedProducts);
-    const msg = `✓ Uploaded ${r.uploaded}/${r.total} to batch ${batchId}.`
+    const msg = `Uploaded ${r.uploaded}/${r.total} to batch ${batchId}.`
       + (r.duplicatesDropped ? ` Dropped ${r.duplicatesDropped} in-file duplicates.` : '')
       + (r.skippedActive ? ` Skipped ${r.skippedActive} already-active in other batches.` : '');
-    setResult($('uploadResult'), msg, 'ok');
+    setResult($('uploadResult'), '✓ ' + msg, 'ok');
+    toast(msg, 'ok', { title: 'Batch uploaded' });
   } catch (e) {
     setResult($('uploadResult'), `Upload failed: ${e.message}`, 'err');
+    toast(e.message, 'err', { title: 'Upload failed' });
   } finally {
     $('uploadBtn').disabled = false;
   }
@@ -292,20 +342,39 @@ function renderBatchOverview() {
   const el = $('batchOverview');
   $('batchCountLabel').textContent = `${state.batches.length} batch(es)`;
   if (state.batches.length === 0) {
-    el.innerHTML = `<div class="empty"><div class="empty-icon">📭</div>No batches yet.</div>`;
+    el.innerHTML = `<div class="empty">
+      <div class="empty-icon">📭</div>
+      <strong>No batches yet</strong>
+      <div style="margin-top: 6px;"><a href="#" onclick="document.querySelector('.tab[data-tab=upload]').click(); return false;" style="color: var(--accent); text-decoration: none;">📤 Upload some products →</a></div>
+    </div>`;
     return;
   }
   el.innerHTML = `<table class="tbl">
-    <thead><tr><th>Batch</th><th class="num">Total</th><th class="num">Pending</th><th class="num">Claimed</th><th class="num">Done</th><th class="num">Failed</th></tr></thead>
-    <tbody>${state.batches.map(b => `
-      <tr>
-        <td class="mono">${esc(b.batch_id)}</td>
-        <td class="num">${b.total}</td>
-        <td class="num">${b.pending}</td>
-        <td class="num">${b.claimed}</td>
-        <td class="num" style="color:var(--success);">${b.done}</td>
-        <td class="num" style="color:${b.failed > 0 ? 'var(--danger)' : 'var(--text-3)'};">${b.failed}</td>
-      </tr>`).join('')}
+    <thead><tr><th>Batch</th><th style="width: 30%;">Progress</th><th class="num">Total</th><th class="num">Done</th><th class="num">Failed</th></tr></thead>
+    <tbody>${state.batches.map(b => {
+      const done = b.done || 0, failed = b.failed || 0, claimed = b.claimed || 0, total = b.total || 0;
+      const donePct = total ? (done / total) * 100 : 0;
+      const claimedPct = total ? (claimed / total) * 100 : 0;
+      const complete = done + failed === total && total > 0;
+      const fillClass = complete ? 'done' : (claimed > 0 ? '' : (donePct > 0 ? '' : 'stuck'));
+      // Stacked bar: done (green/gradient) + claimed (accent), pending is background.
+      return `
+        <tr style="cursor:pointer;" onclick="document.getElementById('dashBatchSelect').value='${esc(b.batch_id)}'; document.getElementById('dashBatchSelect').dispatchEvent(new Event('change'));">
+          <td class="mono">${esc(b.batch_id)}</td>
+          <td>
+            <div class="progress">
+              <div class="progress-fill ${fillClass}" style="width: ${donePct.toFixed(1)}%;"></div>
+            </div>
+            <div style="font-size: 10px; color: var(--text-3); margin-top: 2px;">
+              ${done + failed}/${total} · ${donePct.toFixed(0)}%
+              ${claimed > 0 ? ` · <span style="color: var(--warn);">${claimed} in flight</span>` : ''}
+            </div>
+          </td>
+          <td class="num">${total}</td>
+          <td class="num" style="color:var(--success);">${done}</td>
+          <td class="num" style="color:${failed > 0 ? 'var(--danger)' : 'var(--text-3)'};">${failed}</td>
+        </tr>`;
+    }).join('')}
     </tbody></table>`;
 }
 
@@ -321,11 +390,16 @@ function renderWorkerFleet() {
     if (cur) workerSel.value = cur;
   }
   if (state.workers.length === 0) {
-    el.innerHTML = `<div class="empty">No workers seen yet — start the extension on a worker PC and apply a setup code.</div>`;
+    el.innerHTML = `<div class="empty">
+      <div class="empty-icon">🖥️</div>
+      <strong>No workers seen yet</strong>
+      <div style="margin-top: 6px; color: var(--text-3);">Run the one-line installer on a worker PC.
+      <br><a href="#" onclick="document.querySelector('.tab[data-tab=workers]').click(); return false;" style="color: var(--accent); text-decoration: none;">🔗 Get the install command →</a></div>
+    </div>`;
     return;
   }
   el.innerHTML = `<table class="tbl">
-    <thead><tr><th>Worker</th><th>Last heartbeat</th><th class="num">In-flight</th><th class="num">Done</th><th class="num">Failed</th></tr></thead>
+    <thead><tr><th>Worker</th><th>Last heartbeat</th><th class="num">In-flight</th><th class="num">Done</th><th class="num">Failed</th><th style="width: 1%;">Actions</th></tr></thead>
     <tbody>${state.workers.map(w => `
       <tr>
         <td><span class="chip ${workerDotClass(w.last_heartbeat)}">●</span> <span class="mono">${esc(w.worker_id)}</span></td>
@@ -333,8 +407,27 @@ function renderWorkerFleet() {
         <td class="num">${w.in_flight || 0}</td>
         <td class="num" style="color:var(--success);">${w.done || 0}</td>
         <td class="num" style="color:${(w.failed||0) > 0 ? 'var(--danger)' : 'var(--text-3)'};">${w.failed || 0}</td>
+        <td>
+          <div class="worker-actions">
+            <button data-worker="${esc(w.worker_id)}" data-cmd="wake"   title="Wake — start claiming">▶</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="pause"  title="Pause after current SKU">⏸</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="release_claims" class="danger-btn" title="Release claims back to queue">↻</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="stop"   class="danger-btn" title="Stop and disarm">■</button>
+          </div>
+        </td>
       </tr>`).join('')}
     </tbody></table>`;
+  // Wire per-worker action buttons.
+  el.querySelectorAll('.worker-actions button[data-worker]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const workerId = btn.dataset.worker;
+      const cmd = btn.dataset.cmd;
+      const cmdLabel = { wake: 'Wake', pause: 'Pause', release_claims: 'Release claims from', stop: 'Stop' }[cmd] || cmd;
+      if (cmd === 'stop' && !confirm(`Stop worker ${workerId} and disarm it? They will not claim more work until you send Wake.`)) return;
+      try { await api.commandsSend(workerId, cmd); toast(`${cmdLabel} → ${workerId}`, 'ok'); }
+      catch (e) { toast(e.message, 'err', { title: 'Command failed' }); }
+    });
+  });
 }
 
 function renderActivity(events) {
@@ -438,8 +531,14 @@ $('saveConfigBtn').addEventListener('click', async () => {
     clip_threshold:      parseInt($('cfgClipThreshold').value, 10) || 72,
   };
   setResult($('saveConfigResult'), 'Saving…', 'info');
-  try { await api.configSet(cfg); setResult($('saveConfigResult'), '✓ Saved. Workers will pick this up within ~30s.', 'ok'); }
-  catch (e) { setResult($('saveConfigResult'), `Save failed: ${e.message}`, 'err'); }
+  try {
+    await api.configSet(cfg);
+    setResult($('saveConfigResult'), '✓ Saved. Workers will pick this up within ~30s.', 'ok');
+    toast('Workers will pick this up within ~30s', 'ok', { title: 'Config pushed' });
+  } catch (e) {
+    setResult($('saveConfigResult'), `Save failed: ${e.message}`, 'err');
+    toast(e.message, 'err', { title: 'Config save failed' });
+  }
 });
 $('pinBatchBtn').addEventListener('click', async () => {
   const v = $('pinBatchSelect').value;
@@ -457,9 +556,11 @@ $('deleteBatchBtn').addEventListener('click', async () => {
   if (!confirm(`Delete batch "${b}"? This wipes every job, keyword row, and activity entry for it. Cannot be undone.`)) return;
   try {
     const r = await api.deleteBatch(b);
-    setResult($('deleteBatchResult'), `✓ Deleted batch "${b}" — ${r.deletedJobs} job(s) + ${r.deletedKeywords} keyword(s) + ${r.deletedActivity} activity row(s).`, 'ok');
+    const msg = `${r.deletedJobs} job(s) + ${r.deletedKeywords} keyword(s) + ${r.deletedActivity} activity row(s) deleted.`;
+    setResult($('deleteBatchResult'), `✓ ${msg}`, 'ok');
+    toast(msg, 'ok', { title: `Batch "${b}" deleted` });
     await loadConfigForm();
-  } catch (e) { setResult($('deleteBatchResult'), `Delete failed: ${e.message}`, 'err'); }
+  } catch (e) { setResult($('deleteBatchResult'), `Delete failed: ${e.message}`, 'err'); toast(e.message, 'err', { title: 'Delete failed' }); }
 });
 // Reset-everything guard: button only enables when user types RESET exactly.
 $('resetConfirmInput').addEventListener('input', () => {
@@ -470,11 +571,13 @@ $('resetAllBtn').addEventListener('click', async () => {
   if (!confirm('LAST WARNING — this wipes every batch, every keyword row, every activity entry, every command. Only worker config (KP URL, token, pacing) is preserved. Continue?')) return;
   try {
     const r = await api.resetAll();
-    setResult($('resetAllResult'), `✓ Reset complete — deleted ${r.deletedJobs} jobs, ${r.deletedKeywords} keywords, ${r.deletedActivity} activity rows, ${r.deletedCommands} commands.`, 'ok');
+    const msg = `${r.deletedJobs} jobs, ${r.deletedKeywords} keywords, ${r.deletedActivity} activity, ${r.deletedCommands} commands.`;
+    setResult($('resetAllResult'), `✓ ${msg}`, 'ok');
+    toast(msg, 'ok', { title: 'Everything reset' });
     $('resetConfirmInput').value = '';
     $('resetAllBtn').disabled = true;
     await loadConfigForm();
-  } catch (e) { setResult($('resetAllResult'), `Reset failed: ${e.message}`, 'err'); }
+  } catch (e) { setResult($('resetAllResult'), `Reset failed: ${e.message}`, 'err'); toast(e.message, 'err', { title: 'Reset failed' }); }
 });
 $('cleanupBtn').addEventListener('click', async () => {
   const logDays = parseInt($('cleanupLogDays').value, 10) || 0;
@@ -739,9 +842,20 @@ function renderAnalyticsSummary(rows) {
   const byIntent = {}; for (const r of rows) { const k = String(r.buying_intent || '—'); byIntent[k] = (byIntent[k] || 0) + 1; }
   const totalKp = rows.filter(r => (r.kp_monthly_searches || 0) > 0).length;
 
-  // Sources chip row.
+  // Sources chip row. Each source gets its own color so users can skim
+  // the mix at a glance (KP blue, autosuggest amber, SERP teal, etc.).
+  const srcClassFor = (k) => {
+    const s = String(k).toLowerCase();
+    if (s.includes('kp')) return 'src-kp';
+    if (s.includes('autosuggest')) return 'src-autosuggest';
+    if (s.includes('serp')) return 'src-serp';
+    if (s.includes('paa')) return 'src-paa';
+    if (s.includes('related')) return 'src-related';
+    if (s.includes('amazon')) return 'src-amazon';
+    return 'pending';
+  };
   const srcChips = Object.entries(bySrc).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) =>
-    `<span class="chip pending"><strong>${esc(k)}</strong>: ${v}</span>`
+    `<span class="chip ${srcClassFor(k)}"><strong>${esc(k)}</strong>: ${v}</span>`
   ).join(' ');
   const intentChips = Object.entries(byIntent).filter(([k]) => k && k !== '—').sort((a, b) => b[1] - a[1]).map(([k, v]) => {
     const cls = k === 'high' ? 'done' : k === 'medium' ? 'claimed' : k === 'low' ? 'pending' : 'pending';
@@ -821,7 +935,20 @@ function renderAnalyticsTable(rows) {
     <tr>${cols.map(c => {
       const v = r[c.key];
       if (c.kind === 'chip' && v) {
-        const cls = String(v) === 'high' ? 'done' : String(v) === 'medium' ? 'claimed' : 'pending';
+        // Source column uses source-specific colors; intent column uses done/claimed/pending.
+        let cls;
+        if (c.key === 'source') {
+          const s = String(v).toLowerCase();
+          cls = s.includes('kp') ? 'src-kp'
+              : s.includes('autosuggest') ? 'src-autosuggest'
+              : s.includes('serp') ? 'src-serp'
+              : s.includes('paa') ? 'src-paa'
+              : s.includes('related') ? 'src-related'
+              : s.includes('amazon') ? 'src-amazon'
+              : 'pending';
+        } else {
+          cls = String(v) === 'high' ? 'done' : String(v) === 'medium' ? 'claimed' : 'pending';
+        }
         return `<td><span class="chip ${cls}">${esc(v)}</span></td>`;
       }
       if (c.kind === 'imgs') return `<td class="num" style="color:${(v||0) > 0 ? 'var(--success)' : 'var(--text-3)'};">${v || 0}</td>`;
