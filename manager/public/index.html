@@ -7,6 +7,24 @@
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
 <body>
+  <!-- Global JS error banner. If any script throws (module load,
+       syntax error, runtime), this popup replaces the silent-fail
+       we had before. Removes itself on next successful health-ping. -->
+  <div id="globalErrorBanner" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9999; background:#7f1d1d; color:#fecaca; padding:10px 16px; font-family:monospace; font-size:12px; border-bottom:2px solid #dc2626;"></div>
+  <script>
+    window.addEventListener('error', (ev) => {
+      const b = document.getElementById('globalErrorBanner');
+      if (!b) return;
+      b.style.display = 'block';
+      b.textContent = `⚠ JS error — the manager UI will not work. Check the browser console (F12). Error: ${ev.message} @ ${ev.filename || '?'}:${ev.lineno || '?'}`;
+    });
+    window.addEventListener('unhandledrejection', (ev) => {
+      const b = document.getElementById('globalErrorBanner');
+      if (!b) return;
+      b.style.display = 'block';
+      b.textContent = `⚠ Promise rejected: ${ev.reason?.message || ev.reason || '(unknown)'}. Check the browser console (F12).`;
+    });
+  </script>
   <div class="topbar">
     <span class="brand"><span class="icon">◆</span> AdBrain Manager</span>
     <span class="spacer"></span>
