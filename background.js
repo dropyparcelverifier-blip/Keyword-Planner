@@ -254,6 +254,41 @@ const coldStart = (async () => {
   state.runIntent = !!data[STORAGE_KEY_RUN_INTENT];
   // Detect paused-captcha from the last persisted status.
   state.pausedByCaptcha = (state.lastStatus || '').startsWith(STATUS_PAUSED_CAPTCHA);
+
+  // Installer auto-arm: the manager's PowerShell installer drops a
+  // worker-config.json next to the extension files. If we haven't been
+  // configured yet (storage has no manager URL AND no user-picked role),
+  // pull the values from that file and arm ourselves. Zero-touch worker
+  // setup — no setup-code paste required.
+  try {
+    const already = await chrome.storage.local.get(['adbrainManagerUrl', 'adbrainRole']);
+    if (!already.adbrainManagerUrl && !already.adbrainRole) {
+      const cfgUrl = chrome.runtime.getURL('worker-config.json');
+      const resp = await fetch(cfgUrl);
+      if (resp.ok) {
+        const cfg = await resp.json();
+        if (cfg && cfg.managerUrl) {
+          const workerId = 'PC-' + Math.random().toString(16).slice(2, 8).toUpperCase();
+          const updates = {
+            adbrainManagerUrl:   String(cfg.managerUrl).trim(),
+            adbrainManagerToken: String(cfg.managerToken || '').trim(),
+            adbrainKpUrl:        String(cfg.kpUrl || '').trim(),
+            adbrainRole:         String(cfg.role || 'worker').trim(),
+            adbrainWorkerArmed:  true,
+            adbrainWorkerId:     workerId,
+            adbrainUserStoppedArm: false,
+          };
+          await chrome.storage.local.set(updates);
+          state.workerArmed = true;
+          state.workerId = workerId;
+          state.userStoppedArm = false;
+          pushLog(`Auto-armed from worker-config.json — manager=${cfg.managerUrl}, id=${workerId}`, 'ok');
+        }
+      }
+    }
+  } catch {
+    // No worker-config.json (regular install), or malformed — silent no-op.
+  }
 })();
 
 function broadcast(msg) {
