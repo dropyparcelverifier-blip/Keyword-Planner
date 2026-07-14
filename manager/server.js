@@ -79,6 +79,12 @@ CREATE TABLE IF NOT EXISTS activity_log (
 );
 CREATE INDEX IF NOT EXISTS activity_batch_ts_idx ON activity_log (batch_id, ts DESC);
 
+CREATE TABLE IF NOT EXISTS workers (
+  worker_id  TEXT PRIMARY KEY,
+  first_seen INTEGER DEFAULT (strftime('%s','now')*1000),
+  last_seen  INTEGER DEFAULT (strftime('%s','now')*1000)
+);
+
 CREATE TABLE IF NOT EXISTS worker_commands (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   worker_id   TEXT,               -- null = broadcast
@@ -211,6 +217,12 @@ const Q = {
   // rounded down to hour). Two variants — all batches and batch-scoped.
   keywordsPerHourAll:    db.prepare(`SELECT (created_at / 3600000) * 3600000 AS bucket, COUNT(*) AS n FROM keywords WHERE created_at >= ? GROUP BY bucket ORDER BY bucket ASC`),
   keywordsPerHourBatch:  db.prepare(`SELECT (created_at / 3600000) * 3600000 AS bucket, COUNT(*) AS n FROM keywords WHERE created_at >= ? AND batch_id = ? GROUP BY bucket ORDER BY bucket ASC`),
+  // Worker roster — upsert on heartbeat + list. Lets us surface armed-
+  // but-idle workers (which the jobs-derived workerStats can't see because
+  // they've never claimed anything yet).
+  upsertWorker: db.prepare(`INSERT INTO workers (worker_id, first_seen, last_seen) VALUES (?, ?, ?)
+    ON CONFLICT(worker_id) DO UPDATE SET last_seen=excluded.last_seen`),
+  listWorkers: db.prepare(`SELECT worker_id, first_seen, last_seen FROM workers ORDER BY last_seen DESC`),
   newestPendingBatch: db.prepare(`SELECT batch_id FROM jobs WHERE status='pending' GROUP BY batch_id ORDER BY MAX(created_at) DESC LIMIT 1`),
   batchHasPending: db.prepare(`SELECT 1 FROM jobs WHERE batch_id=? AND status='pending' LIMIT 1`),
   existsActiveUrl: db.prepare(`SELECT 1 FROM jobs WHERE product_url=? AND batch_id<>? AND status IN ('pending','claimed','done') LIMIT 1`),
@@ -616,6 +628,18 @@ const server = http.createServer(async (req, res) => {
     if (m === 'GET' && p === '/api/jobs/worker-stats') return send(res, 200, { ok: true, workers: Q.workerStats.all() });
     if (m === 'GET' && p === '/api/jobs/per-product')  return send(res, 200, { ok: true, rows: Q.perProduct.all(url.searchParams.get('batchId') || '') });
     if (m === 'GET' && p === '/api/jobs/active-workers') return send(res, 200, { ok: true, workers: Q.activeWorkers.all(url.searchParams.get('batchId') || '') });
+    // Worker heartbeat — called by workers every 30s regardless of whether
+    // they claim any work. Populates the `workers` roster so armed-idle
+    // workers show up as online in the dashboard fleet.
+    if (m === 'POST' && p === '/api/workers/heartbeat') {
+      const b = await readJson(req);
+      const wid = String(b.workerId || '').trim();
+      if (!wid) return send(res, 400, { ok: false, error: 'workerId required' });
+      const t = now();
+      Q.upsertWorker.run(wid, t, t);
+      return send(res, 200, { ok: true });
+    }
+    if (m === 'GET' && p === '/api/workers/list') return send(res, 200, { ok: true, workers: Q.listWorkers.all() });
     if (m === 'GET' && p === '/api/jobs/failed') {
       const bId = url.searchParams.get('batchId') || '';
       const rows = bId ? Q.failedJobsByBatch.all(bId) : Q.failedJobsAll.all();

@@ -29,6 +29,7 @@ import {
   workerConfigToRunOpts,
   cleanupOldData,
   fetchBatchKeywordStats,
+  sendWorkerHeartbeat,
 } from './modules/discovery-jobs.js';
 import {
   STORAGE_KEY_KP_URL,
@@ -507,12 +508,93 @@ try {
 let _lastAutoPollErr = '';
 let _lastAutoPollErrCount = 0;
 
+// Shared implementation of "claim a chunk + start the engine". Called
+// both from the message handler (popup / dashboard command) AND from
+// workerAutoPollTick's 30s alarm. Returns { ok, claimed, batchId,
+// error?, message? } — same shape either way. Never uses
+// chrome.runtime.sendMessage cross-context — that was the source of
+// intermittent 'Receiving end does not exist' errors when the SW was
+// briefly idle.
+async function _doAutoConnectWorker(msg = {}) {
+  try {
+    const workerId = (msg.workerId || state.workerId || '').trim();
+    if (!workerId) return { ok: false, error: 'Set a Worker ID first.' };
+    if (state.running || state.starting) {
+      pushLog(`Auto-connect ignored: engine already running. Worker stays armed; will pick up next chunk when this one finishes.`, 'info');
+      return { ok: true, claimed: 0, message: 'engine already running — already armed' };
+    }
+    const chunkSize = Math.max(1, Math.min(50, Number(msg.chunkSize) || 5));
+    const explicitBatch = (msg.batchId || '').trim();
+    const batchId = explicitBatch || (await getActiveBatchId());
+    if (!batchId) return { ok: false, error: 'No batches with pending work found. Ask the manager to upload a batch first.' };
+    state.continuousClaim = true;
+    state.continuousChunkSize = chunkSize;
+    state.workerId = workerId;
+    state.workerArmed = true;
+    state.userStoppedArm = false;
+    await chrome.storage.local.set({
+      [STORAGE_KEY_WORKER_ID]: workerId,
+      adbrainContinuousClaim: true,
+      adbrainContinuousChunkSize: chunkSize,
+      adbrainWorkerArmed: true,
+      adbrainUserStoppedArm: false,
+    }).catch(() => {});
+    await releaseStaleJobs(10).catch(() => null);
+    let centralConfig = null;
+    try { centralConfig = await fetchWorkerConfig(); } catch {}
+    const centralRunOpts = centralConfig ? workerConfigToRunOpts(centralConfig) : {};
+    if (centralRunOpts.kpUrl) {
+      await chrome.storage.local.set({ [STORAGE_KEY_KP_URL]: centralRunOpts.kpUrl }).catch(() => {});
+    }
+    const localKpUrl = (await chrome.storage.local.get([STORAGE_KEY_KP_URL]))[STORAGE_KEY_KP_URL] || '';
+    const effectiveKpUrl = (centralRunOpts.kpUrl || localKpUrl || '').trim();
+    if (!effectiveKpUrl || !effectiveKpUrl.includes('ads.google.com')) {
+      return { ok: false, error: 'No Keyword Planner URL configured. Set it in the manager Config tab (KP URL) and Save + push to all workers.' };
+    }
+    const jobs = await claimJobs({ workerId, batchId, limit: chunkSize });
+    if (jobs.length === 0) {
+      state.continuousClaim = false;
+      await chrome.storage.local.set({ adbrainContinuousClaim: false }).catch(() => {});
+      return { ok: true, claimed: 0, batchId, message: 'No pending jobs in this batch right now.' };
+    }
+    state.queueBatchId = batchId;
+    state.claimedJobs  = jobs.map(j => ({ id: j.id, productUrl: j.product_url }));
+    await chrome.storage.local.set({
+      [STORAGE_KEY_QUEUE_BATCH_ID]: batchId,
+      [STORAGE_KEY_CLAIMED_JOBS]:   state.claimedJobs,
+    }).catch(() => {});
+    await setRunIntent(true);
+    const centralKeys = Object.keys(centralRunOpts);
+    const centralNote = centralKeys.length > 0
+      ? ` · applied ${centralKeys.length} setting(s) from manager: ${centralKeys.slice(0, 6).join(', ')}`
+      : '';
+    pushLog(`Auto-connect: claimed ${jobs.length} job(s) from batch "${batchId}" — continuous mode ON${centralNote}`, 'ok');
+    const products = jobs.map(j => ({
+      url: j.product_url, sku: j.sku,
+      productName: j.product_name, priority: j.priority,
+      handles: j.handles ? String(j.handles).split('|').filter(Boolean) : [],
+      brands:  j.brands  ? String(j.brands).split('|').filter(Boolean)  : [],
+    }));
+    const mergedRunOpts = { ...(msg.runOpts || {}), ...centralRunOpts };
+    const startResult = await handleStart({ products, ...mergedRunOpts });
+    return { ok: true, claimed: jobs.length, batchId, startResult, centralConfig: !!centralConfig };
+  } catch (e) {
+    const errStr = (e && e.message) || (e && e.toString && e.toString()) || 'unspecified exception in autoConnectWorker';
+    return { ok: false, error: errStr, stack: e?.stack?.split('\n')?.[1]?.trim() };
+  }
+}
+
 async function workerAutoPollTick() {
   try {
     await coldStart;
     // Only run if armed + has identity + not currently running.
     if (!state.workerArmed) return;
     if (!state.workerId) return;
+    // Fire the worker roster heartbeat FIRST — before any of the early
+    // returns below. Even armed-idle workers must show as online in the
+    // manager fleet; without this, workers that never claim (empty
+    // queue) appear as offline forever.
+    sendWorkerHeartbeat(state.workerId).catch(() => {});
     if (state.running) return;
     if (state.starting) return;
     if (state.resumeInFlight) return;
@@ -523,52 +605,46 @@ async function workerAutoPollTick() {
     // we can detect known failures (no KP URL, etc.) and log them once
     // instead of spamming the activity log every 30s.
     pushLog(`Worker auto-poll: found pending batch "${batchId}" — claiming`, 'ok');
-    chrome.runtime.sendMessage({
-      action: 'jobs:autoConnectWorker',
+    // Direct in-SW call — no chrome.runtime.sendMessage. That message
+    // hop occasionally failed with 'Receiving end does not exist' when
+    // MV3 GC'd the SW mid-send. Same code, no cross-context indirection.
+    const resp = await _doAutoConnectWorker({
       workerId: state.workerId,
       chunkSize: state.continuousChunkSize || 5,
-    }, (resp) => {
-      // Build the most-informative error string possible. Previously this
-      // collapsed to "unknown" whenever the response didn't have an
-      // explicit `.error` field — useless for debugging. Now we surface:
-      // - chrome.runtime.lastError if the SW died mid-flight
-      // - resp.message if present (e.g. "engine already running — already armed")
-      // - resp.error if present
-      // - the raw shape of resp if all else fails
-      let err = null;
-      if (chrome.runtime.lastError) {
-        err = `SW message error: ${chrome.runtime.lastError.message || JSON.stringify(chrome.runtime.lastError)}`;
-      } else if (!resp) {
-        err = 'No response from background (handler may have thrown without sendResponse)';
-      } else if (!resp.ok) {
-        err = resp.error || resp.message || `response without ok/error fields: ${JSON.stringify(resp).slice(0, 200)}`;
-      }
-      if (err) {
-        if (err === _lastAutoPollErr) {
-          _lastAutoPollErrCount++;
-          if (_lastAutoPollErrCount === 10) {
-            bufferActivity({
-              level: 'err',
-              source: 'autopoll',
-              message: `Worker "${state.workerId}" stuck for ~5 min: ${err.slice(0, 300)}`,
-            });
-          }
-          return;
+    });
+    let err = null;
+    if (!resp) {
+      err = 'No response from _doAutoConnectWorker (unreachable — bug)';
+    } else if (!resp.ok) {
+      err = resp.error || resp.message || `response without ok/error fields: ${JSON.stringify(resp).slice(0, 200)}`;
+    }
+    if (err) {
+      if (err === _lastAutoPollErr) {
+        _lastAutoPollErrCount++;
+        // Only surface to dashboard ONCE (at count=10 ≈ 5min stuck).
+        // After that, keep silent — log spam helps no one.
+        if (_lastAutoPollErrCount === 10) {
+          bufferActivity({
+            level: 'err',
+            source: 'autopoll',
+            message: `Worker "${state.workerId}" stuck for ~5 min: ${err.slice(0, 300)}`,
+          });
         }
-        _lastAutoPollErr = err;
-        _lastAutoPollErrCount = 1;
-        pushLog(`Worker auto-poll: claim refused — ${err}`, 'err');
-        bufferActivity({
-          level: 'err',
-          source: 'autopoll',
-          message: `Worker "${state.workerId}" cannot start: ${err.slice(0, 300)}`,
-        });
         return;
       }
-      // Success or benign "already running" — reset the dedup tracker.
-      _lastAutoPollErr = '';
-      _lastAutoPollErrCount = 0;
-    });
+      _lastAutoPollErr = err;
+      _lastAutoPollErrCount = 1;
+      pushLog(`Worker auto-poll: claim refused — ${err}`, 'err');
+      bufferActivity({
+        level: 'err',
+        source: 'autopoll',
+        message: `Worker "${state.workerId}" cannot start: ${err.slice(0, 300)}`,
+      });
+      return;
+    }
+    // Success or benign "already running" — reset the dedup tracker.
+    _lastAutoPollErr = '';
+    _lastAutoPollErrCount = 0;
   } catch (e) {
     pushLog(`Worker auto-poll error: ${e.message}`, 'err');
   }
@@ -1765,6 +1841,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // hits Stop. Replaces the manual Batch-ID-paste + Chunk-size + Claim
   // flow for the common case where a worker just wants to "go".
   if (action === 'jobs:autoConnectWorker') {
+    _doAutoConnectWorker(msg).then(sendResponse);
+    return true;
+  }
+  // Legacy inline block preserved below solely to keep the diff small —
+  // it's unreachable because the branch above returns early. Retained
+  // during a follow-up cleanup.
+  if (false && action === 'jobs:autoConnectWorker') {
     (async () => {
       try {
         const workerId = (msg.workerId || state.workerId || '').trim();
