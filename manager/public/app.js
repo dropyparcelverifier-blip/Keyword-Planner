@@ -23,6 +23,7 @@ const state = {
   setupCode: '',
   seenWorkerIds: new Set(),  // for new-worker-connect toast
   timelineTimer: null,        // dashboard throughput refresh
+  workerFilter: '',            // activity-log scope: '' = all workers, else worker_id
 };
 
 // ─────────── Persistent UI state ───────────
@@ -538,6 +539,15 @@ $('dashRefreshInterval').addEventListener('change', () => {
   startDashPolling();
 });
 $('dashRefreshBtn').addEventListener('click', refreshDashboard);
+// Activity log worker filter — scoping the log to one worker is
+// essential once you have 3+ workers all logging every 30s.
+$('activityWorkerFilter')?.addEventListener('change', () => {
+  state.workerFilter = $('activityWorkerFilter').value || '';
+  saveUI({ workerFilter: state.workerFilter });
+  const sub = $('activityLogSub');
+  if (sub) sub.textContent = state.workerFilter ? `filtered to ${state.workerFilter}` : 'latest 120 events';
+  refreshDashboard();
+});
 $('wakeAllBtn').addEventListener('click', async () => {
   if (!confirm('Send wake signal to all workers?')) return;
   try { await api.commandsSend(null, 'wake'); alert('✓ Wake signal sent.'); refreshDashboard(); }
@@ -566,7 +576,7 @@ async function refreshDashboard() {
       api.jobsSummary(),
       api.jobsWorkerStats(),
       api.workersList().catch(() => ({ workers: [] })),
-      api.activityGet(state.activeBatch, 120),
+      api.activityGet(state.activeBatch, 120, state.workerFilter),
       api.failedJobs(state.activeBatch).catch(() => ({ rows: [] })),
       api.keywordsTimeline(state.activeBatch).catch(() => ({ buckets: [] })),
     ]);
@@ -598,6 +608,20 @@ async function refreshDashboard() {
     state.workers = workers.workers || [];
     renderBatchOverview();
     renderWorkerFleet();
+    // Keep the activity-log worker filter dropdown in sync with the fleet.
+    // Every worker we've ever seen appears as an option; disappearing
+    // workers stay listed so their history remains reachable.
+    (() => {
+      const sel = $('activityWorkerFilter'); if (!sel) return;
+      const allIds = new Set([
+        ...state.workers.map(w => w.worker_id).filter(Boolean),
+        ...(state.workerFilter ? [state.workerFilter] : []),
+      ]);
+      const cur = sel.value;
+      sel.innerHTML = `<option value="">All workers</option>` +
+        Array.from(allIds).sort().map(id => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
+      sel.value = state.workerFilter || cur || '';
+    })();
     renderActivity(activity.events || []);
     renderFailedCard(failed.rows || []);
     renderTrendChart(timeline);
@@ -691,7 +715,8 @@ function renderWorkerFleet() {
     <thead><tr><th>Worker</th><th>Last heartbeat</th><th class="num">In-flight</th><th class="num">Done</th><th class="num">Failed</th><th style="width: 1%;">Actions</th></tr></thead>
     <tbody>${state.workers.map(w => `
       <tr>
-        <td><span class="chip ${workerDotClass(w.last_heartbeat)}">●</span> <span class="mono">${esc(w.worker_id)}</span></td>
+        <td><span class="chip ${workerDotClass(w.last_heartbeat)}">●</span>
+            <a href="#" class="mono" data-filter-worker="${esc(w.worker_id)}" style="color: var(--info); text-decoration: none;" title="Filter activity log to this worker">${esc(w.worker_id)}</a></td>
         <td>${fmtAgo(w.last_heartbeat)}</td>
         <td class="num">${w.in_flight || 0}</td>
         <td class="num" style="color:var(--success);">${w.done || 0}</td>
@@ -706,6 +731,19 @@ function renderWorkerFleet() {
         </td>
       </tr>`).join('')}
     </tbody></table>`;
+  // Click worker ID -> filter activity log to that worker.
+  el.querySelectorAll('a[data-filter-worker]').forEach(a => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      const w = a.dataset.filterWorker;
+      state.workerFilter = w;
+      saveUI({ workerFilter: w });
+      const sel = $('activityWorkerFilter'); if (sel) sel.value = w;
+      const sub = $('activityLogSub'); if (sub) sub.textContent = `filtered to ${w}`;
+      toast(`Activity log now scoped to ${w}`, 'info');
+      refreshDashboard();
+    });
+  });
   // Wire per-worker action buttons.
   el.querySelectorAll('.worker-actions button[data-worker]').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -1376,6 +1414,11 @@ refreshUploadSidebar();
     state.activeBatch = saved.batch;
     // dashBatchSelect is populated later, but restore analytics batch too
     analytics.batchId = saved.batch;
+  }
+  if (saved.workerFilter) {
+    state.workerFilter = saved.workerFilter;
+    const sub = $('activityLogSub');
+    if (sub) sub.textContent = `filtered to ${saved.workerFilter}`;
   }
   // Tab restore last — needs to happen AFTER dashBatchSelect exists so
   // dashboard init sees the saved batch.

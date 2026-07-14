@@ -49,7 +49,7 @@ export const api = {
   jobsRequeue:       (jobId)           => _fetch('/api/jobs/requeue', { method: 'POST', body: { jobId } }),
   jobsReleaseStale:  (staleMinutes)    => _fetch('/api/jobs/release-stale', { method: 'POST', body: { staleMinutes } }),
   keywordsGet:       (batchId)         => _fetch(`/api/keywords?batchId=${encodeURIComponent(batchId)}`),
-  activityGet:       (batchId, limit)  => _fetch(`/api/activity?batchId=${encodeURIComponent(batchId || '')}&limit=${limit || 120}`),
+  activityGet:       (batchId, limit, workerId) => _fetch(`/api/activity?batchId=${encodeURIComponent(batchId || '')}&limit=${limit || 120}${workerId ? `&workerId=${encodeURIComponent(workerId)}` : ''}`),
   commandsSend:      (workerId, command, payload) => _fetch('/api/commands', { method: 'POST', body: { workerId, command, payload, createdBy: 'web-manager' } }),
   configGet:         ()                => _fetch('/api/config'),
   configSet:         (config)          => _fetch('/api/config', { method: 'POST', body: { config } }),
