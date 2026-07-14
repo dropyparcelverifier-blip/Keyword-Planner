@@ -467,6 +467,9 @@ $('cleanupBtn').addEventListener('click', async () => {
 async function refreshWorkersTab() {
   // Default the "Manager URL" input to this window's origin.
   if (!$('workerManagerUrl').value) $('workerManagerUrl').value = window.location.origin;
+  // Render the one-liner PowerShell installer with THIS manager URL baked in.
+  const installer = $('installOneLiner');
+  if (installer) installer.textContent = `irm ${window.location.origin}/install-worker.ps1 | iex`;
   // Re-populate command Worker dropdown.
   try {
     const w = await api.jobsWorkerStats();
@@ -490,6 +493,11 @@ $('genSetupBtn').addEventListener('click', async () => {
 $('copySetupBtn').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText(state.setupCode); $('copySetupBtn').textContent = '✓ Copied'; setTimeout(() => $('copySetupBtn').textContent = 'Copy', 1500); }
   catch { alert('Clipboard blocked. Select the code above and Ctrl+C.'); }
+});
+$('copyInstallBtn')?.addEventListener('click', async () => {
+  const cmd = $('installOneLiner').textContent;
+  try { await navigator.clipboard.writeText(cmd); $('copyInstallBtn').textContent = '✓ Copied'; setTimeout(() => $('copyInstallBtn').textContent = 'Copy', 1500); }
+  catch { alert('Clipboard blocked. Select the command and Ctrl+C manually.'); }
 });
 $('sendCmdBtn').addEventListener('click', async () => {
   const workerId = $('cmdWorker').value || null;

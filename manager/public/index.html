@@ -312,6 +312,32 @@
     <section class="panel" id="panel-workers">
       <div class="card">
         <div class="card-head">
+          <span class="card-icon">📥</span>
+          <span class="card-title">Install worker on a new PC (one command)</span>
+          <span class="card-sub">PowerShell — Windows only</span>
+        </div>
+        <div class="card-body">
+          <div class="hint">Run this ONCE on the worker PC in PowerShell. It downloads the extension, sets up a dedicated Chrome profile, and adds a Windows Startup shortcut so Chrome auto-launches on login with the extension loaded.</div>
+          <div class="row" style="margin-top: 10px;">
+            <div class="setup-code" id="installOneLiner" style="flex: 1; min-width: 300px;">Loading…</div>
+            <button id="copyInstallBtn">Copy</button>
+          </div>
+          <div style="margin-top: 10px; padding: 10px; background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 6px; font-size: 12px; color: var(--text-2);">
+            <strong style="color: var(--text-1);">One-time step after the script finishes:</strong>
+            <ol style="margin: 6px 0 0 20px; padding: 0;">
+              <li>Chrome opens automatically → visit <code>chrome://extensions</code></li>
+              <li>Toggle <strong>Developer mode</strong> on (top-right)</li>
+              <li>Click <strong>Load unpacked</strong> → pick <code>%LOCALAPPDATA%\AdBrainWorker\extension</code></li>
+              <li>Open the extension popup → role <strong>Worker</strong></li>
+              <li>Come back here → copy the setup code below → paste into the extension</li>
+            </ol>
+            <div style="margin-top: 8px; color: var(--success);">✓ From then on, every login auto-launches Chrome with the extension armed. No clicks needed.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
           <span class="card-icon">🔗</span>
           <span class="card-title">Generate setup code for a worker</span>
         </div>
