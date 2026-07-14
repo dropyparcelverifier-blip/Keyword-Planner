@@ -203,7 +203,10 @@
             <div class="card-head">
               <span class="card-icon">📜</span>
               <span class="card-title">Activity log</span>
-              <span class="card-sub">latest 120 events</span>
+              <span class="card-sub" id="activityLogSub">latest 120 events</span>
+              <select id="activityWorkerFilter" style="margin-left:auto; min-width: 140px; font-size: 11px; padding: 3px 6px;">
+                <option value="">All workers</option>
+              </select>
             </div>
             <div class="card-body">
               <div class="log" id="activityLog"><div class="empty">No activity yet.</div></div>

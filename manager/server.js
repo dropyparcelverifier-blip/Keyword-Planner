@@ -186,6 +186,7 @@ const Q = {
   keywordsByBatch: db.prepare(`SELECT data FROM keywords WHERE batch_id=? ORDER BY id ASC`),
   insertActivity: db.prepare(`INSERT INTO activity_log (batch_id, worker_id, level, source, message, product_url, sku) VALUES (?, ?, ?, ?, ?, ?, ?)`),
   recentActivity: db.prepare(`SELECT * FROM activity_log WHERE (?1 IS NULL OR batch_id=?1) ORDER BY ts DESC LIMIT ?2`),
+  recentActivityWorker: db.prepare(`SELECT * FROM activity_log WHERE (?1 IS NULL OR batch_id=?1) AND worker_id=?2 ORDER BY ts DESC LIMIT ?3`),
   insertCommand: db.prepare(`INSERT INTO worker_commands (worker_id, command, payload, created_by) VALUES (?, ?, ?, ?)`),
   pendingCommands: db.prepare(`SELECT * FROM worker_commands WHERE acknowledged_at IS NULL AND (worker_id IS NULL OR worker_id=?) ORDER BY id ASC`),
   ackCommand: db.prepare(`UPDATE worker_commands SET acknowledged_at=?, acknowledged_by=? WHERE id=?`),
@@ -689,9 +690,13 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true });
     }
     if (m === 'GET' && p === '/api/activity') {
-      const batchId = url.searchParams.get('batchId') || null;
+      const batchId  = url.searchParams.get('batchId') || null;
+      const workerId = (url.searchParams.get('workerId') || '').trim();
       const limit = Math.min(500, parseInt(url.searchParams.get('limit') || '120', 10));
-      return send(res, 200, { ok: true, events: Q.recentActivity.all(batchId, limit) });
+      const rows = workerId
+        ? Q.recentActivityWorker.all(batchId, workerId, limit)
+        : Q.recentActivity.all(batchId, limit);
+      return send(res, 200, { ok: true, events: rows });
     }
 
     // ----- Command bus -----
