@@ -3,7 +3,10 @@
 // All communication with the manager goes through /public/api.js.
 
 import { api, getToken, setToken, fetchBatchKeywordStats, generateSetupCode } from '/public/api.js';
-import * as XLSX from '/public/xlsx.mjs';
+// SheetJS is loaded via <script> tag in index.html — window.XLSX is
+// the UMD global. Using the UMD build (not the .mjs ES module) avoids
+// the 28k-line mixed-export module blocking app.js from executing.
+const XLSX = window.XLSX;
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));

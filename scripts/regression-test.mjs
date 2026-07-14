@@ -350,13 +350,25 @@ async function run() {
   assertEq(cssR.status, 200, '19.11 /public/styles.css returns 200');
   assert(cssR.contentType.includes('text/css'), '19.12 styles.css content-type is text/css');
 
-  const xlsxR = await fetchStatic('/public/xlsx.mjs');
-  assertEq(xlsxR.status, 200, '19.13 /public/xlsx.mjs returns 200');
-  assert(xlsxR.contentType.includes('javascript'), '19.14 xlsx.mjs served as JS');
+  const xlsxR = await fetchStatic('/public/xlsx.full.min.js');
+  assertEq(xlsxR.status, 200, '19.13 /public/xlsx.full.min.js returns 200');
+  assert(xlsxR.contentType.includes('javascript'), '19.14 xlsx.full.min.js served as JS');
+
+  // The UMD build must load BEFORE app.js so window.XLSX exists by the
+  // time app.js's file-input handler runs. If app.js imports SheetJS
+  // as an ES module, a parse error in the 28k-line module blocks the
+  // whole app from executing (real bug seen in prod: tabs stopped
+  // switching, upload button stayed disabled).
+  const xlsxScriptIdx = idx.body.indexOf('xlsx.full.min.js');
+  const appJsIdx = idx.body.indexOf('/public/app.js');
+  assert(xlsxScriptIdx > 0, '19.15 index loads xlsx.full.min.js');
+  assert(xlsxScriptIdx < appJsIdx, '19.16 xlsx.full.min.js loaded BEFORE app.js');
+  assert(!appJs.body.includes("from '/public/xlsx.mjs'"), '19.17 app.js does not import broken xlsx.mjs');
+  assert(appJs.body.includes('window.XLSX'), '19.18 app.js reads UMD global window.XLSX');
 
   // Path traversal is refused.
   const trav = await fetch(`${BASE}/public/../server.js`);
-  assert(trav.status === 403 || trav.status === 404, '19.15 path traversal blocked');
+  assert(trav.status === 403 || trav.status === 404, '19.19 path traversal blocked');
 
   // ===== 20. SETUP CODE FORMAT =====
   // The web app's generateSetupCode() must produce a payload the
