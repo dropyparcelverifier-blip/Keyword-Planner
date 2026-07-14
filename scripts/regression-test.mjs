@@ -488,6 +488,53 @@ async function run() {
   const wTrav = await fetchNoAuth('/worker/../.git/config');
   assert(wTrav.status === 404 || wTrav.status === 400, '20c.19 traversal attempts rejected');
 
+  // Every file the installer will try to download must ACTUALLY exist on disk
+  // AND be reachable via the /worker/ route. This is the test that would have
+  // caught the missing `modules/image-matcher.js` bug that bricked the
+  // installer with a 404 in production.
+  for (const f of parsed.files) {
+    const diskPath = resolve(REPO, f);
+    let onDisk = true;
+    try { readFileSync(diskPath); } catch { onDisk = false; }
+    assert(onDisk, `20c.20+ allowlisted file exists on disk: ${f}`);
+    const httpR = await fetchNoAuth(`/worker/${f}`);
+    assert(httpR.status === 200, `20c.20+ /worker/${f} served OK (got ${httpR.status})`);
+  }
+
+  // Cross-check: every ES import path referenced from the top-level extension
+  // files (background/popup/offscreen/sandbox + everything in modules/) must
+  // resolve to a file that IS in the allowlist. This catches the "forgot to
+  // add a new module to WORKER_FILES" class of bug.
+  function collectImports(filepath, base) {
+    let src = ''; try { src = readFileSync(filepath, 'utf-8'); } catch { return []; }
+    const out = [];
+    // ES imports: `import ... from './x.js'` or `import('./x.js')`
+    const re = /(?:from|import)\s*(?:\(\s*)?["']((?:\.\/|\.\.\/)[^"']+?\.m?js)["']/g;
+    let m;
+    while ((m = re.exec(src))) {
+      const abs = resolve(dirname(filepath), m[1]);
+      const rel = abs.substring(REPO.length + 1).replace(/\\/g, '/');
+      out.push(rel);
+    }
+    return out;
+  }
+  const scanRoots = ['background.js', 'popup.js', 'dashboard.js']
+    .map(f => resolve(REPO, f));
+  const modulesDir = resolve(REPO, 'modules');
+  try { for (const f of readdirSync(modulesDir)) if (f.endsWith('.js')) scanRoots.push(resolve(modulesDir, f)); } catch {}
+  const allowSet = new Set(parsed.files);
+  const missingFromAllowlist = new Set();
+  for (const root of scanRoots) {
+    for (const dep of collectImports(root)) {
+      // dashboard.js only ships with the extension; if a file references a
+      // manager/public/ file it's the web app, skip.
+      if (dep.startsWith('manager/')) continue;
+      if (!allowSet.has(dep)) missingFromAllowlist.add(dep);
+    }
+  }
+  assert(missingFromAllowlist.size === 0,
+    `20c.21 every import target is in WORKER_FILES (missing: ${Array.from(missingFromAllowlist).join(', ') || 'none'})`);
+
   // The install one-liner should show up in the workers tab.
   assert(idx.body.includes('installOneLiner'), '20c.20 install one-liner element in index.html');
 

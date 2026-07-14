@@ -225,13 +225,15 @@ const WORKER_FILES = [
   'dashboard.html', 'dashboard.js',
   'offscreen.html', 'offscreen.js',
   'sandbox.html', 'sandbox.js',
-  'kp.js', 'serp-reader.js', 'amazon-reader.js', 'image-matcher.js',
+  'kp.js', 'serp-reader.js', 'amazon-reader.js',
   'modules/keyword-discovery.js',
   'modules/keyword-filter.js',
   'modules/discovery-jobs.js',
   'modules/discovery-export.js',
+  'modules/image-matcher.js',
+  'modules/attribute-families.js',
   'config/discovery-config.js',
-  'lib/xlsx.mjs', 'lib/xlsx.full.min.js', 'lib/transformers.min.js',
+  'lib/xlsx.mjs', 'lib/transformers.min.js',
 ];
 
 // PowerShell one-liner installer. Bootstraps the extension on a worker PC:
@@ -258,7 +260,7 @@ function serveWorkerInstaller(req, res, url) {
 # After first run: connect the extension to this manager via the popup's
 # 'Apply setup code' box (copy the code from the manager's Workers tab).
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 $mgr    = '${managerBase}'
 $root   = Join-Path $env:LOCALAPPDATA 'AdBrainWorker'
 $extDir = Join-Path $root 'extension'
@@ -266,18 +268,36 @@ $prof   = Join-Path $root 'profile'
 New-Item -ItemType Directory -Force -Path $extDir | Out-Null
 New-Item -ItemType Directory -Force -Path $prof   | Out-Null
 
-Write-Host '[AdBrain] Downloading extension files from' $mgr '…' -ForegroundColor Cyan
-$list = (Invoke-RestMethod "$mgr/worker-files.json").files
-$total = $list.Count; $i = 0
+Write-Host '[AdBrain] Downloading extension files from' $mgr '...' -ForegroundColor Cyan
+try {
+  $list = (Invoke-RestMethod "$mgr/worker-files.json").files
+} catch {
+  Write-Host ("[AdBrain] Cannot reach manager: {0}" -f $_.Exception.Message) -ForegroundColor Red
+  Write-Host "  Check that the manager server is running at $mgr" -ForegroundColor Yellow
+  exit 1
+}
+$total = $list.Count; $i = 0; $failed = @()
 foreach ($f in $list) {
   $i++
-  $out = Join-Path $extDir ($f -replace '/', '\\\\')
+  $out = Join-Path $extDir ($f -replace '/', '\\')
   New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null
-  Invoke-WebRequest -UseBasicParsing -Uri "$mgr/worker/$f" -OutFile $out
+  try {
+    Invoke-WebRequest -UseBasicParsing -Uri "$mgr/worker/$f" -OutFile $out -ErrorAction Stop
+  } catch {
+    $failed += $f
+    Write-Host ("  [!] {0} - {1}" -f $f, $_.Exception.Message) -ForegroundColor Red
+  }
   Write-Progress -Activity 'Downloading extension' -Status "$f" -PercentComplete ([int](100 * $i / $total))
 }
 Write-Progress -Activity 'Downloading extension' -Completed
-Write-Host "[AdBrain] Downloaded $total file(s) to $extDir" -ForegroundColor Green
+$got = $total - $failed.Count
+if ($failed.Count -eq 0) {
+  Write-Host ("[AdBrain] Downloaded {0}/{0} file(s) to {1}" -f $total, $extDir) -ForegroundColor Green
+} else {
+  Write-Host ("[AdBrain] Downloaded {0}/{1} file(s). {2} failed:" -f $got, $total, $failed.Count) -ForegroundColor Yellow
+  $failed | ForEach-Object { Write-Host ("  - {0}" -f $_) -ForegroundColor Yellow }
+  Write-Host "The extension may still work if the failed files aren't runtime-critical, but Load Unpacked may show errors. Ask the manager to update the WORKER_FILES allowlist." -ForegroundColor Yellow
+}
 
 # Locate chrome.exe
 $chrome = $null
