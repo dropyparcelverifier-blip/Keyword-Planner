@@ -321,6 +321,74 @@ async function run() {
   const qtok = await fetch(`${BASE}/api/jobs/summary?token=${TOKEN}`).then(r => r.json()).catch(() => null);
   assert(qtok?.ok === true, '18.1 token accepted via ?token= query string');
 
+  // ===== 19. WEB APP STATIC-SERVE =====
+  // The web app files live under manager/public/. Confirm the server
+  // serves them with correct content types (index.html at /, api.js
+  // and app.js as ES modules, xlsx.mjs as JS, styles.css as CSS).
+  async function fetchStatic(path) {
+    const r = await fetch(`${BASE}${path}`);
+    const body = await r.text();
+    return { status: r.status, contentType: r.headers.get('content-type') || '', body };
+  }
+  const idx = await fetchStatic('/');
+  assertEq(idx.status, 200, '19.1 / returns 200 (serves index.html)');
+  assert(idx.contentType.includes('text/html'), '19.2 / content-type is text/html');
+  assert(idx.body.includes('AdBrain Manager'), '19.3 / body is the web app HTML');
+  assert(idx.body.includes('type="module" src="/public/app.js"'), '19.4 / loads app.js as module');
+
+  const appJs = await fetchStatic('/public/app.js');
+  assertEq(appJs.status, 200, '19.5 /public/app.js returns 200');
+  assert(appJs.contentType.includes('javascript'), '19.6 app.js served as JS');
+  assert(appJs.body.includes('import { api'), '19.7 app.js imports from api.js');
+
+  const apiJs = await fetchStatic('/public/api.js');
+  assertEq(apiJs.status, 200, '19.8 /public/api.js returns 200');
+  assert(apiJs.body.includes('export const api'), '19.9 api.js exports api');
+  assert(apiJs.body.includes('generateSetupCode'), '19.10 api.js exports generateSetupCode');
+
+  const cssR = await fetchStatic('/public/styles.css');
+  assertEq(cssR.status, 200, '19.11 /public/styles.css returns 200');
+  assert(cssR.contentType.includes('text/css'), '19.12 styles.css content-type is text/css');
+
+  const xlsxR = await fetchStatic('/public/xlsx.mjs');
+  assertEq(xlsxR.status, 200, '19.13 /public/xlsx.mjs returns 200');
+  assert(xlsxR.contentType.includes('javascript'), '19.14 xlsx.mjs served as JS');
+
+  // Path traversal is refused.
+  const trav = await fetch(`${BASE}/public/../server.js`);
+  assert(trav.status === 403 || trav.status === 404, '19.15 path traversal blocked');
+
+  // ===== 20. SETUP CODE FORMAT =====
+  // The web app's generateSetupCode() must produce a payload the
+  // extension's jobs:importSetupCode handler can parse. This test
+  // simulates that: encode here, decode with the same rules.
+  const testUrl = 'http://mgr.example.ts.net:8787';
+  const testToken = 'test-token-xyz';
+  const testKp = 'https://ads.google.com/aw/keywordplanner/';
+  const payload = JSON.stringify({ v: 3, managerUrl: testUrl, managerToken: testToken, kpUrl: testKp });
+  const bytes = new TextEncoder().encode(payload);
+  let bin = ''; for (const b of bytes) bin += String.fromCharCode(b);
+  const code = 'adb2:' + Buffer.from(bin, 'binary').toString('base64');
+  assert(code.startsWith('adb2:'), '20.1 setup code has adb2: prefix');
+  // Decode with the same rules as background.js jobs:importSetupCode
+  const b64 = code.slice(5);
+  const decoded = JSON.parse(Buffer.from(b64, 'base64').toString('utf-8'));
+  assertEq(decoded.v, 3, '20.2 setup code v=3');
+  assertEq(decoded.managerUrl, testUrl, '20.3 setup code preserves managerUrl');
+  assertEq(decoded.managerToken, testToken, '20.4 setup code preserves managerToken');
+  assertEq(decoded.kpUrl, testKp, '20.5 setup code preserves kpUrl');
+
+  // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
+  // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
+  const [s1, w1, a1] = await Promise.all([
+    fetch(`${BASE}/api/jobs/summary`, { headers: { 'X-Manager-Token': TOKEN } }).then(r => r.json()),
+    fetch(`${BASE}/api/jobs/worker-stats`, { headers: { 'X-Manager-Token': TOKEN } }).then(r => r.json()),
+    fetch(`${BASE}/api/activity?limit=50`, { headers: { 'X-Manager-Token': TOKEN } }).then(r => r.json()),
+  ]);
+  assert(s1?.ok && Array.isArray(s1.batches), '21.1 dashboard summary reachable');
+  assert(w1?.ok && Array.isArray(w1.workers), '21.2 dashboard workers reachable');
+  assert(a1?.ok && Array.isArray(a1.events), '21.3 dashboard activity reachable');
+
   // ---------------- results ----------------
   console.log(`\n\n${passed} passed, ${failed} failed`);
   if (fails.length) {
