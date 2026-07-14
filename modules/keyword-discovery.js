@@ -3690,7 +3690,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
               });
             }
 
-            // Per-keyword audit aids (exported to CSV / Supabase). serp_url is
+            // Per-keyword audit aids (exported to CSV / manager). serp_url is
             // a clickable Google link the user can open to manually compare
             // against image_count. match_sources tells them WHICH zone the
             // wins came from. thumbs_captured contrasts what we found vs what

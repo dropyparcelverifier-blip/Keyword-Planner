@@ -7,13 +7,10 @@
 // brittle (selectors change) and carries ToS risk. The toggle in the popup
 // disables it for runs where you only want autosuggest counts.
 
-// Fallback Supabase URL — user can override via the popup Settings tab
-// (stored in chrome.storage as 'adbrainSupabaseUrl').
-export const SUPABASE_URL = 'https://YOUR-ADBRAIN-PROJECT.supabase.co';
-export const SUPABASE_TABLE = 'adbrain_discovered_keywords';
+// Manager URL + token now live in chrome.storage under
+// STORAGE_KEY_MANAGER_URL / STORAGE_KEY_MANAGER_TOKEN (see
+// modules/discovery-jobs.js). No cloud constants here anymore.
 
-export const STORAGE_KEY_SERVICE_KEY    = 'adbrainServiceKey';
-export const STORAGE_KEY_SUPABASE_URL   = 'adbrainSupabaseUrl';
 export const STORAGE_KEY_KP_URL         = 'adbrainKpUrl';
 export const STORAGE_KEY_LAST_REPORT    = 'adbrainLastReport';
 export const STORAGE_KEY_LAST_BATCH     = 'adbrainLastBatch';
@@ -175,18 +172,6 @@ export const STATUS_PAUSED_USER     = 'Paused by user';
 // Storage keys for paced-run state. doneProducts already lives separately;
 // these add chunk-rest persistence so a browser restart mid-rest still resumes.
 export const STORAGE_KEY_REST_UNTIL    = 'adbrainRestUntil';      // unix ms or 0
-
-export async function getServiceKey() {
-  const data = await chrome.storage.local.get([STORAGE_KEY_SERVICE_KEY]);
-  return (data[STORAGE_KEY_SERVICE_KEY] || '').trim();
-}
-
-// Returns the user-overridden Supabase URL if set, else the file-level fallback.
-export async function getSupabaseUrl() {
-  const data = await chrome.storage.local.get([STORAGE_KEY_SUPABASE_URL]);
-  const userVal = (data[STORAGE_KEY_SUPABASE_URL] || '').trim().replace(/\/+$/, '');
-  return userVal || SUPABASE_URL;
-}
 
 export async function getKpUrl() {
   const data = await chrome.storage.local.get([STORAGE_KEY_KP_URL]);

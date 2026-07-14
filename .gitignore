@@ -3,3 +3,8 @@ Thumbs.db
 *.log
 .vscode/
 .idea/
+
+# SQLite manager DB (runtime, per-machine)
+manager/adbrain.db
+manager/adbrain.db-wal
+manager/adbrain.db-shm

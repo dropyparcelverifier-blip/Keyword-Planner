@@ -1599,10 +1599,10 @@
        "both" role and is not the primary entrypoint anymore. -->
   <div class="panel active" id="panel-queue">
 
-    <!-- Inline Supabase credentials. Same storage keys as the Settings
-         tab, so saving here also unlocks Push to AdBrain. Card stays
-         visible so managers can always re-generate setup codes for
-         new workers. Workers see ONLY the "Apply setup code" half. -->
+    <!-- Manager connection. Same storage keys as the Settings tab,
+         so saving here also unlocks Push to AdBrain. Card stays visible
+         so managers can always re-generate setup codes for new workers.
+         Workers see ONLY the "Apply setup code" half. -->
     <div class="queue-card" id="mgrCredsCard">
       <div class="queue-card-head">
         <span class="queue-card-icon">🔌</span>
@@ -1611,20 +1611,20 @@
           <div class="queue-card-sub" id="mgrCredsStatus">Checking…</div>
         </div>
       </div>
-      <!-- Manual URL + key entry — Manager / Both only. Workers apply
+      <!-- Manual URL + token entry — Manager / Both only. Workers apply
            a setup code from the manager instead (see card below). -->
       <div data-show-when="manager,both">
         <div class="qc-row">
-          <label class="label">Supabase project URL</label>
-          <input type="text" id="mgrSupabaseUrl" placeholder="https://xxxxx.supabase.co" />
+          <label class="label">Manager URL</label>
+          <input type="text" id="mgrManagerUrl" placeholder="http://manager-pc.tailnet.ts.net:8787" />
         </div>
         <div class="qc-row">
-          <label class="label">service_role key</label>
-          <input type="password" id="mgrServiceKey" placeholder="eyJhbGc..." />
-          <div class="hint">Stored locally in this PC's <code>chrome.storage</code>. Used by every queue call AND by Push-to-AdBrain.</div>
+          <label class="label">Manager token (optional)</label>
+          <input type="password" id="mgrManagerToken" placeholder="Leave blank if the manager runs unauthenticated" />
+          <div class="hint">Stored locally in this PC's <code>chrome.storage</code>. Sent as the <code>X-Manager-Token</code> header on every queue call.</div>
         </div>
         <div class="queue-card-action">
-          <button id="mgrSaveCredsBtn">Save credentials</button>
+          <button id="mgrSaveCredsBtn">Save connection</button>
         </div>
       </div>
       <div id="mgrSaveCredsResult" class="queue-card-result"></div>
@@ -1660,7 +1660,7 @@
           class="setup-code-text"></textarea>
         <div class="setup-code-warn">
           <span class="setup-code-warn-icon">⚠</span>
-          <span>Code contains your <code>service_role</code> key. Share over <strong>encrypted channels only</strong> — Signal, WhatsApp, Telegram secret chat. Treat it like a password.</span>
+          <span>If your manager uses a token, the code contains it. Share over <strong>encrypted channels only</strong> — Signal, WhatsApp, Telegram secret chat. Treat it like a password.</span>
         </div>
       </div>
 
@@ -1670,13 +1670,13 @@
           <span class="setup-code-icon">📥</span>
           <div>
             <div class="setup-code-title">Apply setup code from manager</div>
-            <div class="setup-code-sub">One paste sets both URL + service_role key.</div>
+            <div class="setup-code-sub">One paste sets Manager URL + optional token.</div>
           </div>
         </div>
         <textarea
           id="mgrApplySetupCode"
           rows="2"
-          placeholder="Paste the setup code (starts with adb1:…)"
+          placeholder="Paste the setup code (starts with adb2:…)"
           class="setup-code-text"></textarea>
         <button class="setup-code-primary setup-code-primary-full" id="mgrApplySetupBtn">Apply setup code</button>
         <div id="mgrApplySetupResult" class="setup-code-result"></div>
@@ -1853,15 +1853,15 @@
     </div>
 
     <!-- Manager-only: centralised CSV download. Pulls every row for a
-         batch from Supabase and generates per-SKU CSVs locally so the
-         manager doesn't have to collect files from each worker's
+         batch from the manager DB and generates per-SKU CSVs locally so
+         the manager doesn't have to collect files from each worker's
          Downloads folder. -->
     <div class="queue-card" data-show-when="manager,both">
       <div class="queue-card-head">
         <span class="queue-card-icon">📦</span>
         <div class="queue-card-title-wrap">
           <div class="queue-card-title">Download all CSVs</div>
-          <div class="queue-card-sub">Pull every row for a batch from Supabase and generate per-SKU CSVs on this PC.</div>
+          <div class="queue-card-sub">Pull every row for a batch from the manager and generate per-SKU CSVs on this PC.</div>
         </div>
       </div>
       <div class="qc-row">
@@ -1870,7 +1870,7 @@
         <div class="hint">CSVs land in <code>Downloads/adbrain_&lt;batchId&gt;/</code>. Each batch gets its own folder so they don't intermingle.</div>
       </div>
       <div class="queue-card-action">
-        <button id="mgrDownloadBtn">Download all CSVs from Supabase</button>
+        <button id="mgrDownloadBtn">Download all CSVs from manager</button>
       </div>
       <div id="mgrDownloadResult" class="queue-card-result"></div>
     </div>
@@ -2014,7 +2014,7 @@
     <!-- ─────── Group 4: Output & sync ─────── -->
     <div class="settings-group">
       <div class="settings-group-title">Output &amp; sync</div>
-      <div class="settings-group-sub">Auto-CSV per product + Supabase push credentials.</div>
+      <div class="settings-group-sub">Auto-CSV per product + self-hosted manager connection.</div>
     </div>
 
     <div class="section">
@@ -2028,19 +2028,18 @@
     </div>
 
     <div class="section">
-      <label class="label">AdBrain Supabase project URL</label>
-      <input type="text" id="supabaseUrl" placeholder="https://xxxxx.supabase.co" />
+      <label class="label">Manager URL</label>
+      <input type="text" id="managerUrl" placeholder="http://manager-pc.tailnet.ts.net:8787" />
       <div class="hint">
-        Full project URL (no trailing slash). Stored in chrome.storage. If left blank,
-        the constant in <code>config/discovery-config.js</code> is used.
+        Base URL of the self-hosted manager (<code>manager/server.js</code>) reachable over your tailnet.
+        Stored in chrome.storage as <code>adbrainManagerUrl</code>.
       </div>
     </div>
     <div class="section">
-      <label class="label">AdBrain Supabase service_role key</label>
-      <input type="password" id="serviceKey" placeholder="eyJ..." />
+      <label class="label">Manager token (optional)</label>
+      <input type="password" id="managerToken" placeholder="Leave blank if the manager runs unauthenticated" />
       <div class="hint">
-        Stored in chrome.storage as <code>adbrainServiceKey</code>. Never hardcoded.
-        Required for Push to AdBrain.
+        Sent as the <code>X-Manager-Token</code> header on every request. Stored in chrome.storage as <code>adbrainManagerToken</code>.
       </div>
     </div>
     <div class="section">
@@ -2049,16 +2048,16 @@
     </div>
 
     <!-- Manager-only: push current Settings to every worker PC via the
-         shared adbrain_worker_config table. Each worker fetches this
-         before its next claim and merges into its runOpts — change
-         once at the manager, every PC picks it up automatically. -->
+         manager's worker_config row. Each worker fetches this before
+         its next claim and merges into its runOpts — change once at
+         the manager, every PC picks it up automatically. -->
     <div class="settings-group" style="margin-top: 24px;">
       <div class="settings-group-title">🎯 Manager — push to all workers</div>
-      <div class="settings-group-sub">Save these Settings to the central config table. Every worker PC fetches it before claiming its next chunk.</div>
+      <div class="settings-group-sub">Save these Settings to the manager's central config row. Every worker PC fetches it before claiming its next chunk.</div>
     </div>
     <div class="section">
       <div class="hint" style="margin-bottom: 10px;">
-        Pushes: KP URL, Max KP per product, Pacing (search/product/chunk delays), Chunk size, Match profile, CLIP threshold override, Per-keyword cap, Auto-export. Workers use these instead of their local Settings until you clear the central row in Supabase.
+        Pushes: KP URL, Max KP per product, Pacing (search/product/chunk delays), Chunk size, Match profile, CLIP threshold override, Per-keyword cap, Auto-export. Workers use these instead of their local Settings until you clear the central row on the manager.
       </div>
       <button id="pushConfigBtn" style="width: 100%;">Push current Settings to all workers</button>
       <div id="pushConfigResult" class="file-info"></div>

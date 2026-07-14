@@ -1,7 +1,8 @@
 // dashboard.js — Operations Dashboard for AdBrain Discovery
 //
-// Full-page view that polls Supabase via the background service worker
-// (which holds the service_role key) and renders:
+// Full-page view that polls the self-hosted SQLite manager over HTTP via
+// the background service worker (which holds the manager URL + optional
+// token) and renders:
 //   - Top: batch selector + status appbar (last refresh, controls)
 //   - Left: batch progress + 4-tile stat grid + worker fleet grid
 //   - Right: failed jobs (top 50) + live activity log with level filters
@@ -30,16 +31,24 @@ const LOG_CAP = 500;
 
 // ───────────── Util ─────────────
 const esc = (s) => String(s == null ? '' : s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
-function fmtTime(iso) {
-  if (!iso) return '—';
-  try {
-    const d = new Date(iso);
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  } catch { return '—'; }
+// The manager stores timestamps as epoch-ms integers (SQLite-native),
+// but a few code paths still emit ISO strings. Accept both.
+function _toDate(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return new Date(v);
+  const n = Number(v);
+  if (!isNaN(n) && String(n) === String(v)) return new Date(n);
+  return new Date(v);
 }
-function fmtAgo(iso) {
-  if (!iso) return '—';
-  const ms = Date.now() - new Date(iso).getTime();
+function fmtTime(v) {
+  const d = _toDate(v);
+  if (!d || isNaN(d.getTime())) return '—';
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+function fmtAgo(v) {
+  const d = _toDate(v);
+  if (!d) return '—';
+  const ms = Date.now() - d.getTime();
   if (isNaN(ms) || ms < 0) return '—';
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s ago`;
@@ -47,12 +56,13 @@ function fmtAgo(iso) {
   if (m < 60) return `${m} min ago`;
   const h = Math.round(m / 60);
   if (h < 24) return `${h}h ago`;
-  const d = Math.round(h / 24);
-  return `${d}d ago`;
+  const d2 = Math.round(h / 24);
+  return `${d2}d ago`;
 }
 function workerDotClass(lastHb) {
-  if (!lastHb) return 'stale';
-  const ms = Date.now() - new Date(lastHb).getTime();
+  const d = _toDate(lastHb);
+  if (!d) return 'stale';
+  const ms = Date.now() - d.getTime();
   if (ms < 90 * 1000) return 'fresh';
   if (ms < 5 * 60 * 1000) return 'amber';
   return 'stale';
@@ -192,7 +202,7 @@ function renderWorkerGrid(workers, perProduct) {
   });
 }
 
-// ───────────── Render: live "Output uploaded to Supabase" ─────────────
+// ───────────── Render: live "Output uploaded to manager" ─────────────
 // Shows TOTAL keyword rows in adbrain_discovered_keywords for the
 // focused batch, plus a per-SKU breakdown so the user can see which
 // SKUs produced rows and which completed with zero (a bug signal).
@@ -317,7 +327,7 @@ function renderOutputStats(stats, errMsg) {
   const schemaBanner = schemaDowngraded ? `
     <div style="margin: 8px 0; padding: 6px 10px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 6px; font-size: 11px; color: var(--text-1);">
       <strong style="color: var(--warn);">ℹ Old schema detected</strong> —
-      <code>image_count</code> column missing. Run the latest <code>supabase_schema.sql</code> migration for richer stats.
+      <code>image_count</code> column missing. Restart the manager to pick up the latest schema for richer stats.
     </div>
   ` : '';
 
@@ -419,7 +429,7 @@ function renderLog() {
 
 function mergeLogs(newEntries) {
   if (!Array.isArray(newEntries) || newEntries.length === 0) return;
-  // Newest first in the array as returned by PostgREST (order=ts.desc).
+  // Newest first in the array as returned by the manager (order=ts.desc).
   // Prepend to in-memory buffer and dedupe by id.
   const seenIds = new Set(state.logs.map(e => e.id));
   for (const e of newEntries) {
@@ -429,11 +439,14 @@ function mergeLogs(newEntries) {
     // Track worker names for the filter dropdown.
     if (e.worker_id) state.knownWorkers.add(e.worker_id);
   }
-  // Track newest ts so incremental polling fetches only new.
+  // Track newest ts so incremental polling fetches only new. Manager
+  // emits epoch-ms integers; numeric compare works cleanly.
   if (newEntries.length > 0) {
-    const newest = newEntries.reduce((a, b) => (a.ts > b.ts ? a : b));
-    if (!state.lastLogTs || newest.ts > state.lastLogTs) {
-      state.lastLogTs = newest.ts;
+    const newest = newEntries.reduce((a, b) => (Number(a.ts) > Number(b.ts) ? a : b));
+    const newestTs = Number(newest.ts);
+    const prev = Number(state.lastLogTs || 0);
+    if (!prev || newestTs > prev) {
+      state.lastLogTs = newestTs;
     }
   }
   // Cap.
@@ -572,22 +585,7 @@ async function sendCommand(workerId, command, payload) {
   const resp = await rpc('dashboard:sendCommand', { workerId, command, payload });
   if (!resp?.ok) {
     const err = resp?.error || 'unknown';
-    // Detect the most common cause: schema missing / PostgREST cache stale.
-    if (/PGRST205|adbrain_worker_commands|adbrain_activity_log|adbrain_worker_config|not.*found.*schema cache/i.test(err)) {
-      alert(
-        `❌ Database schema not migrated.\n\n` +
-        `The dashboard tables don't exist in your Supabase project yet (or PostgREST hasn't refreshed its cache).\n\n` +
-        `FIX:\n` +
-        `1. Open your Supabase project → SQL Editor\n` +
-        `2. Open supabase_schema.sql from the extension's source folder\n` +
-        `3. Copy + paste the WHOLE file → Run\n` +
-        `4. Run: NOTIFY pgrst, 'reload schema';\n` +
-        `5. Reload the dashboard.\n\n` +
-        `Raw error: ${err.slice(0, 200)}`
-      );
-    } else {
-      alert(`Command failed: ${err}`);
-    }
+    alert(`Command failed: ${err}`);
     return;
   }
   refreshAll();
@@ -606,7 +604,7 @@ async function refreshAll() {
         <span class="err-banner-icon">⚠</span>
         <div>
           <strong>Dashboard refresh failed:</strong> ${esc(summaryResp?.error || 'unknown')}<br>
-          Check that the extension's Connection card (Queue tab → 🔌) has a valid Supabase URL + service_role key, and that <code>NOTIFY pgrst, 'reload schema';</code> has been run.
+          Check that the extension's Connection card (Queue tab → 🔌) has a valid Manager URL, and that <code>node manager/server.js</code> is running on the manager PC.
         </div>
       </div>
     `);
@@ -639,7 +637,7 @@ async function refreshAll() {
   renderWorkerGrid(workers, perProduct);
   renderFailed(summaryResp.failed);
 
-  // Live "Output uploaded to Supabase" card. Only runs when a batch is
+  // Live "Output uploaded to manager" card. Only runs when a batch is
   // focused — otherwise the panel shows a placeholder. Counts every row
   // in adbrain_discovered_keywords for the batch and groups by SKU so
   // we can see who produced what (and which SKUs ended with zero).
@@ -670,7 +668,7 @@ async function refreshAll() {
   refreshWorkerFilter();
   renderLog();
   $('lastRefresh').textContent = `refreshed ${fmtTime(new Date().toISOString())}`;
-  // Connection-health pill — green if Supabase reachable, amber for
+  // Connection-health pill — green if the manager is reachable, amber for
   // pending push backlog, red on auth/network failure. Click to recheck.
   rpc('jobs:checkConnection').then(hr => {
     const el = $('connHealth');
@@ -682,7 +680,7 @@ async function refreshAll() {
       el.style.background = pending ? 'var(--warn-soft)' : 'var(--success-soft)';
       el.style.color = pending ? 'var(--warn)' : 'var(--success)';
       el.style.borderColor = pending ? 'var(--warn)' : 'var(--success)';
-      el.title = pending ? `${hr.pendingPushCount} push(es) queued for retry — click to recheck` : `Supabase reachable in ${hr.health.latencyMs}ms — click to recheck`;
+      el.title = pending ? `${hr.pendingPushCount} push(es) queued for retry — click to recheck` : `Manager reachable in ${hr.health.latencyMs}ms — click to recheck`;
     } else {
       el.textContent = `⚠ ${hr?.health?.error || 'offline'}`;
       el.style.background = 'var(--danger-soft)';
@@ -745,24 +743,7 @@ $('cleanupBtn').addEventListener('click', async () => {
 $('wakeAllBtn').addEventListener('click', async () => {
   const result = await rpc('dashboard:sendCommand', { workerId: null, command: 'wake' });
   if (!result?.ok) {
-    // Use the same schema-detection logic as sendCommand. Don't call
-    // sendCommand directly here because it already shows an alert; we
-    // want to consolidate the success path too.
-    const err = result?.error || 'unknown';
-    if (/PGRST205|adbrain_worker_commands|not.*found.*schema cache/i.test(err)) {
-      alert(
-        `❌ Database schema not migrated.\n\n` +
-        `The "adbrain_worker_commands" table doesn't exist in your Supabase project yet — that's why Wake all can't reach workers.\n\n` +
-        `FIX:\n` +
-        `1. Open Supabase → SQL Editor\n` +
-        `2. Open supabase_schema.sql from the extension folder\n` +
-        `3. Copy + paste the WHOLE file → Run\n` +
-        `4. Then run: NOTIFY pgrst, 'reload schema';\n` +
-        `5. Click Wake all workers again.`
-      );
-    } else {
-      alert(`Wake failed: ${err}`);
-    }
+    alert(`Wake failed: ${result?.error || 'unknown'}`);
     return;
   }
   alert('✓ Wake signal sent. Armed workers will claim within ~30s.');
@@ -839,7 +820,7 @@ document.querySelectorAll('.log-filter').forEach(f => {
 });
 
 // Visibility-based polling: pause polling when the tab is hidden so we
-// don't waste Supabase quota on backgrounded dashboards.
+// don't hammer the manager for backgrounded dashboards.
 document.addEventListener('visibilitychange', () => {
   state.isVisible = !document.hidden;
   if (state.isVisible) refreshAll();

@@ -15,7 +15,7 @@ import {
   getActiveWorkers,
   getFailedJobs,
   requeueJob,
-  fetchBatchReportFromSupabase,
+  fetchBatchReportFromManager,
   getActiveBatchId,
   pushActivityLog,
   fetchActivityLog,
@@ -31,10 +31,12 @@ import {
   fetchBatchKeywordStats,
 } from './modules/discovery-jobs.js';
 import {
-  STORAGE_KEY_SERVICE_KEY,
-  STORAGE_KEY_SUPABASE_URL,
   STORAGE_KEY_KP_URL,
 } from './config/discovery-config.js';
+import {
+  STORAGE_KEY_MANAGER_URL,
+  STORAGE_KEY_MANAGER_TOKEN,
+} from './modules/discovery-jobs.js';
 import {
   shouldKeepKeyword,
   categorizeKeyword,
@@ -148,7 +150,7 @@ const state = {
   resumeInFlight: null,
   // Distributed mode — this worker's identity, the batch it's pulling from,
   // and the list of claimed job rows (one entry per in-flight product).
-  // Empty array / null = local mode (file-driven), no Supabase coordination.
+  // Empty array / null = local mode (file-driven), no the manager coordination.
   workerId: '',
   queueBatchId: '',
   claimedJobs: [],
@@ -174,7 +176,7 @@ const state = {
   userStoppedArm: false,
   // Connection-health snapshot. Populated by pingConnectionHealth (every
   // 60s alarm + on demand). The popup + dashboard show this so the user
-  // knows whether Supabase is reachable from THIS PC. ok=false = creds
+  // knows whether the manager is reachable from THIS PC. ok=false = creds
   // wrong, network down, schema cache stale, etc. — anything that would
   // make the queue + auto-push fail silently.
   connectionHealth: {
@@ -220,13 +222,13 @@ const coldStart = (async () => {
     'adbrainUserStoppedArm',
   ]);
   // Restore activity buffer from before SW death so we don't lose recent
-  // events that hadn't been pushed to Supabase yet.
+  // events that hadn't been pushed to the manager yet.
   if (Array.isArray(data.adbrainActivityBuffer)) {
     _activityBuffer.push(...data.adbrainActivityBuffer);
   }
   // Restore pending-push queue so SW death mid-push doesn't lose data.
   // Re-trying on cold start is essential for the "batch shows done but
-  // no data in Supabase" bug class.
+  // no data in the manager" bug class.
   if (Array.isArray(data[PENDING_PUSH_STORAGE_KEY])) {
     _pendingPushes.push(...data[PENDING_PUSH_STORAGE_KEY]);
     if (_pendingPushes.length > 0) {
@@ -422,7 +424,7 @@ try {
 } catch {}
 // Dashboard activity-log push alarm — fires every 30s (Chrome's minimum
 // reliable period for production-mode alarms is 0.5 min). Drains the
-// in-memory log buffer to Supabase so the manager dashboard's activity
+// in-memory log buffer to the manager so the manager dashboard's activity
 // feed stays within ~30s of live. Worker-side only; no-op when
 // state.workerId is empty.
 const DASHBOARD_PUSH_ALARM = 'adbrain-dashboard-push';
@@ -438,12 +440,12 @@ try {
 } catch {}
 // Pending-push retry alarm — drains the persistent push queue. Catches
 // auto-pushes that failed during a previous SW lifetime so data
-// eventually reaches Supabase even after browser crashes.
+// eventually reaches the manager even after browser crashes.
 const PENDING_PUSH_ALARM = 'adbrain-pending-push';
 try {
   chrome.alarms.create(PENDING_PUSH_ALARM, { periodInMinutes: 0.5, delayInMinutes: 0.2 });
 } catch {}
-// Supabase connection-health ping — pings Supabase every 60s and updates
+// the manager connection-health ping — pings the manager every 60s and updates
 // state.connectionHealth so the popup + dashboard can show whether we
 // can actually reach the database. Catches stale credentials, network
 // outage, schema-cache problems before the user notices via downstream
@@ -537,7 +539,7 @@ async function workerAutoPollTick() {
   }
 }
 
-// Pending-push queue for keyword rows that haven't reached Supabase yet.
+// Pending-push queue for keyword rows that haven't reached the manager yet.
 // Each entry: { productUrl, batchId, rows[], attempts, lastError, ts }.
 // Persisted to chrome.storage so SW death + watchdog wake doesn't lose
 // data mid-push. Drained by flushPendingPushes (called on alarm + on
@@ -581,13 +583,13 @@ function enqueuePendingPush(productUrl, rows, batchId) {
 async function flushPendingPushes() {
   if (_pendingPushes.length === 0) return;
   // Skip retries when the connection is provably down — would just
-  // spam Supabase + log with no chance of success. Health-ping alarm
-  // will mark it ok=true again the moment Supabase comes back, and
+  // spam the manager + log with no chance of success. Health-ping alarm
+  // will mark it ok=true again the moment the manager comes back, and
   // this tick will resume normally.
   if (state.connectionHealth?.ok === false) {
     return;
   }
-  // Process one entry per tick — if Supabase is rate-limited we don't
+  // Process one entry per tick — if the manager is rate-limited we don't
   // want to hammer it 50 times in a row.
   const entry = _pendingPushes[0];
   if (entry.attempts >= PENDING_PUSH_MAX_ATTEMPTS) {
@@ -632,7 +634,7 @@ async function flushPendingPushes() {
 // immediately on high-impact events (errors, product done/failed). Capped
 // to avoid runaway memory on long runs. Also periodically persisted to
 // chrome.storage so SW death doesn't lose recent events that haven't
-// hit Supabase yet.
+// hit the manager yet.
 const _activityBuffer = [];
 const ACTIVITY_BUFFER_CAP = 500;
 const ACTIVITY_STORAGE_KEY = 'adbrainActivityBuffer';
@@ -693,7 +695,7 @@ async function flushActivityBuffer() {
 }
 
 // Auto-migration: when a manager PC has a locally-saved KP URL (from
-// before auto-push existed) but the Supabase worker_config row has no
+// before auto-push existed) but the manager worker_config row has no
 // kp_url set, push the local one up. Fires once on connection-health
 // success when we detect this mismatch. Saves the user from having to
 // click Save Settings just to migrate their existing config.
@@ -720,31 +722,26 @@ async function maybeAutoMigrateKpUrl() {
   }
 }
 
-// Ping Supabase with a tiny query (HEAD on the jobs table) to verify
-// connectivity + auth + schema cache. Updates state.connectionHealth.
-// Cheap — should complete in 100-300ms over a healthy connection.
+// Ping the self-hosted manager with a tiny GET /api/health to verify
+// connectivity + auth. Updates state.connectionHealth. Cheap — should
+// complete in 20-50ms on a healthy tailnet, up to 300ms cold.
 async function pingConnectionHealth() {
   try {
-    const data = await chrome.storage.local.get(['adbrainServiceKey', 'adbrainSupabaseUrl']);
-    const url = (data.adbrainSupabaseUrl || '').trim();
-    const key = (data.adbrainServiceKey || '').trim();
-    if (!url || !key) {
+    const data = await chrome.storage.local.get([STORAGE_KEY_MANAGER_URL, STORAGE_KEY_MANAGER_TOKEN]);
+    const url = String(data[STORAGE_KEY_MANAGER_URL] || '').trim().replace(/\/+$/, '');
+    const token = String(data[STORAGE_KEY_MANAGER_TOKEN] || '').trim();
+    if (!url) {
       state.connectionHealth = {
         ok: false, latencyMs: null,
         lastCheckedAt: new Date().toISOString(),
-        error: 'No Supabase credentials configured',
+        error: 'Manager URL not set',
       };
       return;
     }
     const t0 = Date.now();
-    // HEAD on jobs table — returns headers but no body. Fast + cheap.
-    const resp = await fetch(`${url.replace(/\/+$/, '')}/rest/v1/adbrain_discovery_jobs?select=id&limit=1`, {
-      method: 'HEAD',
-      headers: {
-        'apikey': key,
-        'Authorization': `Bearer ${key}`,
-      },
-    });
+    const headers = {};
+    if (token) headers['X-Manager-Token'] = token;
+    const resp = await fetch(`${url}/api/health`, { method: 'GET', headers });
     const latencyMs = Date.now() - t0;
     if (resp.ok) {
       state.connectionHealth = {
@@ -759,7 +756,7 @@ async function pingConnectionHealth() {
       state.connectionHealth = {
         ok: false, latencyMs,
         lastCheckedAt: new Date().toISOString(),
-        error: `HTTP ${resp.status}${resp.status === 404 ? ' — table not found (run schema?)' : resp.status === 401 ? ' — bad service_role key' : ''}`,
+        error: `HTTP ${resp.status}${resp.status === 401 ? ' — bad manager token' : resp.status === 404 ? ' — /api/health missing (old manager?)' : ''}`,
       };
     }
   } catch (e) {
@@ -1128,10 +1125,10 @@ async function _handleStartInner(msg) {
               }
             }
             // DISTRIBUTED MODE: auto-push this product's keyword rows to
-            // Supabase RIGHT AWAY. Otherwise the manager's centralized
-            // "Download all CSVs from Supabase" would find the queue row
+            // the manager RIGHT AWAY. Otherwise the manager's centralized
+            // "Download all CSVs from the manager" would find the queue row
             // marked 'done' but ZERO actual keyword data, because that
-            // data only goes to Supabase via the manual "Push to AdBrain"
+            // data only goes to the manager via the manual "Push to AdBrain"
             // button. In distributed mode, every worker must push as it
             // goes — that's how the centralized download works at all.
             //
@@ -1140,14 +1137,14 @@ async function _handleStartInner(msg) {
             // queued into _pendingPushes, which a separate alarm retries
             // up to PENDING_PUSH_MAX_ATTEMPTS times — surviving SW kill
             // via chrome.storage persistence. Result: data eventually
-            // reaches Supabase OR the manager sees a clear "retry
+            // reaches the manager OR the manager sees a clear "retry
             // exhausted" log line. Either way no silent loss.
             if (state.workerId) {
               const productRows = state.report.filter(r => r.productUrl === cleanUrl);
               if (productRows.length === 0) {
                 // No rows generated for this product — log so the
                 // manager isn't left wondering why the batch says
-                // "done" but Supabase has nothing for it. Common reasons:
+                // "done" but the manager has nothing for it. Common reasons:
                 // KP returned 0 ideas, all candidates failed the
                 // relevance filter, the page was non-product, etc.
                 emitProgress({
@@ -1169,7 +1166,7 @@ async function _handleStartInner(msg) {
                     enqueuePendingPush(cleanUrl, productRows, state.queueBatchId);
                   } else {
                     emitProgress({
-                      currentAction: `✓ Auto-pushed ${r.success} row(s) for ${cleanUrl} to Supabase`,
+                      currentAction: `✓ Auto-pushed ${r.success} row(s) for ${cleanUrl} to the manager`,
                       logKind: 'ok',
                     });
                     // Advance lastPushedCount ONLY on full success.
@@ -1183,7 +1180,7 @@ async function _handleStartInner(msg) {
                   // Network/auth failure on the whole push. Queue for
                   // retry — pendingPushAlarm will pick it up.
                   emitProgress({
-                    currentAction: `Auto-push failed for ${cleanUrl} (${e.message}) — queued for retry. Dashboard will receive the data once Supabase is reachable.`,
+                    currentAction: `Auto-push failed for ${cleanUrl} (${e.message}) — queued for retry. Dashboard will receive the data once the manager is reachable.`,
                     logKind: 'err',
                   });
                   enqueuePendingPush(cleanUrl, productRows, state.queueBatchId);
@@ -1309,7 +1306,7 @@ async function _handleStartInner(msg) {
       // the next chunk from the same batch (or the newest pending batch
       // if queueBatchId is empty) and start the engine on it. Loops until
       // the queue is empty. Adds a small cooldown so workers don't
-      // hammer Supabase if the queue churns rapidly.
+      // hammer the manager if the queue churns rapidly.
       if (state.continuousClaim && state.workerId && !stopped) {
         try {
           // Pick batch: prefer the one we were just working on; fall back
@@ -1322,7 +1319,7 @@ async function _handleStartInner(msg) {
           }
           if (nextBatch) {
             pushLog(`Continuous mode: claiming next chunk from batch ${nextBatch}…`, 'ok');
-            // Small cooldown so we don't immediately re-fire if Supabase
+            // Small cooldown so we don't immediately re-fire if the manager
             // is briefly inconsistent.
             await new Promise(r => setTimeout(r, 3000));
             const jobs = await claimJobs({
@@ -1938,7 +1935,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
-  // Manager UI — pull every row for a batch back from Supabase and
+  // Manager UI — pull every row for a batch back from the manager and
   // generate the per-SKU CSVs locally on THIS PC. Solves the "CSVs are
   // scattered across worker PCs' Downloads folders" problem — manager
   // runs this once, gets one .csv per SKU for the entire batch,
@@ -1949,8 +1946,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       try {
         const batchId = String(msg.batchId || '').trim();
         if (!batchId) throw new Error('Batch ID required.');
-        emitProgress({ currentAction: `Fetching report rows for batch "${batchId}" from Supabase…`, logKind: 'ok' });
-        const report = await fetchBatchReportFromSupabase(batchId, (p) => {
+        emitProgress({ currentAction: `Fetching report rows for batch "${batchId}" from the manager…`, logKind: 'ok' });
+        const report = await fetchBatchReportFromManager(batchId, (p) => {
           emitProgress({ currentAction: `Fetched ${p.fetched} row(s)…`, logKind: 'ok' });
         });
         if (report.length === 0) {
@@ -1976,14 +1973,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // the Settings tab writes to.
   if (action === 'jobs:credsStatus') {
     (async () => {
-      const data = await chrome.storage.local.get([STORAGE_KEY_SERVICE_KEY, STORAGE_KEY_SUPABASE_URL]);
-      const key = (data[STORAGE_KEY_SERVICE_KEY] || '').trim();
-      const url = (data[STORAGE_KEY_SUPABASE_URL] || '').trim();
+      const data = await chrome.storage.local.get([STORAGE_KEY_MANAGER_URL, STORAGE_KEY_MANAGER_TOKEN]);
+      const url = String(data[STORAGE_KEY_MANAGER_URL] || '').trim();
+      const token = String(data[STORAGE_KEY_MANAGER_TOKEN] || '').trim();
       sendResponse({
         ok: true,
-        hasServiceKey: key.length > 20,
-        hasSupabaseUrl: url.length > 8 && !url.includes('YOUR-ADBRAIN-PROJECT'),
-        supabaseUrl: url,
+        hasManagerUrl: url.length > 4,
+        hasManagerToken: token.length > 0,
+        managerUrl: url,
       });
     })();
     return true;
@@ -1991,31 +1988,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (action === 'jobs:saveCreds') {
     (async () => {
       const updates = {};
-      if (typeof msg.serviceKey === 'string' && msg.serviceKey.trim()) {
-        updates[STORAGE_KEY_SERVICE_KEY] = msg.serviceKey.trim();
+      if (typeof msg.managerToken === 'string') {
+        // Token is optional (manager may run un-authenticated on tailnet).
+        // Empty string clears it.
+        updates[STORAGE_KEY_MANAGER_TOKEN] = msg.managerToken.trim();
       }
-      if (typeof msg.supabaseUrl === 'string' && msg.supabaseUrl.trim()) {
-        // Normalise the URL so a user pasting any of these forms ends up
-        // with the same canonical base:
-        //   https://xyz.supabase.co
-        //   https://xyz.supabase.co/
-        //   https://xyz.supabase.co/rest/v1
-        //   https://xyz.supabase.co/rest/v1/
-        // Previously we only stripped trailing slashes, so the last two
-        // would land as base="https://xyz.supabase.co/rest/v1" and the
-        // PostgREST calls would compose ".../rest/v1/rest/v1/<table>" →
-        // 404. Now we parse the URL and strip the entire path.
-        const raw = msg.supabaseUrl.trim();
+      if (typeof msg.managerUrl === 'string' && msg.managerUrl.trim()) {
+        // Normalise the URL: strip any path so ".../api/keywords" or a
+        // trailing slash both collapse to `http://host:port`. The client
+        // appends its own paths.
+        const raw = msg.managerUrl.trim();
         let normalized;
         try {
           const u = new URL(raw);
           normalized = `${u.protocol}//${u.host}`;
         } catch {
-          // If URL() rejects (no protocol, etc.), fall back to a regex
-          // strip of any path/query so we don't store garbage.
           normalized = raw.replace(/\/+$/, '').replace(/^(https?:\/\/[^/]+)\/.*$/, '$1');
         }
-        updates[STORAGE_KEY_SUPABASE_URL] = normalized;
+        updates[STORAGE_KEY_MANAGER_URL] = normalized;
       }
       if (Object.keys(updates).length === 0) {
         sendResponse({ ok: false, error: 'nothing to save' });
@@ -2027,36 +2017,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // Generate a one-string setup code that bundles supabaseUrl +
-  // service_role key as base64-encoded JSON. Manager generates once,
-  // workers paste once — replaces the two-field setup with a single
-  // copy/paste. Service-role key IS exposed in the code so users must
-  // share it only over encrypted channels (warning shown in the UI).
+  // Generate a one-string setup code that bundles managerUrl + optional
+  // token as base64-encoded JSON. Manager generates once, workers paste
+  // once — one-paste onboarding across PCs. Token IS exposed in the
+  // code so users must share it only over encrypted channels (the UI
+  // shows a warning when a token is present).
   if (action === 'jobs:exportSetupCode') {
     (async () => {
       const data = await chrome.storage.local.get([
-        STORAGE_KEY_SERVICE_KEY,
-        STORAGE_KEY_SUPABASE_URL,
+        STORAGE_KEY_MANAGER_URL,
+        STORAGE_KEY_MANAGER_TOKEN,
         STORAGE_KEY_KP_URL,
       ]);
-      const url = (data[STORAGE_KEY_SUPABASE_URL] || '').trim();
-      const key = (data[STORAGE_KEY_SERVICE_KEY] || '').trim();
-      const kpUrl = (data[STORAGE_KEY_KP_URL] || '').trim();
-      if (!url || !key || url.includes('YOUR-ADBRAIN-PROJECT')) {
-        sendResponse({ ok: false, error: 'Save Supabase URL + service_role key first.' });
+      const url = String(data[STORAGE_KEY_MANAGER_URL] || '').trim();
+      const token = String(data[STORAGE_KEY_MANAGER_TOKEN] || '').trim();
+      const kpUrl = String(data[STORAGE_KEY_KP_URL] || '').trim();
+      if (!url) {
+        sendResponse({ ok: false, error: 'Save Manager URL first.' });
         return;
       }
-      // Encode as `adb1:<base64>` so future versions can use a different
-      // prefix to identify the format. JSON wrapper carries a version
-      // field for forward-compat too. v=2 adds kpUrl so workers also
-      // get the manager's Google Ads Keyword Planner URL pre-filled —
-      // without it, workers can't run KP scrapes.
-      const payload = JSON.stringify({ v: 2, url, key, kpUrl });
+      // Encode as `adb2:<base64>` — bump prefix to make older the manager
+      // codes fail loudly instead of applying garbage. Payload version
+      // stays for forward-compat.
+      const payload = JSON.stringify({ v: 3, managerUrl: url, managerToken: token, kpUrl });
       const b64 = btoa(unescape(encodeURIComponent(payload)));
       sendResponse({
         ok: true,
-        code: `adb1:${b64}`,
-        includes: { kpUrl: !!kpUrl },
+        code: `adb2:${b64}`,
+        includes: { kpUrl: !!kpUrl, token: !!token },
       });
     })();
     return true;
@@ -2065,8 +2053,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       try {
         const raw = String(msg.code || '').trim();
-        if (!raw.startsWith('adb1:')) {
-          throw new Error('Not a valid setup code (expected to start with "adb1:").');
+        if (raw.startsWith('adb1:')) {
+          throw new Error('This is an old the manager setup code. Ask the manager for a fresh code (starts with "adb2:").');
+        }
+        if (!raw.startsWith('adb2:')) {
+          throw new Error('Not a valid setup code (expected to start with "adb2:").');
         }
         const b64 = raw.slice(5);
         let payload;
@@ -2075,31 +2066,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } catch {
           throw new Error('Could not decode setup code — paste the exact string the manager generated.');
         }
-        // Accept v=1 (URL + key only) and v=2 (also kpUrl). Reject
-        // unknown versions so old workers don't silently apply garbage.
-        if (!payload || (payload.v !== 1 && payload.v !== 2) || !payload.url || !payload.key) {
+        if (!payload || payload.v !== 3 || !payload.managerUrl) {
           throw new Error('Setup code is missing required fields.');
         }
-        // Re-use the same URL-normalisation as jobs:saveCreds so a code
-        // generated from a sloppy URL still produces a clean stored URL.
         let normalized;
         try {
-          const u = new URL(payload.url);
+          const u = new URL(payload.managerUrl);
           normalized = `${u.protocol}//${u.host}`;
         } catch {
-          normalized = String(payload.url).replace(/\/+$/, '').replace(/^(https?:\/\/[^/]+)\/.*$/, '$1');
+          normalized = String(payload.managerUrl).replace(/\/+$/, '').replace(/^(https?:\/\/[^/]+)\/.*$/, '$1');
         }
         const updates = {
-          [STORAGE_KEY_SUPABASE_URL]: normalized,
-          [STORAGE_KEY_SERVICE_KEY]:  String(payload.key).trim(),
+          [STORAGE_KEY_MANAGER_URL]: normalized,
+          [STORAGE_KEY_MANAGER_TOKEN]: String(payload.managerToken || '').trim(),
         };
-        // v=2: bring the manager's KP URL along too, so workers don't
-        // have to navigate to Settings → Keyword Planner to paste it.
-        // Without a KP URL the engine can't run KP scrapes — every
-        // worker NEEDS this. Empty kpUrl in the code is OK (manager
-        // hadn't saved one yet); we just leave the worker's existing
-        // KP URL untouched in that case.
-        if (payload.v >= 2 && payload.kpUrl) {
+        // Bring the manager's KP URL along too, so workers don't have
+        // to navigate to Settings → Keyword Planner to paste it. Without
+        // a KP URL the engine can't run KP scrapes. Empty kpUrl in the
+        // code is OK (manager hadn't saved one yet); we leave the
+        // worker's existing KP URL untouched in that case.
+        if (payload.kpUrl) {
           updates[STORAGE_KEY_KP_URL] = String(payload.kpUrl).trim();
         }
         await chrome.storage.local.set(updates);
@@ -2135,7 +2121,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         const result = await pushToAdBrain(slice);
         // Advance the cursor only if every row in the slice landed (or at least
-        // didn't fail — Supabase's ignore-duplicates returns 200/201 even when
+        // didn't fail — the manager's ignore-duplicates returns 200/201 even when
         // rows were skipped, so failed===0 means we're safe to advance).
         if (result.failed === 0) {
           state.lastPushedCount = snapshotLength;
