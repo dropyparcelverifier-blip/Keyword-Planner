@@ -3,8 +3,8 @@
 // the product list to background.js to drive the discovery flow.
 
 const $ = (id) => document.getElementById(id);
-const STORAGE_KEY_SERVICE_KEY = 'adbrainServiceKey';
-const STORAGE_KEY_SUPABASE_URL = 'adbrainSupabaseUrl';
+const STORAGE_KEY_MANAGER_URL   = 'adbrainManagerUrl';
+const STORAGE_KEY_MANAGER_TOKEN = 'adbrainManagerToken';
 const STORAGE_KEY_KP_URL      = 'adbrainKpUrl';
 const STORAGE_KEY_KP_MAX      = 'adbrainKpMaxPerProduct';
 const STORAGE_KEY_AUTO_EXPORT  = 'adbrainAutoExport';
@@ -321,7 +321,7 @@ $('pushBtn').addEventListener('click', () => {
 
 // ---- Settings ----
 const SETTINGS_KEYS = [
-  STORAGE_KEY_SERVICE_KEY, STORAGE_KEY_SUPABASE_URL, STORAGE_KEY_KP_URL,
+  STORAGE_KEY_MANAGER_URL, STORAGE_KEY_MANAGER_TOKEN, STORAGE_KEY_KP_URL,
   STORAGE_KEY_KP_MAX, STORAGE_KEY_AUTO_EXPORT, STORAGE_KEY_MATCH_PROFILE,
   STORAGE_KEY_CLIP_THRESHOLD,
   STORAGE_KEY_MAX_IMAGE_MATCH_ROWS,
@@ -331,8 +331,8 @@ const SETTINGS_KEYS = [
 ];
 
 chrome.storage.local.get(SETTINGS_KEYS, (data) => {
-  if (data[STORAGE_KEY_SERVICE_KEY]) $('serviceKey').value = data[STORAGE_KEY_SERVICE_KEY];
-  if (data[STORAGE_KEY_SUPABASE_URL]) $('supabaseUrl').value = data[STORAGE_KEY_SUPABASE_URL];
+  if (data[STORAGE_KEY_MANAGER_URL]) $('managerUrl').value = data[STORAGE_KEY_MANAGER_URL];
+  if (data[STORAGE_KEY_MANAGER_TOKEN]) $('managerToken').value = data[STORAGE_KEY_MANAGER_TOKEN];
   $('kpUrl').value = data[STORAGE_KEY_KP_URL] || DEFAULT_KP_URL;
   if (data[STORAGE_KEY_KP_MAX] && data[STORAGE_KEY_KP_MAX] !== 100 && data[STORAGE_KEY_KP_MAX] !== 500) {
     $('kpMaxPerProduct').value = String(data[STORAGE_KEY_KP_MAX]);
@@ -380,16 +380,21 @@ chrome.storage.local.get(SETTINGS_KEYS, (data) => {
 });
 
 $('saveSettings').addEventListener('click', () => {
-  const key = $('serviceKey').value.trim();
-  const supabaseUrl = $('supabaseUrl').value.trim().replace(/\/+$/, '');
+  const managerToken = $('managerToken').value.trim();
+  // Normalise the manager URL — strip any path/query so ".../api" or
+  // trailing slashes collapse to host:port. The client appends paths.
+  let managerUrl = $('managerUrl').value.trim();
+  try { const u = new URL(managerUrl); managerUrl = `${u.protocol}//${u.host}`; } catch {
+    managerUrl = managerUrl.replace(/\/+$/, '').replace(/^(https?:\/\/[^/]+)\/.*$/, '$1');
+  }
   const kpUrl = $('kpUrl').value.trim();
   const kpMax = parseInt($('kpMaxPerProduct').value, 10) || 100;
   const autoExport = $('autoExport').checked;
   const matchProfile = $('matchProfile').value || 'normal';
   chrome.storage.local.set(
     {
-      [STORAGE_KEY_SERVICE_KEY]: key,
-      [STORAGE_KEY_SUPABASE_URL]: supabaseUrl,
+      [STORAGE_KEY_MANAGER_URL]: managerUrl,
+      [STORAGE_KEY_MANAGER_TOKEN]: managerToken,
       [STORAGE_KEY_KP_URL]: kpUrl,
       [STORAGE_KEY_KP_MAX]: kpMax,
       [STORAGE_KEY_AUTO_EXPORT]: autoExport,
@@ -433,13 +438,8 @@ $('saveSettings').addEventListener('click', () => {
         if (resp?.ok) {
           $('settingsSaved').textContent = '✓ Saved + pushed to all workers';
         } else {
-          // Detect schema-missing errors and give the user the EXACT fix.
           const err = resp?.error || 'unknown';
-          if (/PGRST205|adbrain_worker_config|not.*found.*schema cache/i.test(err)) {
-            $('settingsSaved').textContent = '⚠ Saved locally. Supabase schema not migrated — run supabase_schema.sql in your Supabase SQL Editor, then "NOTIFY pgrst, \'reload schema\';"';
-          } else {
-            $('settingsSaved').textContent = `Saved locally (push failed: ${err.slice(0, 80)})`;
-          }
+          $('settingsSaved').textContent = `Saved locally (push failed: ${err.slice(0, 80)})`;
         }
         setTimeout(() => { $('settingsSaved').textContent = ''; }, 6000);
       });
@@ -1313,9 +1313,9 @@ mgrApplyRole(localStorage.getItem(MGR_ROLE_KEY) || 'both');
   });
 })();
 
-// Inline credentials card. Hides when both serviceKey + supabaseUrl
-// are populated so daily use isn't visually cluttered. First-time
-// setup happens here without a Settings-tab detour.
+// Inline manager-URL card. Hides once the URL is populated so daily
+// use isn't visually cluttered. First-time setup happens here without
+// a Settings-tab detour.
 // Read-only "what's actually configured" panel for workers — shows the
 // effective KP URL + match profile etc. Workers can't see the Settings
 // tab, so without this they have no way to verify what the manager
@@ -1350,13 +1350,11 @@ function mgrCheckCreds() {
     if (!resp?.ok) return;
     const card = $('mgrCredsCard');
     const status = $('mgrCredsStatus');
-    const haveAll = resp.hasServiceKey && resp.hasSupabaseUrl;
+    const haveUrl = resp.hasManagerUrl;
     if (card) card.style.display = '';
-    if (haveAll) {
-      // Run a real connection check — credentials present doesn't mean
-      // reachable. Could be wrong key, stale schema cache, network down,
-      // etc. Show the live health alongside the basic creds-present
-      // status so the user knows whether queue calls will actually work.
+    if (haveUrl) {
+      // Run a real connection check — URL saved doesn't mean reachable.
+      // Manager PC could be off, tailnet down, wrong port, token missing.
       chrome.runtime.sendMessage({ action: 'jobs:checkConnection' }, (hr) => {
         if (!status) return;
         if (hr?.ok && hr.health?.ok) {
@@ -1374,28 +1372,25 @@ function mgrCheckCreds() {
       });
     } else {
       if (status) {
-        const missing = [];
-        if (!resp.hasSupabaseUrl) missing.push('Supabase URL');
-        if (!resp.hasServiceKey)  missing.push('service_role key');
-        status.textContent = `Missing: ${missing.join(' + ')}. Paste below, OR use a setup code from another PC.`;
+        status.textContent = 'Missing: Manager URL. Paste below, OR use a setup code from the manager PC.';
         status.style.color = 'var(--warn)';
       }
     }
-    if (resp.supabaseUrl && $('mgrSupabaseUrl') && !$('mgrSupabaseUrl').value) {
-      $('mgrSupabaseUrl').value = resp.supabaseUrl;
+    if (resp.managerUrl && $('mgrManagerUrl') && !$('mgrManagerUrl').value) {
+      $('mgrManagerUrl').value = resp.managerUrl;
     }
   });
 }
 
 $('mgrSaveCredsBtn')?.addEventListener('click', () => {
-  const url = $('mgrSupabaseUrl').value.trim();
-  const key = $('mgrServiceKey').value.trim();
+  const url = $('mgrManagerUrl').value.trim();
+  const token = $('mgrManagerToken')?.value?.trim() || '';
   const r = $('mgrSaveCredsResult');
-  if (!url || !key) { setQResult(r, 'Both fields required.', 'error'); return; }
-  chrome.runtime.sendMessage({ action: 'jobs:saveCreds', supabaseUrl: url, serviceKey: key }, (resp) => {
+  if (!url) { setQResult(r, 'Manager URL is required (token is optional).', 'error'); return; }
+  chrome.runtime.sendMessage({ action: 'jobs:saveCreds', managerUrl: url, managerToken: token }, (resp) => {
     if (!resp?.ok) { setQResult(r, `Save failed: ${resp?.error || 'unknown'}`, 'error'); return; }
     setQResult(r, '✓ Saved. Settings tab also reflects these values.', 'success');
-    $('mgrServiceKey').value = ''; // wipe from DOM so it doesn't lurk
+    if ($('mgrManagerToken')) $('mgrManagerToken').value = ''; // wipe from DOM
     mgrCheckCreds();
   });
 });
@@ -1415,7 +1410,7 @@ function setQResult(el, text, kind = 'info') {
 }
 
 // ─── Setup code (one-string portable creds) ───
-// Generate: pull saved supabaseUrl + service_role from background, encode
+// Generate: pull saved managerUrl + optional token from background, encode
 // as base64 JSON so it's one string the user can copy/paste to other
 // PCs. Apply: decode the string and save the contained creds. Single
 // copy/paste setup per worker — replaces the two-field paste workflow.
@@ -1501,7 +1496,7 @@ $('mgrApplySetupBtn')?.addEventListener('click', () => {
     } else {
       // Manager role — no worker auto-arm needed.
       const kpNote = resp.applied?.kpUrl ? ' Keyword Planner URL also configured.' : '';
-      setQResult(r, `✓ Setup applied — Supabase connected.${kpNote}`, 'success');
+      setQResult(r, `✓ Setup applied — manager connected.${kpNote}`, 'success');
     }
   });
 });
@@ -1571,7 +1566,7 @@ $('mgrUploadBtn')?.addEventListener('click', () => {
         : '';
       if (resp.uploaded === 0 && resp.total > 0) {
         setQResult(r,
-          `Upload returned 0 inserted rows out of ${resp.total}. Check Supabase RLS policies on adbrain_discovery_jobs, OR run "NOTIFY pgrst, 'reload schema';" in SQL editor if you just created the table.${errLine}`,
+          `Upload returned 0 inserted rows out of ${resp.total}. Confirm the manager is running and the SQLite jobs table exists.${errLine}`,
           'error');
         return;
       }
@@ -1804,7 +1799,7 @@ function refreshLocalLog() {
 
 $('localLogRefreshBtn')?.addEventListener('click', refreshLocalLog);
 $('localLogClearBtn')?.addEventListener('click', () => {
-  if (!confirm('Clear the local activity log? This only clears this PC\'s log, not Supabase.')) return;
+  if (!confirm('Clear the local activity log? This only clears this PC\'s log, not the manager DB.')) return;
   chrome.runtime.sendMessage({ action: 'clearLog' }, () => {
     refreshLocalLog();
   });
@@ -1971,7 +1966,7 @@ $('mgrOpenDashboardBtn')?.addEventListener('click', () => {
   chrome.runtime.sendMessage({ action: 'dashboard:open' });
 });
 
-// Centralised CSV download — pull every row for a batch from Supabase
+// Centralised CSV download — pull every row for a batch from the manager
 // and generate per-SKU CSVs locally. Cures the "CSVs scattered across
 // workers' Downloads folders" problem.
 $('mgrDownloadBtn')?.addEventListener('click', () => {
@@ -1981,7 +1976,7 @@ $('mgrDownloadBtn')?.addEventListener('click', () => {
     || $('mgrBatchId').value.trim();
   if (!batchId) { setQResult(r, 'Paste a Batch ID to download.', 'error'); return; }
   $('mgrDownloadBtn').disabled = true;
-  setQResult(r, 'Fetching from Supabase…', 'info');
+  setQResult(r, 'Fetching from manager…', 'info');
   chrome.runtime.sendMessage(
     { action: 'jobs:downloadBatchCsvs', batchId },
     (resp) => {

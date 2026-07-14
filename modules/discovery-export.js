@@ -1,13 +1,9 @@
 // modules/discovery-export.js
-// CSV / XLSX export via locally bundled SheetJS (ESM build) and chrome.downloads.
-// Supabase push via REST with Prefer: resolution=ignore-duplicates.
+// CSV / XLSX export via locally bundled SheetJS (ESM build) and
+// chrome.downloads. Results push goes to the self-hosted SQLite manager
+// over Tailscale (POST /api/keywords).
 
 import * as XLSX from '../lib/xlsx.mjs';
-import {
-  SUPABASE_TABLE,
-  getServiceKey,
-  getSupabaseUrl,
-} from '../config/discovery-config.js';
 
 // SheetJS rejects strings longer than 32767 chars per cell.
 // matched_thumbnails (many image URLs) and autosuggestions can blow past this
@@ -55,7 +51,7 @@ function pairMatched(r) {
   return out;
 }
 
-// Export quality gate. A row makes it into the CSV / XLSX / Supabase push
+// Export quality gate. A row makes it into the CSV / XLSX / manager push
 // only when it carries actionable signal. Drop pure-noise rows (no image
 // match, low rating, no commercial signal).
 //
@@ -371,7 +367,7 @@ function _safeFolder(name) {
 //
 // opts.folder: if set, every file is nested under that subfolder of the
 // Downloads root — Chrome auto-creates the folder. Used by the central
-// "Download all CSVs from Supabase" flow so a 23-SKU batch lands as
+// "Download all CSVs from manager" flow so a 23-SKU batch lands as
 // Downloads/adbrain_batch_<id>/{sku}.csv instead of 23 loose files at
 // the Downloads root.
 export async function toCSV(report, batchId, opts = {}) {
@@ -425,14 +421,13 @@ export async function toXLSX(report, batchId, opts = {}) {
 
 export async function pushToAdBrain(report) {
   if (!report || report.length === 0) throw new Error('Report is empty.');
-  const serviceKey = await getServiceKey();
-  if (!serviceKey) throw new Error('AdBrain Supabase service_role key not set (Settings tab).');
-  const supabaseUrl = await getSupabaseUrl();
-  if (!supabaseUrl || supabaseUrl.includes('YOUR-ADBRAIN-PROJECT')) {
-    throw new Error('Supabase URL not set (Settings tab — paste your project URL like https://xxxxx.supabase.co).');
-  }
-
-  const endpoint = `${supabaseUrl.replace(/\/+$/, '')}/rest/v1/${SUPABASE_TABLE}`;
+  // Results go to the self-hosted SQLite manager over Tailscale.
+  // Manager URL + optional token come from chrome.storage.
+  const _cfg = await chrome.storage.local.get(['adbrainManagerUrl', 'adbrainManagerToken']);
+  const managerBase = String(_cfg.adbrainManagerUrl || '').trim().replace(/\/+$/, '');
+  if (!managerBase) throw new Error('Manager URL not set (Settings → Manager).');
+  const managerToken = String(_cfg.adbrainManagerToken || '').trim();
+  const endpoint = `${managerBase}/api/keywords`;
   const BATCH = 100;
   let success = 0, failed = 0;
   const errors = [];
@@ -524,15 +519,12 @@ export async function pushToAdBrain(report) {
       };
     });
     try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (managerToken) headers['X-Manager-Token'] = managerToken;
       const resp = await fetch(endpoint, {
         method: 'POST',
-        headers: {
-          'apikey': serviceKey,
-          'Authorization': `Bearer ${serviceKey}`,
-          'Content-Type': 'application/json',
-          'Prefer': 'resolution=ignore-duplicates',
-        },
-        body: JSON.stringify(slice),
+        headers,
+        body: JSON.stringify({ rows: slice }),
       });
       if (resp.ok || resp.status === 201) {
         success += slice.length;
