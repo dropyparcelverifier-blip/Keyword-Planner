@@ -62,6 +62,7 @@ document.querySelectorAll('.tab').forEach(btn => {
     $(`panel-${btn.dataset.tab}`).classList.add('active');
     if (btn.dataset.tab === 'dashboard') startDashPolling();
     else stopDashPolling();
+    if (btn.dataset.tab === 'analytics') refreshAnalyticsTab();
     if (btn.dataset.tab === 'config') loadConfigForm();
     if (btn.dataset.tab === 'workers') refreshWorkersTab();
     if (btn.dataset.tab === 'downloads') refreshDownloadsTab();
@@ -278,7 +279,7 @@ async function refreshDashboard() {
 function populateBatchSelects() {
   // Populate dashboard + config + downloads selects with current batches.
   const opts = state.batches.map(b => `<option value="${esc(b.batch_id)}">${esc(b.batch_id)} — ${b.total} SKUs</option>`).join('');
-  for (const id of ['dashBatchSelect', 'pinBatchSelect', 'downloadBatchSelect']) {
+  for (const id of ['dashBatchSelect', 'pinBatchSelect', 'downloadBatchSelect', 'anBatchSelect']) {
     const el = $(id);
     if (!el) continue;
     const cur = el.value;
@@ -557,6 +558,255 @@ function rowsToCsv(rows) {
   const header = cols.map(escapeCell).join(',');
   const body = rows.map(r => cols.map(c => escapeCell(r[c])).join(',')).join('\r\n');
   return header + '\r\n' + body + '\r\n';
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ANALYTICS TAB — per-SKU drill-down
+// ═══════════════════════════════════════════════════════════════
+const analytics = {
+  batchId: '',
+  sku: '',
+  // Rows for the currently selected batch (fetched once, filtered client-side).
+  allRows: [],
+  // Rows for the currently selected SKU.
+  skuRows: [],
+  // Header column set (union across all rows) — used for CSV export.
+  columnSet: new Set(),
+  sortKey: 'ad_rating',
+  sortDir: 'desc',
+};
+
+async function refreshAnalyticsTab() {
+  // Populate batch dropdown from current summary.
+  try {
+    const s = await api.jobsSummary();
+    state.batches = s.batches || [];
+    populateBatchSelects();
+    if (analytics.batchId && $('anBatchSelect')) $('anBatchSelect').value = analytics.batchId;
+  } catch {}
+  if (analytics.batchId) await loadAnalyticsBatch(analytics.batchId);
+}
+$('anBatchSelect').addEventListener('change', async () => {
+  analytics.batchId = $('anBatchSelect').value;
+  analytics.sku = '';
+  await loadAnalyticsBatch(analytics.batchId);
+});
+$('anSkuSelect').addEventListener('change', () => {
+  analytics.sku = $('anSkuSelect').value;
+  filterAndRenderAnalytics();
+});
+['anSearch', 'anSource', 'anIntent', 'anMinRating', 'anOnlyImgMatches'].forEach(id => {
+  const el = $(id);
+  if (!el) return;
+  el.addEventListener(id === 'anSearch' ? 'input' : 'change', filterAndRenderAnalytics);
+});
+$('anExportBtn').addEventListener('click', () => {
+  if (!analytics.skuRows.length) return;
+  const csv = rowsToCsv(analytics.skuRows);
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  const safe = String(analytics.sku || 'sku').replace(/[^\w.-]+/g, '_').slice(0, 60);
+  a.download = `adbrain_${safe}_${analytics.batchId}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(a.href);
+});
+
+async function loadAnalyticsBatch(batchId) {
+  const summary = $('anSummary');
+  if (!batchId) {
+    analytics.allRows = []; analytics.skuRows = [];
+    summary.innerHTML = `<div class="empty"><div class="empty-icon">📈</div>Pick a batch + SKU to see analytics.</div>`;
+    $('anSkuSelect').innerHTML = `<option value="">— pick a batch first —</option>`;
+    $('anTopChartCard').style.display = 'none';
+    $('anTableCard').style.display = 'none';
+    $('anExportBtn').disabled = true;
+    return;
+  }
+  summary.innerHTML = `<div class="empty">Loading batch data…</div>`;
+  try {
+    const r = await api.keywordsGet(batchId);
+    analytics.allRows = r.rows || [];
+    // Column set for the CSV export — union of keys across all rows.
+    analytics.columnSet = new Set();
+    for (const row of analytics.allRows) for (const k of Object.keys(row)) analytics.columnSet.add(k);
+    // Group by SKU (fall back to product_url if SKU missing).
+    const bySku = new Map();
+    for (const row of analytics.allRows) {
+      const key = row.sku || row.product_url || 'unknown';
+      if (!bySku.has(key)) bySku.set(key, { key, productName: row.product_name || '', rows: [] });
+      bySku.get(key).rows.push(row);
+    }
+    const skuList = Array.from(bySku.values()).sort((a, b) => b.rows.length - a.rows.length);
+    $('anSkuSelect').innerHTML = `<option value="">— all SKUs in batch —</option>` + skuList.map(g =>
+      `<option value="${esc(g.key)}">${esc(g.key)} — ${g.rows.length} kw${g.productName ? ` · ${esc(g.productName)}` : ''}</option>`
+    ).join('');
+    // If we previously had a SKU selected and it still exists, keep it.
+    if (analytics.sku && bySku.has(analytics.sku)) $('anSkuSelect').value = analytics.sku;
+    else analytics.sku = '';
+  } catch (e) {
+    summary.innerHTML = `<div class="banner err">Failed to load: ${esc(e.message)}</div>`;
+    return;
+  }
+  filterAndRenderAnalytics();
+}
+
+function filterAndRenderAnalytics() {
+  // Pick working set: selected SKU or all-in-batch.
+  const source = analytics.sku
+    ? analytics.allRows.filter(r => (r.sku || r.product_url) === analytics.sku)
+    : analytics.allRows;
+
+  // Apply filters.
+  const q = ($('anSearch').value || '').trim().toLowerCase();
+  const src = $('anSource').value;
+  const intent = $('anIntent').value;
+  const minRating = parseInt($('anMinRating').value, 10) || 0;
+  const onlyImg = $('anOnlyImgMatches').checked;
+  const filtered = source.filter(r => {
+    if (q && !String(r.keyword || '').toLowerCase().includes(q)) return false;
+    if (src && String(r.source || '').toLowerCase() !== src.toLowerCase()) return false;
+    if (intent && String(r.buying_intent || '').toLowerCase() !== intent.toLowerCase()) return false;
+    if ((r.ad_rating || 0) < minRating) return false;
+    if (onlyImg && !((r.image_count || 0) > 0)) return false;
+    return true;
+  });
+
+  // Sort — always by current key.
+  const dirMul = analytics.sortDir === 'desc' ? -1 : 1;
+  filtered.sort((a, b) => {
+    const av = a[analytics.sortKey], bv = b[analytics.sortKey];
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dirMul;
+    return String(av).localeCompare(String(bv)) * dirMul;
+  });
+
+  analytics.skuRows = filtered;
+  renderAnalyticsSummary(source);
+  renderAnalyticsTopChart(source);
+  renderAnalyticsTable(filtered);
+
+  $('anTableCard').style.display = source.length > 0 ? '' : 'none';
+  $('anTopChartCard').style.display = source.length > 0 ? '' : 'none';
+  $('anExportBtn').disabled = filtered.length === 0;
+}
+
+function renderAnalyticsSummary(rows) {
+  const el = $('anSummary');
+  if (rows.length === 0) {
+    el.innerHTML = `<div class="empty"><div class="empty-icon">📭</div>${analytics.sku ? 'No keywords for this SKU yet.' : 'No keywords in this batch yet.'}</div>`;
+    return;
+  }
+  const withImg = rows.filter(r => (r.image_count || 0) > 0).length;
+  const totalImg = rows.reduce((s, r) => s + (r.image_count || 0), 0);
+  const avgRating = rows.reduce((s, r) => s + (r.ad_rating || 0), 0) / rows.length;
+  const bySrc = {}; for (const r of rows) { const k = String(r.source || '—'); bySrc[k] = (bySrc[k] || 0) + 1; }
+  const byIntent = {}; for (const r of rows) { const k = String(r.buying_intent || '—'); byIntent[k] = (byIntent[k] || 0) + 1; }
+  const totalKp = rows.filter(r => (r.kp_monthly_searches || 0) > 0).length;
+
+  // Sources chip row.
+  const srcChips = Object.entries(bySrc).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) =>
+    `<span class="chip pending"><strong>${esc(k)}</strong>: ${v}</span>`
+  ).join(' ');
+  const intentChips = Object.entries(byIntent).filter(([k]) => k && k !== '—').sort((a, b) => b[1] - a[1]).map(([k, v]) => {
+    const cls = k === 'high' ? 'done' : k === 'medium' ? 'claimed' : k === 'low' ? 'pending' : 'pending';
+    return `<span class="chip ${cls}"><strong>${esc(k)}</strong>: ${v}</span>`;
+  }).join(' ');
+
+  el.innerHTML = `
+    <div class="tiles">
+      <div class="tile success"><div class="lbl">Keywords</div><div class="val">${rows.length.toLocaleString()}</div></div>
+      <div class="tile info"><div class="lbl">With image matches</div><div class="val">${withImg}</div></div>
+      <div class="tile"><div class="lbl">Total img hits</div><div class="val">${totalImg.toLocaleString()}</div></div>
+      <div class="tile"><div class="lbl">Avg AdRating</div><div class="val">${avgRating.toFixed(1)}</div></div>
+      <div class="tile"><div class="lbl">KP-metric rows</div><div class="val">${totalKp}</div></div>
+    </div>
+    <div class="card" style="margin-top: -4px;">
+      <div class="card-body" style="padding: 10px 14px;">
+        <div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px;">Sources</div>
+        <div class="row tight" style="margin-bottom: 8px;">${srcChips || '<span class="hint">—</span>'}</div>
+        ${intentChips ? `<div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px;">Buying intent</div>
+        <div class="row tight">${intentChips}</div>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function renderAnalyticsTopChart(rows) {
+  const el = $('anTopChart');
+  if (rows.length === 0) { el.innerHTML = ''; return; }
+  const top = [...rows]
+    .filter(r => (r.ad_rating || 0) > 0)
+    .sort((a, b) => (b.ad_rating || 0) - (a.ad_rating || 0))
+    .slice(0, 10);
+  $('anTopChartSub').textContent = `top ${top.length}`;
+  if (top.length === 0) { el.innerHTML = `<div class="hint">No keywords have an AdRating yet.</div>`; return; }
+  const maxV = Math.max(...top.map(r => r.ad_rating || 0), 1);
+  el.innerHTML = top.map(r => {
+    const kw = esc(r.keyword || '—');
+    const rating = r.ad_rating || 0;
+    const pct = Math.round((rating / maxV) * 100);
+    const img = r.image_count || 0;
+    return `
+      <div style="display:grid; grid-template-columns: 220px 1fr 60px 60px; gap: 8px; align-items:center; padding: 4px 0; border-bottom: 1px solid var(--line-1); font-size: 12px;">
+        <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${kw}">${kw}</div>
+        <div style="background: var(--bg-input); border-radius: 4px; height: 14px; overflow: hidden; position: relative;">
+          <div style="background: linear-gradient(90deg, var(--accent) 0%, var(--info) 100%); height: 100%; width: ${pct}%; transition: width 200ms;"></div>
+        </div>
+        <div style="text-align:right; font-family: var(--mono); color: var(--accent);">${rating.toFixed(1)}</div>
+        <div style="text-align:right; font-family: var(--mono); color: ${img > 0 ? 'var(--success)' : 'var(--text-3)'};">${img > 0 ? `📷 ${img}` : '—'}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderAnalyticsTable(rows) {
+  const el = $('anTable');
+  $('anTableCount').textContent = `${rows.length.toLocaleString()} row(s)`;
+  if (rows.length === 0) {
+    el.innerHTML = `<tr><td style="padding:16px; text-align:center; color:var(--text-3);">No keywords match the current filters.</td></tr>`;
+    return;
+  }
+  const cols = [
+    { key: 'keyword', label: 'Keyword', kind: 'text' },
+    { key: 'source', label: 'Source', kind: 'chip' },
+    { key: 'buying_intent', label: 'Intent', kind: 'chip' },
+    { key: 'kp_monthly_searches', label: 'Volume', kind: 'num' },
+    { key: 'kp_competition', label: 'Comp', kind: 'text' },
+    { key: 'image_count', label: 'Imgs', kind: 'imgs' },
+    { key: 'ad_rating', label: 'AdRating', kind: 'rating' },
+    { key: 'match_confidence_max', label: 'MaxConf', kind: 'num' },
+    { key: 'total_sellers', label: 'Sellers', kind: 'num' },
+  ];
+  const thead = `<thead><tr>${cols.map(c => `
+    <th data-sort-key="${c.key}" style="cursor:pointer;" title="Click to sort">
+      ${esc(c.label)}${analytics.sortKey === c.key ? (analytics.sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
+    </th>`).join('')}</tr></thead>`;
+  const tbody = `<tbody>${rows.slice(0, 500).map(r => `
+    <tr>${cols.map(c => {
+      const v = r[c.key];
+      if (c.kind === 'chip' && v) {
+        const cls = String(v) === 'high' ? 'done' : String(v) === 'medium' ? 'claimed' : 'pending';
+        return `<td><span class="chip ${cls}">${esc(v)}</span></td>`;
+      }
+      if (c.kind === 'imgs') return `<td class="num" style="color:${(v||0) > 0 ? 'var(--success)' : 'var(--text-3)'};">${v || 0}</td>`;
+      if (c.kind === 'rating') return `<td class="num" style="color:${(v||0) >= 7 ? 'var(--success)' : (v||0) >= 4 ? 'var(--warn)' : 'var(--text-3)'};">${v != null ? Number(v).toFixed(1) : '—'}</td>`;
+      if (c.kind === 'num') return `<td class="num">${v != null ? Number(v).toLocaleString() : '—'}</td>`;
+      return `<td style="max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(v)}">${esc(v == null ? '—' : v)}</td>`;
+    }).join('')}</tr>
+  `).join('')}${rows.length > 500 ? `<tr><td colspan="${cols.length}" style="text-align:center; color:var(--text-3);">…and ${rows.length - 500} more — narrow the filters to see them.</td></tr>` : ''}</tbody>`;
+  el.innerHTML = thead + tbody;
+  // Wire header click → sort toggle.
+  el.querySelectorAll('th[data-sort-key]').forEach(th => {
+    th.addEventListener('click', () => {
+      const k = th.dataset.sortKey;
+      if (analytics.sortKey === k) analytics.sortDir = analytics.sortDir === 'desc' ? 'asc' : 'desc';
+      else { analytics.sortKey = k; analytics.sortDir = 'desc'; }
+      filterAndRenderAnalytics();
+    });
+  });
 }
 
 // ─────────── Boot ───────────

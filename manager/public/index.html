@@ -36,6 +36,7 @@
   <nav class="tabs">
     <button class="tab active" data-tab="upload">📤 Upload</button>
     <button class="tab" data-tab="dashboard">📊 Dashboard</button>
+    <button class="tab" data-tab="analytics">📈 Analytics</button>
     <button class="tab" data-tab="config">⚙ Config</button>
     <button class="tab" data-tab="workers">🔗 Workers</button>
     <button class="tab" data-tab="downloads">📦 Downloads</button>
@@ -141,6 +142,81 @@
             </div>
             <div class="card-body">
               <div class="log" id="activityLog"><div class="empty">No activity yet.</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= ANALYTICS ================= -->
+    <section class="panel" id="panel-analytics">
+      <div class="row" style="margin-bottom: 12px;">
+        <label style="display:flex; align-items:center; gap:8px;">
+          <span class="lbl" style="margin:0;">Batch:</span>
+          <select id="anBatchSelect" style="min-width: 220px;"></select>
+        </label>
+        <label style="display:flex; align-items:center; gap:8px;">
+          <span class="lbl" style="margin:0;">SKU:</span>
+          <select id="anSkuSelect" style="min-width: 260px;">
+            <option value="">— pick a batch first —</option>
+          </select>
+        </label>
+        <span class="spacer" style="flex:1;"></span>
+        <button class="small secondary" id="anExportBtn" disabled>📥 Export this SKU as CSV</button>
+      </div>
+
+      <div id="anSummary"><div class="empty"><div class="empty-icon">📈</div>Pick a batch + SKU to see analytics.</div></div>
+
+      <div id="anTopChartCard" style="display:none;">
+        <div class="card">
+          <div class="card-head">
+            <span class="card-icon">🏆</span>
+            <span class="card-title">Top keywords by AdRating</span>
+            <span class="card-sub" id="anTopChartSub">—</span>
+          </div>
+          <div class="card-body">
+            <div id="anTopChart"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="anTableCard" style="display:none;">
+        <div class="card">
+          <div class="card-head">
+            <span class="card-icon">🔍</span>
+            <span class="card-title">Keywords</span>
+            <span class="card-sub" id="anTableCount">—</span>
+          </div>
+          <div class="card-body">
+            <div class="row" style="margin-bottom: 10px;">
+              <input type="text" id="anSearch" placeholder="Filter keywords…" style="flex: 1; min-width: 220px;" />
+              <select id="anSource" style="min-width: 150px;">
+                <option value="">All sources</option>
+                <option value="kp">KP</option>
+                <option value="autosuggest">Autosuggest</option>
+                <option value="serp">SERP</option>
+                <option value="paa">PAA (People also ask)</option>
+                <option value="related">Related</option>
+                <option value="amazon">Amazon</option>
+              </select>
+              <select id="anIntent" style="min-width: 150px;">
+                <option value="">All intents</option>
+                <option value="high">High buying intent</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+                <option value="informational">Informational</option>
+              </select>
+              <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-2);">
+                Min AdRating
+                <input type="number" id="anMinRating" min="0" max="10" step="1" value="0" style="width: 60px;" />
+              </label>
+              <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-2);">
+                <input type="checkbox" id="anOnlyImgMatches" />
+                Only with image matches
+              </label>
+            </div>
+            <div style="overflow: auto; max-height: 520px;">
+              <table class="tbl" id="anTable"></table>
             </div>
           </div>
         </div>

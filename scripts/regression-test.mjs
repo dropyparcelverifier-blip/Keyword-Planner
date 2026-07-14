@@ -417,6 +417,39 @@ async function run() {
   assertEq(decoded.managerToken, testToken, '20.4 setup code preserves managerToken');
   assertEq(decoded.kpUrl, testKp, '20.5 setup code preserves kpUrl');
 
+  // ===== 20b. ANALYTICS TAB WIRING =====
+  // The analytics tab is fed by /api/keywords for a batch + client-side
+  // grouping by SKU. Nothing new server-side; verify:
+  //   1) index.html has the tab button + panel
+  //   2) app.js has the analytics controller + all render fns
+  //   3) The endpoint returns rows the tab knows how to group + sort
+  assert(idx.body.includes('data-tab="analytics"'), '20b.1 analytics tab button in index');
+  assert(idx.body.includes('id="panel-analytics"'), '20b.2 analytics panel in index');
+  assert(idx.body.includes('id="anBatchSelect"'), '20b.3 analytics batch select in index');
+  assert(idx.body.includes('id="anSkuSelect"'), '20b.4 analytics SKU select in index');
+  assert(idx.body.includes('id="anMinRating"'), '20b.5 analytics min-rating filter in index');
+  assert(idx.body.includes('id="anExportBtn"'), '20b.6 analytics export button in index');
+  assert(appJs.body.includes('refreshAnalyticsTab'), '20b.7 analytics controller in app.js');
+  assert(appJs.body.includes('renderAnalyticsSummary'), '20b.8 summary render');
+  assert(appJs.body.includes('renderAnalyticsTopChart'), '20b.9 top-chart render');
+  assert(appJs.body.includes('renderAnalyticsTable'), '20b.10 keywords table render');
+  assert(appJs.body.includes('filterAndRenderAnalytics'), '20b.11 filter+sort pipeline');
+
+  // Fetch keywords + reproduce the client-side grouping to make sure
+  // the shape the analytics tab expects is actually there.
+  const kwForAn = await req('GET', `/api/keywords?batchId=${BATCH_A}`);
+  assert(kwForAn.data?.ok === true, '20b.12 /api/keywords reachable for analytics');
+  const kwRowsA = kwForAn.data.rows || [];
+  assert(kwRowsA.every(r => 'sku' in r || 'product_url' in r), '20b.13 rows have sku or product_url (grouping key)');
+  assert(kwRowsA.every(r => 'source' in r), '20b.14 rows have source (filter dimension)');
+  assert(kwRowsA.every(r => 'ad_rating' in r), '20b.15 rows have ad_rating (sort + top-chart dimension)');
+  assert(kwRowsA.every(r => 'image_count' in r), '20b.16 rows have image_count (filter + rendering dimension)');
+  // Group by SKU the way the tab does + assert we can find widget-a's rows.
+  const bySku = new Map();
+  for (const r of kwRowsA) { const k = r.sku || r.product_url || 'unknown'; if (!bySku.has(k)) bySku.set(k, []); bySku.get(k).push(r); }
+  assert(bySku.has('A1'), '20b.17 SKU grouping produces the SKU from the upload (A1)');
+  assertEq(bySku.get('A1').length, 2, '20b.18 grouped rows match pushed count for SKU A1');
+
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
   const [s1, w1, a1] = await Promise.all([
