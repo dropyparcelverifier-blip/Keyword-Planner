@@ -7,10 +7,10 @@
 //
 // Usage: node scripts/regression-test.mjs
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -69,8 +69,35 @@ async function waitForHealth() {
   throw new Error('server did not become healthy within 6s');
 }
 
+// ---------------- browser-JS parse check ----------------
+// Rename to .mjs and pipe through `node --check` so it's parsed as an
+// ES module — the browser parses <script type="module"> strictly, and
+// `node --check foo.js` DOES NOT (it uses CommonJS lenient rules and
+// silently accepts patterns like `won\\'t` that break in the browser).
+// This is the ONLY test that would have caught the bad-escape bug that
+// bricked the whole UI in commit 2191fdd.
+function parseAsBrowserModule(filepath) {
+  const tmp = resolve(TMP, `parse-${Math.random().toString(36).slice(2)}.mjs`);
+  writeFileSync(tmp, readFileSync(filepath, 'utf-8'));
+  const r = spawnSync(process.execPath, ['--check', tmp], { encoding: 'utf-8' });
+  return { ok: r.status === 0, stderr: r.stderr, stdout: r.stdout };
+}
+
 // ---------------- tests ----------------
 async function run() {
+  // ===== 0. PARSE BROWSER JS AS ES MODULES =====
+  // Runs BEFORE anything else — if these fail, everything downstream
+  // is meaningless because the browser wouldn't run this JS.
+  const browserJsFiles = [
+    resolve(REPO, 'manager/public/app.js'),
+    resolve(REPO, 'manager/public/api.js'),
+  ];
+  for (const f of browserJsFiles) {
+    const rel = f.substring(REPO.length + 1).replace(/\\/g, '/');
+    const r = parseAsBrowserModule(f);
+    assert(r.ok, `0.${browserJsFiles.indexOf(f) + 1} ${rel} parses as ES module (browser-strict). stderr: ${r.stderr.slice(0, 400)}`);
+  }
+
   await waitForHealth();
 
   // ===== 1. HEALTH + AUTH =====

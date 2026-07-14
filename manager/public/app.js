@@ -432,7 +432,7 @@ $('genSetupBtn').addEventListener('click', async () => {
   state.setupCode = generateSetupCode({ managerUrl, managerToken, kpUrl });
   $('setupCodeWrap').innerHTML = `
     <div class="setup-code">${esc(state.setupCode)}</div>
-    <div class="hint">${kpUrl ? '✓ Includes your saved KP URL' : '⚠ No KP URL saved yet — workers won\\'t be able to run KP. Save one in Config tab.'}</div>
+    <div class="hint">${kpUrl ? '✓ Includes your saved KP URL' : '⚠ No KP URL saved yet — workers cannot run KP. Save one in Config tab.'}</div>
   `;
   $('copySetupBtn').disabled = false;
   $('setupCodeWarn').style.display = managerToken ? '' : 'none';

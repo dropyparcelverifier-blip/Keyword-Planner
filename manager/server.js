@@ -135,7 +135,16 @@ function serveStatic(res, urlPath) {
       : ext === '.js' || ext === '.mjs' ? 'text/javascript'
       : ext === '.css' ? 'text/css'
       : 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': type }); res.end(data);
+    // no-cache so users don't have to hard-refresh after each fix. The
+    // manager typically serves a handful of small files locally over
+    // Tailscale — cache benefit is negligible, cache pain is real.
+    res.writeHead(200, {
+      'Content-Type': type,
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+    });
+    res.end(data);
   });
 }
 
