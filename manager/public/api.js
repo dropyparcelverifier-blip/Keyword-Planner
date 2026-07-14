@@ -55,6 +55,8 @@ export const api = {
   configPatch:       (configPatch)     => _fetch('/api/config', { method: 'POST', body: { configPatch } }),
   activeBatchPin:    (batchId)         => _fetch('/api/config', { method: 'POST', body: { activeBatchId: batchId } }),
   cleanup:           (logDays, commandsDays) => _fetch('/api/cleanup', { method: 'POST', body: { logDays, commandsDays } }),
+  deleteBatch:       (batchId)         => _fetch('/api/jobs/delete-batch', { method: 'POST', body: { batchId } }),
+  resetAll:          ()                => _fetch('/api/reset-all', { method: 'POST', body: { confirm: 'RESET' } }),
 };
 
 // Live keyword stats — mirrors the extension's dashboard fetchBatchKeywordStats.

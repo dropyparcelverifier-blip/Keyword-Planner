@@ -285,6 +285,41 @@
 
       <div class="card">
         <div class="card-head">
+          <span class="card-icon">🗑</span>
+          <span class="card-title">Delete a batch</span>
+          <span class="card-sub">jobs + keywords + activity for one batch_id</span>
+        </div>
+        <div class="card-body">
+          <div class="hint">Wipes every job, keyword row, and activity-log entry for a specific batch. Worker config + KP URL untouched. Cannot be undone.</div>
+          <div class="row" style="margin-top: 10px;">
+            <select id="deleteBatchSelect" style="min-width: 260px;"></select>
+            <button class="danger" id="deleteBatchBtn">Delete this batch</button>
+          </div>
+          <div id="deleteBatchResult"></div>
+        </div>
+      </div>
+
+      <div class="card" style="border-color: var(--danger);">
+        <div class="card-head" style="background: var(--danger-soft);">
+          <span class="card-icon">💥</span>
+          <span class="card-title" style="color: var(--danger);">Reset everything (danger zone)</span>
+          <span class="card-sub">deletes ALL batches + keywords + activity + commands</span>
+        </div>
+        <div class="card-body">
+          <div class="hint">Nukes every batch, every keyword row, every activity-log entry, and every worker command. <strong>Worker config (KP URL, token, pacing, etc.) is preserved.</strong> Cannot be undone.</div>
+          <div class="row" style="margin-top: 10px; align-items: center;">
+            <label style="flex: 1; font-size: 12px; color: var(--text-2);">
+              Type <code style="color: var(--danger);">RESET</code> to enable the button:
+              <input type="text" id="resetConfirmInput" placeholder="RESET" style="margin-top: 4px;" autocomplete="off" />
+            </label>
+            <button class="danger" id="resetAllBtn" disabled>Reset everything</button>
+          </div>
+          <div id="resetAllResult"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
           <span class="card-icon">🧹</span>
           <span class="card-title">Cleanup old data</span>
         </div>
