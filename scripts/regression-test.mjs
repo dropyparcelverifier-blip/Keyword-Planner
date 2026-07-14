@@ -611,6 +611,35 @@ async function run() {
   assertEq(requeueBulk.status, 200, '20g.24 POST /api/jobs/requeue-all-failed 200');
   assert(typeof requeueBulk.data?.updated === 'number', '20g.25 bulk requeue returns update count');
 
+  // ===== 20h. DENSITY / EMPTY-STATE OVERHAUL =====
+  // Global stats bar
+  assert(idx.body.includes('id="statsBar"'),      '20h.1 global stats bar in index');
+  assert(idx.body.includes('id="sbBatches"'),     '20h.2 batches counter');
+  assert(idx.body.includes('id="sbWorkers"'),     '20h.3 workers counter');
+  assert(idx.body.includes('id="sbKeywords"'),    '20h.4 keywords counter');
+  assert(idx.body.includes('id="sbInFlight"'),    '20h.5 in-flight counter');
+  assert(idx.body.includes('id="sbFailed"'),      '20h.6 failed counter');
+  assert(cssR.body.includes('.statsbar'),         '20h.7 statsbar CSS');
+  assert(appJs.body.includes('refreshStatsBar'),  '20h.8 stats bar refresher wired');
+
+  // Upload tab drop zone + sidebar
+  assert(idx.body.includes('id="uploadDropZone"'), '20h.9 drop zone element');
+  assert(cssR.body.includes('.drop-zone'),         '20h.10 drop-zone CSS');
+  assert(idx.body.includes('id="uploadRecentBody"'), '20h.11 upload sidebar recent batches');
+  assert(appJs.body.includes('refreshUploadSidebar'), '20h.12 upload sidebar refresher');
+
+  // Downloads tab batch list
+  assert(idx.body.includes('id="downloadListBody"'), '20h.13 downloads batch list element');
+
+  // Config collapsibles
+  const collapsibleCount = (idx.body.match(/class="card collapsible/g) || []).length;
+  assert(collapsibleCount >= 4, `20h.14 config has 4+ collapsible cards (got ${collapsibleCount})`);
+  assert(cssR.body.includes('.card.collapsible.collapsed .card-body'), '20h.15 collapsible collapsed CSS');
+  assert(appJs.body.includes(`closest('.card.collapsible .card-head')`), '20h.16 collapsible click handler wired');
+
+  // Two-col helper class exists
+  assert(cssR.body.includes('.two-col'), '20h.17 two-col grid helper CSS');
+
   // ===== 20d. INSTALLER AUTO-ARM =====
   // The installer must bake the current token + KP URL into the PS script
   // and write a worker-config.json into the worker's extension dir so the

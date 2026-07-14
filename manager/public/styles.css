@@ -61,6 +61,81 @@ body { min-height: 100vh; display: flex; flex-direction: column; }
 }
 .topbar input.token:focus { outline: none; border-color: var(--accent); }
 
+/* Global stats bar — sticky below the tabs, visible on every tab.
+   Shows batches / workers / total-keywords / in-flight / last-activity
+   so users have context regardless of which tab they're on. */
+.statsbar {
+  display: flex; gap: 0; padding: 8px 20px;
+  background: var(--bg-1); border-bottom: 1px solid var(--line-1);
+  overflow-x: auto;
+}
+.stat {
+  padding: 4px 16px; display: flex; align-items: baseline; gap: 8px;
+  border-right: 1px solid var(--line-1); white-space: nowrap;
+}
+.stat:last-child { border-right: none; }
+.stat .stat-value {
+  font-size: 16px; font-weight: 700; color: var(--text-0);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.stat .stat-label {
+  font-size: 10px; color: var(--text-3); text-transform: uppercase;
+  letter-spacing: 0.5px; font-weight: 600;
+}
+.stat.ok    .stat-value { color: var(--success); }
+.stat.info  .stat-value { color: var(--info); }
+.stat.warn  .stat-value { color: var(--warn); }
+.stat.danger .stat-value { color: var(--danger); }
+
+/* Drag-drop zone — file picker with better visual affordance */
+.drop-zone {
+  border: 2px dashed var(--line-2);
+  border-radius: 10px;
+  padding: 32px 20px;
+  text-align: center;
+  background: var(--bg-input);
+  cursor: pointer;
+  transition: all 160ms;
+}
+.drop-zone:hover, .drop-zone.hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.drop-zone.has-file {
+  border-color: var(--success);
+  background: var(--success-soft);
+  padding: 20px;
+}
+.drop-zone .icon { font-size: 32px; margin-bottom: 8px; }
+.drop-zone .primary { color: var(--text-0); font-weight: 600; font-size: 14px; }
+.drop-zone .sub { color: var(--text-2); font-size: 12px; margin-top: 4px; }
+.drop-zone input[type=file] { display: none; }
+
+/* Collapsible card — click head to toggle body */
+.card.collapsible .card-head { cursor: pointer; user-select: none; }
+.card.collapsible .card-head::after {
+  content: '▾'; margin-left: 8px; color: var(--text-3); transition: transform 160ms;
+}
+.card.collapsible.collapsed .card-head::after { transform: rotate(-90deg); }
+.card.collapsible.collapsed .card-body { display: none; }
+
+/* Two-column layout helper — sidebar right on wide, stacks on narrow */
+.two-col { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+@media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+
+/* Info list — small right-hand sidebar of quick facts */
+.info-list { list-style: none; padding: 0; margin: 0; }
+.info-list li {
+  padding: 6px 0; border-bottom: 1px solid var(--line-1);
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: 12px;
+}
+.info-list li:last-child { border-bottom: none; }
+.info-list li .k { color: var(--text-3); }
+.info-list li .v { color: var(--text-1); font-family: var(--mono); font-size: 11px;
+                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* Tabs */
 .tabs {
   display: flex; gap: 4px; padding: 8px 20px 0;

@@ -238,6 +238,64 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ─────────── Global stats bar ───────────
+// Refreshed every 15s, and immediately after any state-changing action
+// (upload / delete / reset). Provides at-a-glance context on every tab.
+async function refreshStatsBar() {
+  try {
+    const [sum, workers, act] = await Promise.all([
+      api.jobsSummary(),
+      api.jobsWorkerStats(),
+      api.activityGet('', 1),
+    ]);
+    const batches = sum.batches || [];
+    const totals = batches.reduce((a, b) => {
+      a.total += b.total || 0;
+      a.done += b.done || 0;
+      a.claimed += b.claimed || 0;
+      a.failed += b.failed || 0;
+      return a;
+    }, { total: 0, done: 0, claimed: 0, failed: 0 });
+    // Online worker = last heartbeat within 5 minutes.
+    const now = Date.now();
+    const online = (workers.workers || []).filter(w => {
+      const hb = Number(w.last_heartbeat || 0);
+      return hb && (now - hb) < 5 * 60 * 1000;
+    }).length;
+    const kwTotal = batches.reduce((a, _) => a, 0); // computed below via a separate endpoint if needed
+    // Sum keywords across batches — cheap here since summary doesn't include it.
+    let kwSum = 0;
+    try {
+      const tl = await api.keywordsTimeline('');
+      // /api/keywords/timeline is only 24h. Use a batch-level total instead
+      // by summing fetchBatchKeywordStats — expensive if many batches, so we
+      // just show the 24h sum here (labelled as "keywords today" via title).
+      kwSum = (tl.buckets || []).reduce((a, b) => a + Number(b.n || 0), 0);
+    } catch {}
+    $('sbBatches').textContent   = batches.length.toLocaleString();
+    $('sbWorkers').textContent   = online.toLocaleString();
+    $('sbKeywords').textContent  = kwSum.toLocaleString();
+    $('sbKeywords').parentElement.title = 'Keyword rows landed in the last 24h';
+    $('sbInFlight').textContent  = totals.claimed.toLocaleString();
+    $('sbDone').textContent      = totals.done.toLocaleString();
+    $('sbFailed').textContent    = totals.failed.toLocaleString();
+    const lastEv = (act.events || [])[0];
+    $('sbLastActivity').textContent = lastEv ? fmtAgo(lastEv.ts) : '—';
+  } catch (e) {
+    // Silent — health pill shows connection state.
+  }
+}
+setInterval(refreshStatsBar, 15000);
+
+// ─────────── Collapsible cards ───────────
+// Delegated click handler — any .card.collapsible .card-head toggles.
+document.addEventListener('click', (e) => {
+  const head = e.target.closest('.card.collapsible .card-head');
+  if (head && !e.target.closest('button, input, select, a')) {
+    head.parentElement.classList.toggle('collapsed');
+  }
+});
+
 // ─────────── Tabs ───────────
 document.querySelectorAll('.tab').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -248,6 +306,7 @@ document.querySelectorAll('.tab').forEach(btn => {
     saveUI({ tab: btn.dataset.tab });
     if (btn.dataset.tab === 'dashboard') startDashPolling();
     else stopDashPolling();
+    if (btn.dataset.tab === 'upload') refreshUploadSidebar();
     if (btn.dataset.tab === 'analytics') refreshAnalyticsTab();
     if (btn.dataset.tab === 'config') loadConfigForm();
     if (btn.dataset.tab === 'workers') refreshWorkersTab();
@@ -287,9 +346,35 @@ healthPing();
 // ═══════════════════════════════════════════════════════════════
 //  UPLOAD TAB — Excel/CSV → parse → POST /api/jobs/upload
 // ═══════════════════════════════════════════════════════════════
+// Drop-zone wiring: click, drag-hover, drop.
+(function wireDropZone() {
+  const zone = $('uploadDropZone');
+  const input = $('uploadFile');
+  if (!zone || !input) return;
+  zone.addEventListener('click', (e) => {
+    if (e.target === input) return;
+    input.click();
+  });
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('hover'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('hover'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('hover');
+    const f = e.dataTransfer?.files?.[0];
+    if (f) {
+      input.files = e.dataTransfer.files;
+      input.dispatchEvent(new Event('change'));
+    }
+  });
+})();
 $('uploadFile').addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
+  // Visual feedback in the drop zone.
+  const zone = $('uploadDropZone');
+  zone?.classList.add('has-file');
+  $('uploadDropPrimary').textContent = `📄 ${file.name}`;
+  $('uploadDropSub').textContent = `${(file.size / 1024).toFixed(1)} KB · parsing…`;
   const buf = await file.arrayBuffer();
   let wb;
   try { wb = XLSX.read(buf, { type: 'array' }); }
@@ -383,7 +468,40 @@ $('clearUploadBtn').addEventListener('click', () => {
   $('uploadResult').innerHTML = '';
   $('uploadBtn').disabled = true;
   state.parsedProducts = null;
+  const zone = $('uploadDropZone');
+  zone?.classList.remove('has-file');
+  $('uploadDropPrimary').textContent = 'Click or drag Excel / CSV here';
+  $('uploadDropSub').innerHTML = 'Required: <code>url</code> or <code>product_url</code>. Optional: <code>sku</code>, <code>product_name</code>, <code>priority</code>, <code>handles</code>, <code>brands</code>.';
 });
+
+// Upload tab sidebar — recent batches list. Refreshed on tab activation.
+async function refreshUploadSidebar() {
+  const body = $('uploadRecentBody');
+  const sub = $('uploadRecentSub');
+  if (!body) return;
+  try {
+    const s = await api.jobsSummary();
+    const batches = (s.batches || []).slice(0, 10);
+    sub.textContent = `${(s.batches || []).length} total`;
+    if (batches.length === 0) {
+      body.innerHTML = `<div class="empty" style="padding: 12px 6px;">No batches yet.</div>`;
+      return;
+    }
+    body.innerHTML = batches.map(b => {
+      const pct = b.total ? Math.round((b.done / b.total) * 100) : 0;
+      const state = b.pending > 0 ? 'pending' : b.claimed > 0 ? 'claimed' : b.done === b.total ? 'done' : 'pending';
+      return `
+        <div style="padding: 6px 0; border-bottom: 1px solid var(--line-1);" title="${esc(b.batch_id)}">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap: 6px;">
+            <span class="mono" style="font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(b.batch_id)}</span>
+            <span class="chip ${state}">${b.done}/${b.total}</span>
+          </div>
+          <div class="progress" style="margin-top: 4px;"><div class="progress-fill${pct === 100 ? ' done' : ''}" style="width: ${pct}%;"></div></div>
+        </div>`;
+    }).join('');
+  } catch { /* stats bar surfaces errors */ }
+}
+
 $('uploadBtn').addEventListener('click', async () => {
   if (!state.parsedProducts?.length) return;
   const batchId = $('uploadBatchId').value.trim() || String(Date.now());
@@ -396,6 +514,8 @@ $('uploadBtn').addEventListener('click', async () => {
       + (r.skippedActive ? ` Skipped ${r.skippedActive} already-active in other batches.` : '');
     setResult($('uploadResult'), '✓ ' + msg, 'ok');
     toast(msg, 'ok', { title: 'Batch uploaded' });
+    refreshStatsBar();
+    refreshUploadSidebar();
   } catch (e) {
     setResult($('uploadResult'), `Upload failed: ${e.message}`, 'err');
     toast(e.message, 'err', { title: 'Upload failed' });
@@ -852,11 +972,42 @@ $('sendCmdBtn').addEventListener('click', async () => {
 //  DOWNLOADS TAB — client-side CSV assembly
 // ═══════════════════════════════════════════════════════════════
 async function refreshDownloadsTab() {
+  const body = $('downloadListBody');
+  const sub = $('downloadListSub');
   try {
     const s = await api.jobsSummary();
     state.batches = s.batches || [];
     populateBatchSelects();
-  } catch {}
+    if (state.batches.length === 0) {
+      sub.textContent = '0';
+      body.innerHTML = `<div class="empty" style="padding: 20px 8px;">
+        <div class="empty-icon">📭</div>
+        <strong>No batches yet</strong>
+        <div style="margin-top: 6px;"><a href="#" onclick="document.querySelector('.tab[data-tab=upload]').click(); return false;" style="color: var(--accent); text-decoration: none;">📤 Upload some products →</a></div>
+      </div>`;
+      return;
+    }
+    sub.textContent = `${state.batches.length}`;
+    body.innerHTML = state.batches.map(b => {
+      const pct = b.total ? Math.round((b.done / b.total) * 100) : 0;
+      return `
+        <div style="padding: 8px 0; border-bottom: 1px solid var(--line-1); display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;">
+          <div>
+            <div class="mono" style="font-size: 11px; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(b.batch_id)}</div>
+            <div class="progress"><div class="progress-fill${pct === 100 ? ' done' : ''}" style="width: ${pct}%;"></div></div>
+            <div style="font-size: 10px; color: var(--text-3); margin-top: 2px;">${b.done}/${b.total} done · ${pct}%</div>
+          </div>
+          <div style="font-size: 11px; color: var(--text-2); font-family: var(--mono);" title="Total SKUs">${b.total} SKU</div>
+          <button class="small" data-download-batch="${esc(b.batch_id)}" title="Download all CSVs for this batch">📥 Download</button>
+        </div>`;
+    }).join('');
+    body.querySelectorAll('button[data-download-batch]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        $('downloadBatchSelect').value = btn.dataset.downloadBatch;
+        $('downloadCsvBtn').click();
+      });
+    });
+  } catch (e) { sub.textContent = '⚠'; }
 }
 $('downloadCsvBtn').addEventListener('click', async () => {
   const batchId = $('downloadBatchSelect').value;
@@ -1182,6 +1333,11 @@ function renderAnalyticsTable(rows) {
 }
 
 // ─────────── Boot ───────────
+// Kick the stats bar + Upload sidebar right away so the first paint
+// already shows real numbers, not em-dashes.
+refreshStatsBar();
+refreshUploadSidebar();
+
 // Restore last-viewed tab + selected batch + refresh interval from
 // localStorage so a browser reload doesn't lose the user's context.
 (function bootRestoreUI() {
