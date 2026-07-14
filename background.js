@@ -378,6 +378,10 @@ async function setRunIntent(value) {
   if (state.runIntent) {
     await chrome.storage.local.set({ [STORAGE_KEY_RUN_INTENT]: true });
   } else {
+    // Timestamp the intent-cleared moment. shouldAutoResume treats any
+    // resume attempt within 30s of this as unwanted so a racy watchdog
+    // alarm firing during Pause/Stop cleanup can't re-launch the engine.
+    state._runIntentClearedAt = Date.now();
     await chrome.storage.local.remove([STORAGE_KEY_RUN_INTENT]).catch(() => {});
   }
 }
@@ -387,7 +391,13 @@ async function setRunIntent(value) {
 // trigger so each path applies the same eligibility check.
 function shouldAutoResume() {
   if (state.running) return false;
+  if (state.stopRequested) return false;      // engine still cleaning up from a Stop/Pause
   if (!state.runIntent) return false;
+  // Belt-and-suspenders window — if runIntent was cleared in the last
+  // 30s, block auto-resume even if something else flipped it back on.
+  // This is what protected against a rapid Pause+watchdog race where
+  // the watchdog fired 2s after Pause and re-launched the run.
+  if (state._runIntentClearedAt && (Date.now() - state._runIntentClearedAt) < 30000) return false;
   if (state.lastProducts.length === 0) return false;
   if (state.doneProducts.length >= state.lastProducts.length) return false;
   return true;
@@ -894,10 +904,16 @@ async function pollWorkerCommands() {
           await setRunIntent(false);
           bufferActivity({ level: 'warn', source: 'cmd', message: `Stop command received from manager — halting after current product.` });
         } else if (c.command === 'pause') {
-          // For now treat pause same as stop (graceful halt). True pause
-          // requires engine-level pause primitives that don't exist yet.
+          // Graceful halt after the current SKU. Unlike stop, we keep
+          // workerArmed=true and don't set userStoppedArm, so a Resume
+          // brings the run back with minimal ceremony. Critically we
+          // clear runIntent so the 60s watchdog can't auto-resume
+          // in the ~30s window between the engine halting and the user
+          // pressing Resume (that was the 'Auto-resume (watchdog) 2s
+          // after Pause' bug).
           state.stopRequested = true;
-          bufferActivity({ level: 'warn', source: 'cmd', message: `Pause command received — halting (no resumable pause primitive yet).` });
+          await setRunIntent(false);
+          bufferActivity({ level: 'warn', source: 'cmd', message: `Pause command received — halting after current SKU. Send Resume to continue.` });
         } else if (c.command === 'wake') {
           // Manager broadcast "wake up and check for work". Triggers an
           // immediate auto-poll tick — but does NOT override an
@@ -929,6 +945,38 @@ async function pollWorkerCommands() {
               chrome.runtime.sendMessage({ action: 'jobs:autoConnectWorker', workerId: wId, chunkSize: state.continuousChunkSize || 5 }, () => {});
             }, 200);
           }
+        } else if (c.command === 'reset_local') {
+          // Manager did a full reset. Purge our local state that
+          // references now-deleted rows on the manager side — otherwise
+          // we'd keep heartbeating stale job IDs, claiming a phantom
+          // batch, and reporting bogus 'today' counters. What survives:
+          //   - workerId, workerArmed, managerUrl, managerToken, kpUrl
+          //     (all still valid — the manager didn't rotate those)
+          // What gets cleared:
+          //   - queueBatchId, claimedJobs (jobs table wiped)
+          //   - doneProducts, lastReport, lastProducts, runIntent (run state)
+          //   - todayBaseline (throughput chart baseline is now bogus)
+          //   - pending pushes (destination rows are gone)
+          state.stopRequested = true;
+          state.queueBatchId = '';
+          state.claimedJobs = [];
+          state.doneProducts = [];
+          state.lastProducts = [];
+          state.lastRunOpts = null;
+          state.report = [];
+          state.lastPushedCount = 0;
+          state.batchId = '';
+          _pendingPushes.length = 0;
+          await setRunIntent(false);
+          await chrome.storage.local.remove([
+            STORAGE_KEY_QUEUE_BATCH_ID, STORAGE_KEY_CLAIMED_JOBS,
+            STORAGE_KEY_DONE_PRODUCTS, STORAGE_KEY_LAST_REPORT,
+            STORAGE_KEY_LAST_PRODUCTS, STORAGE_KEY_LAST_RUN_OPTS,
+            STORAGE_KEY_LAST_BATCH, STORAGE_KEY_LAST_PUSHED_COUNT,
+            'adbrainTodayBaseline', PENDING_PUSH_STORAGE_KEY,
+          ]).catch(() => {});
+          bufferActivity({ level: 'warn', source: 'cmd', message: `reset_local: manager reset detected — cleared local job/run state (worker id + config kept).` });
+          pushLog(`Manager reset detected — cleared local run state. Worker stays armed and will claim from the next batch you upload.`, 'ok');
         } else if (c.command === 'release_claims') {
           // Release this worker's claims back to pending.
           await releaseStaleJobs(0).catch(() => {});

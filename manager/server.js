@@ -206,6 +206,7 @@ const Q = {
   wipeKeywords: db.prepare(`DELETE FROM keywords`),
   wipeActivity: db.prepare(`DELETE FROM activity_log`),
   wipeCommands: db.prepare(`DELETE FROM worker_commands`),
+  wipeWorkersRoster: db.prepare(`DELETE FROM workers`),
   // Bulk requeue: set every failed job back to pending. Optionally scope
   // to one batch. Returns updated row count.
   requeueAllFailed:      db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, failed_reason=NULL WHERE status='failed'`),
@@ -756,18 +757,25 @@ const server = http.createServer(async (req, res) => {
       const b = await readJson(req);
       // Belt-and-suspenders confirm: clients must send {confirm:'RESET'}.
       if (b.confirm !== 'RESET') return send(res, 400, { ok: false, error: "safety: send {confirm:'RESET'} to proceed" });
-      let j = 0, k = 0, a = 0, c = 0;
+      let j = 0, k = 0, a = 0, c = 0, w = 0;
       db.exec('BEGIN');
       try {
         j = Q.wipeJobs.run().changes;
         k = Q.wipeKeywords.run().changes;
         a = Q.wipeActivity.run().changes;
         c = Q.wipeCommands.run().changes;
-        // Also unpin any pinned batch — it no longer exists.
+        w = Q.wipeWorkersRoster.run().changes;
+        // Unpin any pinned batch — it no longer exists.
         Q.setActiveBatch.run(null);
+        // Broadcast a reset_local command so every worker clears its
+        // chrome.storage (stale batch IDs, claimed job IDs, done-products
+        // list, in-memory report). Without this, workers keep trying to
+        // heartbeat non-existent jobs after a reset. Broadcast = worker_id
+        // NULL; every worker sees it on its next 30s command poll.
+        Q.insertCommand.run(null, 'reset_local', null, 'manager-reset-all');
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
-      return send(res, 200, { ok: true, deletedJobs: j, deletedKeywords: k, deletedActivity: a, deletedCommands: c });
+      return send(res, 200, { ok: true, deletedJobs: j, deletedKeywords: k, deletedActivity: a, deletedCommands: c, deletedWorkers: w });
     }
     if (m === 'POST' && p === '/api/cleanup') {
       const b = await readJson(req);

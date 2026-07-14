@@ -710,6 +710,28 @@ async function run() {
   // Dashboard merges idle-from-roster into worker fleet
   assert(appJs.body.includes('idleFromRoster'), '20k.10 dashboard merges roster into fleet render');
 
+  // ===== 20l. STOP/PAUSE/RESET SANITY =====
+  // Pause fix: manager 'pause' now clears runIntent so watchdog can't race
+  assert(bgSrcK.includes("c.command === 'pause'"),           '20l.1 pause command handler exists');
+  const pauseIdx = bgSrcK.indexOf("c.command === 'pause'");
+  const pauseBlock = bgSrcK.substring(pauseIdx, pauseIdx + 800);
+  assert(pauseBlock.includes('setRunIntent(false)'),          '20l.2 pause clears runIntent (fixes watchdog race)');
+
+  // Watchdog window guard
+  assert(bgSrcK.includes('_runIntentClearedAt'),              '20l.3 30s recent-stop guard in shouldAutoResume');
+  assert(bgSrcK.includes('state.stopRequested) return false'),'20l.4 shouldAutoResume checks stopRequested');
+
+  // KP no-ideas returns ok:true empty
+  const kdSrc = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+  assert(kdSrc.includes('empty: true'),                       '20l.5 KP scraper returns empty: true for zero-ideas seed');
+  assert(kdSrc.includes('expansion?.ok && expansion?.empty'), '20l.6 R2 loop treats empty as continue (no retry storm)');
+
+  // Worker knows how to handle reset_local (static check — safe to run anytime)
+  assert(bgSrcK.includes("c.command === 'reset_local'"),      '20l.7 worker handles reset_local command');
+  assert(bgSrcK.includes('PENDING_PUSH_STORAGE_KEY'),         '20l.8 reset_local wipes pending pushes to gone rows');
+  // The destructive reset-broadcast assertions run later, after 20e (which
+  // also does a reset) — placing them here would wipe state 20e depends on.
+
   // ===== 20d. INSTALLER AUTO-ARM =====
   // The installer must bake the current token + KP URL into the PS script
   // and write a worker-config.json into the worker's extension dir so the
@@ -791,6 +813,18 @@ async function run() {
   // Worker config MUST survive the reset (KP URL, token, etc.)
   const cfgSurvive = await req('GET', '/api/config');
   assertEq(cfgSurvive.status, 200, '20e.14 worker_config survives reset-all');
+
+  // ===== 20l-late. RESET BROADCAST + WORKERS-ROSTER WIPE =====
+  // The 20e reset above ran; verify the side-effects that fix the
+  // 'workers still heartbeat phantom jobs after reset' bug.
+  assert('deletedWorkers' in reset.data,                        '20l.9 reset reports deletedWorkers count');
+  // Broadcast 'reset_local' command should have been queued.
+  const cmdsAfterReset = await req('GET', '/api/commands?workerId=any-worker-picks-up-broadcast');
+  const hasResetBroadcast = (cmdsAfterReset.data?.commands || []).some(c => c.command === 'reset_local');
+  assert(hasResetBroadcast, '20l.10 reset queues a reset_local broadcast for workers');
+  // Workers roster is wiped.
+  const rosterAfterReset = await req('GET', '/api/workers/list');
+  assertEq((rosterAfterReset.data.workers || []).length, 0, '20l.11 workers roster wiped by reset');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
