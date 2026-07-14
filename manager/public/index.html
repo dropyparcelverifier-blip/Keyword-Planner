@@ -282,6 +282,9 @@
     </section>
   </main>
 
+  <!-- SheetJS UMD build. Loaded first so window.XLSX is ready before
+       app.js runs its upload handler. Static, no module import risk. -->
+  <script src="/public/xlsx.full.min.js"></script>
   <script type="module" src="/public/app.js"></script>
 </body>
 </html>
