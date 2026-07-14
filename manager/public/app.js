@@ -24,6 +24,13 @@ const state = {
   seenWorkerIds: new Set(),  // for new-worker-connect toast
   timelineTimer: null,        // dashboard throughput refresh
   workerFilter: '',            // activity-log scope: '' = all workers, else worker_id
+  // Diff-based event detection — remembers the previous refresh's snapshot
+  // so we can toast on transitions (SKU done, worker offline, batch complete).
+  eventSnap: {
+    initialised: false,
+    batches: new Map(),      // batch_id -> { done, failed, total, pending, claimed }
+    workers: new Map(),      // worker_id -> { lastHb, wasOnline }
+  },
 };
 
 // ─────────── Persistent UI state ───────────
@@ -215,6 +222,106 @@ function cmdkRender() {
     el.addEventListener('mouseover', () => { cmdk.activeIdx = parseInt(el.dataset.idx, 10); cmdkRender(); });
     el.addEventListener('click', () => { const r = cmdk.results[parseInt(el.dataset.idx, 10)]; if (r) { cmdkClose(); r.action(); } });
   });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  PASSIVE EVENT DETECTION — toast when things change in the background
+// ═══════════════════════════════════════════════════════════════
+// Called on every dashboard refresh. Diffs the current snapshot against
+// the last one (state.eventSnap) and emits toasts for interesting
+// transitions:
+//   - N SKUs newly done (throttled: batches across all workers)
+//   - N SKUs newly failed
+//   - Batch reached 100% (all done, no pending, no claimed)
+//   - Worker went silent for > 3 min (was online, now heartbeat old)
+//   - Worker back online after silence
+//   - Worker went stopped-by-user (activity log message pattern)
+// First refresh only populates the baseline — no toasts.
+function detectAndToastEvents(batches, workers, events) {
+  const snap = state.eventSnap;
+  const nowMs = Date.now();
+  // Build current snapshot
+  const curBatches = new Map();
+  let totalDoneAll = 0, totalFailedAll = 0;
+  for (const b of batches) {
+    curBatches.set(b.batch_id, {
+      done: b.done || 0, failed: b.failed || 0, total: b.total || 0,
+      pending: b.pending || 0, claimed: b.claimed || 0,
+    });
+    totalDoneAll += b.done || 0;
+    totalFailedAll += b.failed || 0;
+  }
+  const curWorkers = new Map();
+  for (const w of workers) {
+    const hb = Number(w.last_heartbeat || 0);
+    curWorkers.set(w.worker_id, {
+      lastHb: hb,
+      online: hb > 0 && (nowMs - hb) < 3 * 60 * 1000,   // 3-min threshold
+    });
+  }
+
+  if (!snap.initialised) {
+    snap.initialised = true;
+    snap.batches = curBatches;
+    snap.workers = curWorkers;
+    return;
+  }
+
+  // ── SKU-done + SKU-failed deltas (aggregated across batches) ──
+  let doneDelta = 0, failedDelta = 0;
+  const completedBatches = [];
+  for (const [id, cur] of curBatches) {
+    const prev = snap.batches.get(id);
+    if (!prev) continue;   // brand-new batch, no delta yet
+    doneDelta   += Math.max(0, cur.done   - prev.done);
+    failedDelta += Math.max(0, cur.failed - prev.failed);
+    // Batch just crossed the finish line: was incomplete, now no pending + no claimed.
+    const prevComplete = prev.pending === 0 && prev.claimed === 0 && prev.total > 0;
+    const nowComplete  = cur.pending  === 0 && cur.claimed  === 0 && cur.total  > 0;
+    if (!prevComplete && nowComplete) completedBatches.push({ id, total: cur.total, done: cur.done, failed: cur.failed });
+  }
+  if (doneDelta > 0) {
+    toast(`${doneDelta} SKU${doneDelta > 1 ? 's' : ''} completed`, 'ok', { title: 'Progress' });
+  }
+  if (failedDelta > 0) {
+    toast(`${failedDelta} SKU${failedDelta > 1 ? 's' : ''} failed — check Errors card`, 'warn', { title: 'Failure' });
+  }
+  for (const b of completedBatches) {
+    toast(`Batch ${b.id} finished: ${b.done} done, ${b.failed} failed`, 'ok', { title: '✓ Batch complete' });
+  }
+
+  // ── Worker online/offline transitions ──
+  for (const [wid, cur] of curWorkers) {
+    const prev = snap.workers.get(wid);
+    if (!prev) continue;   // brand-new worker — new-worker-connect toast handles that
+    if (prev.online && !cur.online) {
+      toast(`Worker ${wid} silent > 3 min`, 'warn', { title: '⚠ Worker offline' });
+    } else if (!prev.online && cur.online) {
+      toast(`Worker ${wid} back online`, 'ok', { title: 'Reconnected' });
+    }
+  }
+
+  // ── Detect 'stopped-by-user' via activity log ──
+  // Look at events since the last snapshot's newest event timestamp.
+  const lastEventTs = snap._lastEventTs || 0;
+  let newestTs = lastEventTs;
+  for (const e of events) {
+    const ts = Number(e.ts);
+    if (ts > newestTs) newestTs = ts;
+    if (ts <= lastEventTs) continue;
+    const msg = String(e.message || '').toLowerCase();
+    // These specific engine log lines are worth surfacing:
+    if (msg.includes('wake ignored') && msg.includes('stopped by')) {
+      toast(`${e.worker_id}: stopped by user — use Force reconnect`, 'warn', { title: '⚠ Worker stopped' });
+    } else if (msg.includes('captcha') && msg.includes('paused')) {
+      toast(`${e.worker_id}: Google served a CAPTCHA — engine paused`, 'warn', { title: '⚠ CAPTCHA' });
+    }
+  }
+  snap._lastEventTs = newestTs;
+
+  // Save current snapshot for next diff
+  snap.batches = curBatches;
+  snap.workers = curWorkers;
 }
 
 // ─────────── Keyboard shortcuts ───────────
@@ -619,6 +726,11 @@ async function refreshDashboard() {
     for (const w of state.workers) {
       w._lastActivity = lastByWorker.get(w.worker_id) || null;
     }
+    // Emit toast notifications for passive events (SKU done, batch
+    // complete, worker offline, etc.) that happened since the last
+    // refresh. Skipped on the very first refresh so we don't blast the
+    // user with "welcome, here are 47 things that already happened".
+    detectAndToastEvents(state.batches, state.workers, activity.events || []);
     renderBatchOverview();
     renderWorkerFleet();
     // Keep the activity-log worker filter dropdown in sync with the fleet.
