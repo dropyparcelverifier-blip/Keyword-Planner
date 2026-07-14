@@ -924,7 +924,21 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
   }
 
   if (accumulated.length === 0) {
-    return { ok: false, error: seedErrors.join(' | ') || 'no keywords scraped', keywords: [] };
+    // Two very different failure modes both land here:
+    //   A) The KP UI never yielded — content script never responded,
+    //      hydrate timeout, etc. seedErrors will be non-empty. Callers
+    //      SHOULD retry this — it's transient.
+    //   B) Google legitimately has no keyword ideas for this seed
+    //      ("try different keywords"). seedErrors is EMPTY because
+    //      that's not an error, it's a real answer. Retrying just
+    //      wastes ~25s per retry cycle and hits Google harder.
+    // Distinguish by seedErrors:
+    if (seedErrors.length === 0) {
+      // Case B — permanent empty result. Return ok:true with empty
+      // keywords so callers move on immediately instead of retrying.
+      return { ok: true, keywords: [], empty: true };
+    }
+    return { ok: false, error: seedErrors.join(' | '), keywords: [] };
   }
   return { ok: true, keywords: accumulated, errors: seedErrors };
 }
@@ -4296,6 +4310,18 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             (m) => onProgress?.({ currentProduct: productName, currentAction: m }),
             { productUrl: cleanUrl, allowWebsiteFallback: false });
           if (expansion?.ok) break;
+        }
+
+        // "Google returned no ideas for this seed" is now ok:true + empty:true.
+        // It's not a failure; the seed just has no useful expansion. Log softly
+        // (not as R2_DEGRADED) and move on to the next seed.
+        if (expansion?.ok && expansion?.empty) {
+          onProgress?.({
+            currentProduct: productName,
+            currentAction: `Round 2 (${kp1Idx}/${totalKp1}): "${seedRow.keyword}" — Google returned no keyword ideas (empty seed, not an error)`,
+            logKind: 'info',
+          });
+          continue;
         }
 
         if (!expansion?.ok) {
