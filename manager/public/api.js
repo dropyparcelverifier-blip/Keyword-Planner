@@ -50,6 +50,7 @@ export const api = {
   jobsReleaseStale:  (staleMinutes)    => _fetch('/api/jobs/release-stale', { method: 'POST', body: { staleMinutes } }),
   keywordsGet:       (batchId)         => _fetch(`/api/keywords?batchId=${encodeURIComponent(batchId)}`),
   activityGet:       (batchId, limit, workerId) => _fetch(`/api/activity?batchId=${encodeURIComponent(batchId || '')}&limit=${limit || 120}${workerId ? `&workerId=${encodeURIComponent(workerId)}` : ''}`),
+  activityErrors:    (batchId, limit) => _fetch(`/api/activity?batchId=${encodeURIComponent(batchId || '')}&limit=${limit || 60}&level=err`),
   commandsSend:      (workerId, command, payload) => _fetch('/api/commands', { method: 'POST', body: { workerId, command, payload, createdBy: 'web-manager' } }),
   configGet:         ()                => _fetch('/api/config'),
   configSet:         (config)          => _fetch('/api/config', { method: 'POST', body: { config } }),

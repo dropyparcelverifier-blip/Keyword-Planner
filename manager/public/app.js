@@ -572,13 +572,14 @@ function stopDashPolling() {
 
 async function refreshDashboard() {
   try {
-    const [summary, workers, roster, activity, failed, timeline] = await Promise.all([
+    const [summary, workers, roster, activity, failed, timeline, errors] = await Promise.all([
       api.jobsSummary(),
       api.jobsWorkerStats(),
       api.workersList().catch(() => ({ workers: [] })),
       api.activityGet(state.activeBatch, 120, state.workerFilter),
       api.failedJobs(state.activeBatch).catch(() => ({ rows: [] })),
       api.keywordsTimeline(state.activeBatch).catch(() => ({ buckets: [] })),
+      api.activityErrors(state.activeBatch, 60).catch(() => ({ events: [] })),
     ]);
     // Merge fleet: workers with jobs history (workers.workers) + workers
     // that only heartbeat but haven't claimed yet (roster.workers). The
@@ -606,6 +607,18 @@ async function refreshDashboard() {
       }
     }
     state.workers = workers.workers || [];
+    // Enrich each worker with their most recent activity line so the
+    // fleet grid can show 'what step is this worker on right now'.
+    // Uses the whole-log fetch (activity.events) rather than a separate
+    // per-worker call — cheap because it's one API call already made.
+    const lastByWorker = new Map();
+    for (const ev of (activity.events || [])) {
+      if (!ev.worker_id) continue;
+      if (!lastByWorker.has(ev.worker_id)) lastByWorker.set(ev.worker_id, ev);
+    }
+    for (const w of state.workers) {
+      w._lastActivity = lastByWorker.get(w.worker_id) || null;
+    }
     renderBatchOverview();
     renderWorkerFleet();
     // Keep the activity-log worker filter dropdown in sync with the fleet.
@@ -624,6 +637,7 @@ async function refreshDashboard() {
     })();
     renderActivity(activity.events || []);
     renderFailedCard(failed.rows || []);
+    renderErrorsCard(errors.events || []);
     renderTrendChart(timeline);
     populateBatchSelects();
     // Output stats card only when a batch is selected.
@@ -711,25 +725,55 @@ function renderWorkerFleet() {
     </div>`;
     return;
   }
+  // Friendly stage label mapper. Maps activity source + message pattern
+  // into a compact "what is this worker doing" tag for the fleet grid.
+  const stageFor = (act) => {
+    if (!act) return { label: 'idle', color: 'var(--text-3)' };
+    const src = (act.source || '').toLowerCase();
+    const msg = (act.message || '').toLowerCase();
+    if (msg.includes('stop pressed') || msg.includes('halting')) return { label: 'paused/stopping', color: 'var(--warn)' };
+    if (msg.includes('wake ignored') || msg.includes('stopped by')) return { label: 'stopped by user', color: 'var(--danger)' };
+    if (src === 'done') return { label: 'wrapping up SKU', color: 'var(--success)' };
+    if (src === 'product') return { label: 'fetching product', color: 'var(--info)' };
+    if (src === 'context') return { label: 'analyzing context', color: 'var(--info)' };
+    if (msg.includes('clip model') || msg.includes('embedding')) return { label: 'CLIP embed', color: 'var(--info)' };
+    if (src === 'kp' || src === 'kp expan') return { label: 'KP scrape', color: '#c4b5fd' };
+    if (src === 'serp') return { label: 'SERP + image match', color: '#86efac' };
+    if (src === 'verify') return { label: 'link verify', color: '#7dd3fc' };
+    if (src === 'autosugg') return { label: 'autosuggest', color: '#fcd34d' };
+    if (src === 'expand') return { label: 'expanding leaves', color: '#f9a8d4' };
+    if (src === 'round2') return { label: 'Round 2', color: '#fdba74' };
+    if (src === 'round1') return { label: 'Round 1', color: '#86efac' };
+    if (src === 'autopoll') return { label: 'polling for work', color: 'var(--text-3)' };
+    if (src === 'cmd') return { label: msg.slice(0, 30), color: 'var(--info)' };
+    return { label: (act.message || '').slice(0, 30), color: 'var(--text-2)' };
+  };
+
   el.innerHTML = `<table class="tbl">
-    <thead><tr><th>Worker</th><th>Last heartbeat</th><th class="num">In-flight</th><th class="num">Done</th><th class="num">Failed</th><th style="width: 1%;">Actions</th></tr></thead>
-    <tbody>${state.workers.map(w => `
+    <thead><tr><th>Worker</th><th>Current step</th><th>Last hb</th><th class="num">In-flight</th><th class="num">Done</th><th class="num">Failed</th><th style="width: 1%;">Actions</th></tr></thead>
+    <tbody>${state.workers.map(w => {
+      const stage = stageFor(w._lastActivity);
+      return `
       <tr>
         <td><span class="chip ${workerDotClass(w.last_heartbeat)}">●</span>
             <a href="#" class="mono" data-filter-worker="${esc(w.worker_id)}" style="color: var(--info); text-decoration: none;" title="Filter activity log to this worker">${esc(w.worker_id)}</a></td>
+        <td><span style="color: ${stage.color}; font-size: 11px;" title="${esc(w._lastActivity?.message || '')}">${esc(stage.label)}</span>
+            ${w._lastActivity ? `<div style="font-size: 10px; color: var(--text-3);">${fmtAgo(w._lastActivity.ts)}</div>` : ''}</td>
         <td>${fmtAgo(w.last_heartbeat)}</td>
         <td class="num">${w.in_flight || 0}</td>
         <td class="num" style="color:var(--success);">${w.done || 0}</td>
         <td class="num" style="color:${(w.failed||0) > 0 ? 'var(--danger)' : 'var(--text-3)'};">${w.failed || 0}</td>
         <td>
           <div class="worker-actions">
-            <button data-worker="${esc(w.worker_id)}" data-cmd="wake"   title="Wake — start claiming">▶</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="wake"   title="Wake — start claiming (respects manual Stop on the worker PC)">▶</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="reconnect" title="Force reconnect — overrides Stop, use if Wake was ignored" style="color: var(--warn); border-color: var(--warn);">⟳</button>
             <button data-worker="${esc(w.worker_id)}" data-cmd="pause"  title="Pause after current SKU">⏸</button>
             <button data-worker="${esc(w.worker_id)}" data-cmd="release_claims" class="danger-btn" title="Release claims back to queue">↻</button>
             <button data-worker="${esc(w.worker_id)}" data-cmd="stop"   class="danger-btn" title="Stop and disarm">■</button>
           </div>
         </td>
-      </tr>`).join('')}
+      </tr>`;
+    }).join('')}
     </tbody></table>`;
   // Click worker ID -> filter activity log to that worker.
   el.querySelectorAll('a[data-filter-worker]').forEach(a => {
@@ -749,7 +793,7 @@ function renderWorkerFleet() {
     btn.addEventListener('click', async () => {
       const workerId = btn.dataset.worker;
       const cmd = btn.dataset.cmd;
-      const cmdLabel = { wake: 'Wake', pause: 'Pause', release_claims: 'Release claims from', stop: 'Stop' }[cmd] || cmd;
+      const cmdLabel = { wake: 'Wake', reconnect: 'Force reconnect', pause: 'Pause', release_claims: 'Release claims from', stop: 'Stop' }[cmd] || cmd;
       if (cmd === 'stop' && !confirm(`Stop worker ${workerId} and disarm it? They will not claim more work until you send Wake.`)) return;
       try { await api.commandsSend(workerId, cmd); toast(`${cmdLabel} → ${workerId}`, 'ok'); }
       catch (e) { toast(e.message, 'err', { title: 'Command failed' }); }
@@ -777,6 +821,59 @@ function renderFailedCard(rows) {
         <td class="mono">${esc(f.claimed_by || '—')}</td>
         <td class="num">${f.attempts || 0}</td>
       </tr>`).join('')}</tbody></table>`;
+}
+
+// Errors card — surfaces every level='err' activity_log entry with
+// worker + source + product context. Separate from the general
+// activity feed so a manager can triage "which worker is throwing
+// what" without scrolling through 500 lines of normal activity.
+function renderErrorsCard(events) {
+  const card = $('errorsCard');
+  const list = $('errorsList');
+  const sub = $('errorsSub');
+  if (!events || events.length === 0) {
+    if (card) card.style.display = 'none';
+    return;
+  }
+  card.style.display = '';
+  // Group by worker so the manager can spot "one PC is throwing all of them" fast.
+  const byWorker = {};
+  for (const e of events) {
+    const k = e.worker_id || '—';
+    if (!byWorker[k]) byWorker[k] = [];
+    byWorker[k].push(e);
+  }
+  const workerCount = Object.keys(byWorker).length;
+  sub.textContent = `${events.length} error(s) across ${workerCount} worker(s)`;
+  list.innerHTML = events.slice(0, 60).map(e => {
+    const src = (e.source || 'engine').toLowerCase();
+    const ctx = [];
+    if (e.sku) ctx.push(`SKU: <span class="mono">${esc(e.sku)}</span>`);
+    if (e.product_url) ctx.push(`URL: <span class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:bottom;" title="${esc(e.product_url)}">${esc(e.product_url.slice(0, 40))}${e.product_url.length > 40 ? '…' : ''}</span>`);
+    return `
+      <div style="padding: 6px 0; border-bottom: 1px solid var(--line-1); display: grid; grid-template-columns: 90px 100px 60px 1fr; gap: 8px; font-size: 11px;">
+        <span style="color: var(--text-3); font-family: var(--mono);">${fmtTime(e.ts)}</span>
+        <a href="#" class="mono" data-filter-worker="${esc(e.worker_id || '')}" style="color: var(--info); text-decoration: none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="Filter to this worker">${esc(e.worker_id || '—')}</a>
+        <span class="src" data-src="${esc(src)}" style="align-self: start;">${esc(src)}</span>
+        <div>
+          <div style="color: var(--danger);">${esc(e.message || '')}</div>
+          ${ctx.length > 0 ? `<div style="color: var(--text-3); font-size: 10px; margin-top: 2px;">${ctx.join(' &middot; ')}</div>` : ''}
+        </div>
+      </div>`;
+  }).join('');
+  // Wire worker-id links to filter (same as activity log click-through).
+  list.querySelectorAll('a[data-filter-worker]').forEach(a => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      const w = a.dataset.filterWorker;
+      if (!w) return;
+      state.workerFilter = w;
+      saveUI({ workerFilter: w });
+      $('activityWorkerFilter').value = w;
+      $('activityLogSub').textContent = `filtered to ${w}`;
+      refreshDashboard();
+    });
+  });
 }
 
 function renderTrendChart(timeline) {
@@ -822,13 +919,16 @@ function renderActivity(events) {
     el.innerHTML = `<div class="empty">No activity yet.</div>`;
     return;
   }
-  el.innerHTML = events.map(e => `
+  el.innerHTML = events.map(e => {
+    const src = (e.source || 'engine').toLowerCase().slice(0, 8);
+    return `
     <div class="log-line ${esc(e.level || 'info')}">
       <span class="ts">${fmtTime(e.ts)}</span>
       <span class="worker">${esc(e.worker_id || '—')}</span>
-      <span class="src">${esc((e.source || 'engine').slice(0, 8))}</span>
+      <span class="src" data-src="${esc(src)}">${esc(src)}</span>
       <span class="msg">${esc(e.message || '')}</span>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 function renderOutputStats(stats) {

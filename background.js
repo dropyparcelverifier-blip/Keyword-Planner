@@ -914,6 +914,22 @@ async function pollWorkerCommands() {
           state.stopRequested = true;
           await setRunIntent(false);
           bufferActivity({ level: 'warn', source: 'cmd', message: `Pause command received — halting after current SKU. Send Resume to continue.` });
+        } else if (c.command === 'reconnect') {
+          // Manager force-reconnect. Overrides userStoppedArm so a
+          // manager can revive a Stopped PC without physical access.
+          // Different from 'wake': wake respects userStoppedArm on
+          // purpose; reconnect is the explicit "I know it was stopped
+          // and I want it back" escape hatch.
+          state.workerArmed = true;
+          state.userStoppedArm = false;
+          state.stopRequested = false;
+          state._runIntentClearedAt = 0;
+          await chrome.storage.local.set({
+            adbrainWorkerArmed: true,
+            adbrainUserStoppedArm: false,
+          }).catch(() => {});
+          bufferActivity({ level: 'ok', source: 'cmd', message: `Reconnect command received — force-armed (userStoppedArm cleared). Will auto-claim next chunk.` });
+          setTimeout(() => workerAutoPollTick().catch(() => {}), 200);
         } else if (c.command === 'wake') {
           // Manager broadcast "wake up and check for work". Triggers an
           // immediate auto-poll tick — but does NOT override an

@@ -229,8 +229,27 @@ button.small { padding: 4px 10px; font-size: 11px; }
 .log-line.warn .msg { color: var(--warn); }
 .log-line.error .msg { color: var(--danger); }
 .log-line .ts { color: var(--text-3); }
-.log-line .worker { color: var(--info); }
-.log-line .src { color: var(--text-3); text-transform: uppercase; font-size: 10px; }
+.log-line .worker { color: var(--info); font-weight: 600; }
+.log-line .src {
+  text-transform: uppercase; font-size: 10px; font-weight: 700;
+  padding: 1px 5px; border-radius: 3px; letter-spacing: 0.3px;
+  color: var(--text-3); background: var(--bg-3);
+}
+.log-line .src[data-src="cmd"]      { color: var(--info);    background: var(--info-soft);    }
+.log-line .src[data-src="engine"]   { color: var(--accent);  background: var(--accent-soft);  }
+.log-line .src[data-src="kp"]       { color: #c4b5fd;        background: rgba(167,139,250,0.15); }
+.log-line .src[data-src="serp"]     { color: #86efac;        background: rgba(52,211,153,0.15);  }
+.log-line .src[data-src="autosugg"] { color: #fcd34d;        background: rgba(251,191,36,0.15);  }
+.log-line .src[data-src="verify"]   { color: #7dd3fc;        background: rgba(96,165,250,0.15);  }
+.log-line .src[data-src="expand"]   { color: #f9a8d4;        background: rgba(236,72,153,0.15);  }
+.log-line .src[data-src="round2"]   { color: #fdba74;        background: rgba(251,146,60,0.15);  }
+.log-line .src[data-src="round1"]   { color: #86efac;        background: rgba(52,211,153,0.15);  }
+.log-line .src[data-src="done"]     { color: var(--success); background: var(--success-soft);   }
+.log-line .src[data-src="autopoll"] { color: var(--warn);    background: var(--warn-soft);      }
+.log-line .src[data-src="product"]  { color: var(--text-1);  background: var(--bg-3);           }
+.log-line .src[data-src="context"]  { color: var(--text-2);  background: var(--bg-3);           }
+.log-line .src[data-src="offscree"] { color: var(--text-2);  background: var(--bg-3);           }
+.log-line .src[data-src="pace"]     { color: var(--text-3);  background: var(--bg-3);           }
 
 /* Row & column helpers */
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
