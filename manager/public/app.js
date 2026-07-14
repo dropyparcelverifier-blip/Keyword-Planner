@@ -930,6 +930,10 @@ async function refreshWorkersTab() {
   // Render the one-liner PowerShell installer with THIS manager URL baked in.
   const installer = $('installOneLiner');
   if (installer) installer.textContent = `irm ${window.location.origin}/install-worker.ps1 | iex`;
+  const uninst = $('uninstallOneLiner');
+  if (uninst) uninst.textContent = `irm ${window.location.origin}/uninstall-worker.ps1 | iex`;
+  const uninstFull = $('uninstallFullOneLiner');
+  if (uninstFull) uninstFull.textContent = `$s = irm ${window.location.origin}/uninstall-worker.ps1; iex "& { $s } -Full"`;
   // Re-populate command Worker dropdown.
   try {
     const w = await api.jobsWorkerStats();
@@ -957,6 +961,11 @@ $('copySetupBtn').addEventListener('click', async () => {
 $('copyInstallBtn')?.addEventListener('click', async () => {
   const cmd = $('installOneLiner').textContent;
   try { await navigator.clipboard.writeText(cmd); $('copyInstallBtn').textContent = '✓ Copied'; setTimeout(() => $('copyInstallBtn').textContent = 'Copy', 1500); }
+  catch { alert('Clipboard blocked. Select the command and Ctrl+C manually.'); }
+});
+$('copyUninstallBtn')?.addEventListener('click', async () => {
+  const cmd = $('uninstallOneLiner').textContent;
+  try { await navigator.clipboard.writeText(cmd); $('copyUninstallBtn').textContent = '✓ Copied'; setTimeout(() => $('copyUninstallBtn').textContent = 'Copy', 1500); }
   catch { alert('Clipboard blocked. Select the command and Ctrl+C manually.'); }
 });
 $('sendCmdBtn').addEventListener('click', async () => {
