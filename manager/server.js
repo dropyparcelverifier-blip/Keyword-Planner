@@ -199,6 +199,18 @@ const Q = {
   wipeKeywords: db.prepare(`DELETE FROM keywords`),
   wipeActivity: db.prepare(`DELETE FROM activity_log`),
   wipeCommands: db.prepare(`DELETE FROM worker_commands`),
+  // Bulk requeue: set every failed job back to pending. Optionally scope
+  // to one batch. Returns updated row count.
+  requeueAllFailed:      db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, failed_reason=NULL WHERE status='failed'`),
+  requeueBatchFailed:    db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, failed_reason=NULL WHERE status='failed' AND batch_id=?`),
+  // Every failed job with details (for the bulk-actions UI).
+  failedJobsAll:         db.prepare(`SELECT id, batch_id, sku, product_url, product_name, failed_reason, claimed_by, attempts FROM jobs WHERE status='failed' ORDER BY id DESC LIMIT 500`),
+  failedJobsByBatch:     db.prepare(`SELECT id, batch_id, sku, product_url, product_name, failed_reason, claimed_by, attempts FROM jobs WHERE status='failed' AND batch_id=? ORDER BY id DESC LIMIT 500`),
+  // Throughput: keyword rows landed per hour for the last 24h. Bucket
+  // is computed as (created_at / 3600000) * 3600000 (millisecond epoch
+  // rounded down to hour). Two variants — all batches and batch-scoped.
+  keywordsPerHourAll:    db.prepare(`SELECT (created_at / 3600000) * 3600000 AS bucket, COUNT(*) AS n FROM keywords WHERE created_at >= ? GROUP BY bucket ORDER BY bucket ASC`),
+  keywordsPerHourBatch:  db.prepare(`SELECT (created_at / 3600000) * 3600000 AS bucket, COUNT(*) AS n FROM keywords WHERE created_at >= ? AND batch_id = ? GROUP BY bucket ORDER BY bucket ASC`),
   newestPendingBatch: db.prepare(`SELECT batch_id FROM jobs WHERE status='pending' GROUP BY batch_id ORDER BY MAX(created_at) DESC LIMIT 1`),
   batchHasPending: db.prepare(`SELECT 1 FROM jobs WHERE batch_id=? AND status='pending' LIMIT 1`),
   existsActiveUrl: db.prepare(`SELECT 1 FROM jobs WHERE product_url=? AND batch_id<>? AND status IN ('pending','claimed','done') LIMIT 1`),
@@ -501,6 +513,24 @@ const server = http.createServer(async (req, res) => {
     if (m === 'GET' && p === '/api/jobs/worker-stats') return send(res, 200, { ok: true, workers: Q.workerStats.all() });
     if (m === 'GET' && p === '/api/jobs/per-product')  return send(res, 200, { ok: true, rows: Q.perProduct.all(url.searchParams.get('batchId') || '') });
     if (m === 'GET' && p === '/api/jobs/active-workers') return send(res, 200, { ok: true, workers: Q.activeWorkers.all(url.searchParams.get('batchId') || '') });
+    if (m === 'GET' && p === '/api/jobs/failed') {
+      const bId = url.searchParams.get('batchId') || '';
+      const rows = bId ? Q.failedJobsByBatch.all(bId) : Q.failedJobsAll.all();
+      return send(res, 200, { ok: true, rows });
+    }
+    if (m === 'POST' && p === '/api/jobs/requeue-all-failed') {
+      const b = await readJson(req);
+      const bId = String(b.batchId || '').trim();
+      const info = bId ? Q.requeueBatchFailed.run(bId) : Q.requeueAllFailed.run();
+      return send(res, 200, { ok: true, updated: info.changes });
+    }
+    if (m === 'GET' && p === '/api/keywords/timeline') {
+      // 24h throughput (rows-per-hour). Optional ?batchId= scope.
+      const since = now() - 24 * 3600 * 1000;
+      const bId = url.searchParams.get('batchId') || '';
+      const rows = bId ? Q.keywordsPerHourBatch.all(since, bId) : Q.keywordsPerHourAll.all(since);
+      return send(res, 200, { ok: true, since, buckets: rows });
+    }
 
     // ----- Discovered keywords (results) -----
     if (m === 'POST' && p === '/api/keywords') {

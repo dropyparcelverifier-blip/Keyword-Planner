@@ -44,6 +44,9 @@
 
   <div class="toast-stack" id="toastStack"></div>
 
+  <!-- Command palette (Ctrl/Cmd+K). Hidden until opened. -->
+  <div id="cmdkRoot" style="display:none;"></div>
+
   <main>
     <!-- ================= UPLOAD ================= -->
     <section class="panel active" id="panel-upload">
@@ -97,6 +100,19 @@
         <button class="small secondary" id="resumeAllBtn">▶ Resume all</button>
       </div>
 
+      <!-- Throughput sparkline (24h keyword rows landed) -->
+      <div class="card" style="margin-bottom: 12px;">
+        <div class="card-head">
+          <span class="card-icon">📉</span>
+          <span class="card-title">Throughput — rows landed / hour, last 24h</span>
+          <span class="card-sub" id="trendSub">—</span>
+        </div>
+        <div class="card-body" style="padding: 10px 14px;">
+          <div class="trend-chart" id="trendChart"></div>
+          <div class="trend-legend"><span>-24h</span><span>now</span></div>
+        </div>
+      </div>
+
       <div class="grid-2">
         <!-- Batch overview + output stats -->
         <div class="col">
@@ -144,6 +160,18 @@
             </div>
             <div class="card-body">
               <div class="log" id="activityLog"><div class="empty">No activity yet.</div></div>
+            </div>
+          </div>
+
+          <div class="card" id="failedCard" style="display:none;">
+            <div class="card-head">
+              <span class="card-icon">✗</span>
+              <span class="card-title" style="color: var(--danger);">Failed jobs</span>
+              <span class="card-sub" id="failedSub">—</span>
+              <button class="small danger" id="requeueAllFailedBtn" style="margin-left:auto;">↻ Re-queue all failed</button>
+            </div>
+            <div class="card-body" style="max-height: 220px; overflow: auto;">
+              <div id="failedList"></div>
             </div>
           </div>
         </div>

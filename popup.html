@@ -161,6 +161,33 @@
       </div>
     </div>
 
+    <!-- Today's throughput -->
+    <div class="card">
+      <div class="card-head">
+        Today
+        <span class="spacer"></span>
+        <span id="dayResetLabel" style="font-size: 10px; color: var(--text-3); text-transform: none; letter-spacing: 0;">since midnight</span>
+      </div>
+      <div class="card-body" style="padding: 8px 12px;">
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; text-align: center;">
+          <div>
+            <div style="font-size: 20px; font-weight: 700; color: var(--success);" id="todayDone">0</div>
+            <div style="font-size: 9px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.4px;">Processed</div>
+          </div>
+          <div>
+            <div style="font-size: 20px; font-weight: 700; color: var(--info);" id="todayKw">0</div>
+            <div style="font-size: 9px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.4px;">Keywords</div>
+          </div>
+          <div>
+            <div style="font-size: 20px; font-weight: 700; color: var(--text-1);" id="todayAvg">—</div>
+            <div style="font-size: 9px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.4px;">Avg / SKU</div>
+          </div>
+        </div>
+        <!-- Mini sparkline: rows/hour last 12h -->
+        <div id="workerSparkline" style="display: flex; align-items: flex-end; gap: 2px; height: 24px; margin-top: 10px;"></div>
+      </div>
+    </div>
+
     <!-- Current run -->
     <div class="card">
       <div class="card-head">

@@ -57,6 +57,9 @@ export const api = {
   cleanup:           (logDays, commandsDays) => _fetch('/api/cleanup', { method: 'POST', body: { logDays, commandsDays } }),
   deleteBatch:       (batchId)         => _fetch('/api/jobs/delete-batch', { method: 'POST', body: { batchId } }),
   resetAll:          ()                => _fetch('/api/reset-all', { method: 'POST', body: { confirm: 'RESET' } }),
+  failedJobs:        (batchId)         => _fetch(`/api/jobs/failed${batchId ? `?batchId=${encodeURIComponent(batchId)}` : ''}`),
+  requeueAllFailed:  (batchId)         => _fetch('/api/jobs/requeue-all-failed', { method: 'POST', body: { batchId: batchId || '' } }),
+  keywordsTimeline:  (batchId)         => _fetch(`/api/keywords/timeline${batchId ? `?batchId=${encodeURIComponent(batchId)}` : ''}`),
 };
 
 // Live keyword stats — mirrors the extension's dashboard fetchBatchKeywordStats.
