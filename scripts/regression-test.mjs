@@ -535,6 +535,34 @@ async function run() {
   assert(missingFromAllowlist.size === 0,
     `20c.21 every import target is in WORKER_FILES (missing: ${Array.from(missingFromAllowlist).join(', ') || 'none'})`);
 
+  // ===== 20d. INSTALLER AUTO-ARM =====
+  // The installer must bake the current token + KP URL into the PS script
+  // and write a worker-config.json into the worker's extension dir so the
+  // extension auto-arms on first load — no setup-code paste needed.
+  assert(ps.body.includes('worker-config.json'), '20d.1 installer writes worker-config.json');
+  assert(ps.body.includes('managerUrl'),         '20d.2 installer bakes managerUrl into JSON');
+  assert(ps.body.includes('managerToken'),       '20d.3 installer bakes managerToken into JSON');
+  assert(ps.body.includes('kpUrl'),              '20d.4 installer bakes kpUrl into JSON');
+  // The token IN the installer script must match what the manager was
+  // started with — earlier tests set TOKEN='test-secret-token'.
+  assert(ps.body.includes(TOKEN),                '20d.5 installer bakes the CURRENT manager token');
+
+  // The background.js cold-start hydration must read worker-config.json
+  // and populate storage. This is what turns the JSON on disk into an
+  // armed worker with zero user interaction.
+  const bgSrc = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
+  assert(bgSrc.includes("chrome.runtime.getURL('worker-config.json')"),
+    '20d.6 background.js reads worker-config.json via chrome.runtime.getURL');
+  assert(/adbrainWorkerArmed:\s*true/.test(bgSrc),
+    '20d.7 background.js sets adbrainWorkerArmed:true on installer-config load');
+  assert(bgSrc.includes('Auto-armed from worker-config.json'),
+    '20d.8 background.js logs the auto-arm so users can see it worked');
+
+  // No-overwrite guard: if a user has already configured the extension
+  // manually, worker-config.json must NOT clobber their settings.
+  assert(bgSrc.includes("get(['adbrainManagerUrl', 'adbrainRole'])"),
+    '20d.9 cold-start guards against overwriting a user-configured install');
+
   // The install one-liner should show up in the workers tab.
   assert(idx.body.includes('installOneLiner'), '20c.20 install one-liner element in index.html');
 
