@@ -309,36 +309,47 @@ foreach ($p in @(
 if (-not $chrome) { throw '[AdBrain] Chrome not found in the usual locations. Install Chrome first.' }
 
 # Startup shortcut — Chrome auto-launches on user login with the extension
-# loaded + the manager dashboard open.
+# loaded. Opens a blank new-tab page for silent daily use. The manager UI
+# stays on the MANAGER PC, not on every worker.
 $startup = [Environment]::GetFolderPath('Startup')
 $lnkPath = Join-Path $startup 'AdBrain Worker.lnk'
-$args = ('--user-data-dir="{0}" --load-extension="{1}" --new-window "{2}/"' -f $prof, $extDir, $mgr)
+$startupArgs = ('--user-data-dir="{0}" --load-extension="{1}" --new-window "chrome://newtab"' -f $prof, $extDir)
 $sh = New-Object -ComObject WScript.Shell
 $lnk = $sh.CreateShortcut($lnkPath)
 $lnk.TargetPath = $chrome
-$lnk.Arguments  = $args
+$lnk.Arguments  = $startupArgs
 $lnk.WorkingDirectory = $extDir
 $lnk.Description = 'AdBrain Discovery worker'
 $lnk.Save()
 Write-Host "[AdBrain] Startup shortcut placed: $lnkPath" -ForegroundColor Green
 
-# Launch once so the user can enable Developer Mode + Load Unpacked
-# (Chrome requires this once for unpacked extensions).
-Start-Process -FilePath $chrome -ArgumentList $args
+# First launch: point Chrome at chrome://extensions so the user can do
+# Load Unpacked without hunting. Future launches use the plain shortcut
+# above and open a blank tab silently.
+$firstRunArgs = ('--user-data-dir="{0}" --load-extension="{1}" --new-window "chrome://extensions"' -f $prof, $extDir)
+Start-Process -FilePath $chrome -ArgumentList $firstRunArgs
 Write-Host ''
 Write-Host '===================================================================' -ForegroundColor Yellow
-Write-Host ' NEXT STEPS (do these ONCE on this worker PC):' -ForegroundColor Yellow
-Write-Host '  1) In the Chrome that just opened, visit chrome://extensions' -ForegroundColor Yellow
-Write-Host '  2) Toggle "Developer mode" on (top-right)' -ForegroundColor Yellow
+Write-Host ' ONE-TIME SETUP (finish this on this worker PC now):' -ForegroundColor Yellow
+Write-Host '  1) Chrome should have opened chrome://extensions automatically.' -ForegroundColor Yellow
+Write-Host '     If not, open it manually in the Chrome window that just opened.' -ForegroundColor Yellow
+Write-Host '  2) Toggle "Developer mode" on (top-right corner).' -ForegroundColor Yellow
 Write-Host '  3) Click "Load unpacked" and select this folder:' -ForegroundColor Yellow
 Write-Host ("     $extDir") -ForegroundColor Cyan
-Write-Host '  4) Open the AdBrain popup, pick role = Worker' -ForegroundColor Yellow
-Write-Host ("  5) On the manager tab ($mgr), open Workers -> Copy setup code") -ForegroundColor Yellow
-Write-Host '  6) Paste it into the extension popup and click Apply' -ForegroundColor Yellow
+Write-Host '  4) Pin the AdBrain extension (puzzle icon in Chrome toolbar).' -ForegroundColor Yellow
+Write-Host '     Click it to open the side panel and pick role = Worker.' -ForegroundColor Yellow
+Write-Host ''
+Write-Host '  5) NOW GO TO THE MANAGER PC (not this one):' -ForegroundColor Yellow
+Write-Host ("     Open a browser there, visit $mgr") -ForegroundColor Cyan
+Write-Host '     Click the Workers tab -> Generate setup code -> Copy.' -ForegroundColor Yellow
+Write-Host ''
+Write-Host '  6) BACK ON THIS WORKER PC: in the extension side panel,' -ForegroundColor Yellow
+Write-Host '     paste the code into "Apply setup code from manager" and Apply.' -ForegroundColor Yellow
 Write-Host '===================================================================' -ForegroundColor Yellow
-Write-Host 'After that, every future Windows login auto-launches Chrome with' -ForegroundColor Green
-Write-Host 'the extension armed. The worker will claim work from the manager' -ForegroundColor Green
-Write-Host 'without any further clicks.' -ForegroundColor Green
+Write-Host ''
+Write-Host 'After that, EVERY future Windows login auto-launches Chrome with' -ForegroundColor Green
+Write-Host 'the extension armed. The worker claims work from the manager with' -ForegroundColor Green
+Write-Host 'zero clicks. You can close this PowerShell window.' -ForegroundColor Green
 `;
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-cache' });
   res.end(script);
