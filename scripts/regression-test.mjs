@@ -853,6 +853,11 @@ async function run() {
   assert(idx.body.includes('id="errorsCard"'), '20m.13 errors card element');
   assert(appJs.body.includes('renderErrorsCard'), '20m.14 renderErrorsCard defined');
   assert(appJs.body.includes('activityErrors'), '20m.15 activityErrors api wrapper called');
+  // Passive event detection (toast on SKU done, worker offline, etc.)
+  assert(appJs.body.includes('detectAndToastEvents'), '20m.16 event detector defined');
+  assert(appJs.body.includes('completed'),            '20m.17 emits toast for SKU completion');
+  assert(appJs.body.includes('Worker offline'),       '20m.18 emits toast when worker goes silent');
+  assert(appJs.body.includes('Batch complete'),       '20m.19 emits toast when batch finishes');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
