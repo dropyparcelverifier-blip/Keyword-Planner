@@ -42,6 +42,20 @@
     <button class="tab" data-tab="downloads">📦 Downloads<kbd>6</kbd></button>
   </nav>
 
+  <!-- Global stats bar — always visible. Refreshed every 15s. -->
+  <div class="statsbar" id="statsBar">
+    <div class="stat"><span class="stat-value" id="sbBatches">—</span><span class="stat-label">batches</span></div>
+    <div class="stat info"><span class="stat-value" id="sbWorkers">—</span><span class="stat-label">workers online</span></div>
+    <div class="stat ok"><span class="stat-value" id="sbKeywords">—</span><span class="stat-label">keywords total</span></div>
+    <div class="stat warn"><span class="stat-value" id="sbInFlight">—</span><span class="stat-label">in flight</span></div>
+    <div class="stat"><span class="stat-value" id="sbDone">—</span><span class="stat-label">SKUs done</span></div>
+    <div class="stat danger"><span class="stat-value" id="sbFailed">—</span><span class="stat-label">failed</span></div>
+    <div class="stat" style="flex: 1; justify-content: flex-end; border: none;">
+      <span class="stat-label">last activity:</span>
+      <span class="stat-value" id="sbLastActivity" style="font-size: 12px;">—</span>
+    </div>
+  </div>
+
   <div class="toast-stack" id="toastStack"></div>
 
   <!-- Command palette (Ctrl/Cmd+K). Hidden until opened. -->
@@ -50,29 +64,62 @@
   <main>
     <!-- ================= UPLOAD ================= -->
     <section class="panel active" id="panel-upload">
-      <div class="card">
-        <div class="card-head">
-          <span class="card-icon">📤</span>
-          <span class="card-title">Upload products to queue</span>
-          <span class="card-sub">Excel (.xlsx) or CSV</span>
-        </div>
-        <div class="card-body">
-          <label class="field">
-            <span class="lbl">Batch ID</span>
-            <input type="text" id="uploadBatchId" placeholder="Auto-generate from timestamp if blank" />
-            <div class="hint">Workers claim work per batch. Reuse the same ID to append more SKUs to an existing batch.</div>
-          </label>
-          <label class="field">
-            <span class="lbl">Product file</span>
-            <input type="file" id="uploadFile" accept=".xlsx,.xls,.csv" />
-            <div class="hint">Required columns: <code>url</code> (or <code>product_url</code>). Optional: <code>sku</code>, <code>product_name</code>, <code>priority</code>, <code>handles</code>, <code>brands</code>.</div>
-          </label>
-          <div id="uploadPreview"></div>
-          <div class="row">
-            <button id="uploadBtn" disabled>Upload to queue</button>
-            <button class="secondary" id="clearUploadBtn">Clear</button>
+      <div class="two-col">
+        <!-- Main: upload form with drag-drop zone -->
+        <div>
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">📤</span>
+              <span class="card-title">Upload products to queue</span>
+              <span class="card-sub">Excel (.xlsx) or CSV</span>
+            </div>
+            <div class="card-body">
+              <label class="field">
+                <span class="lbl">Batch ID</span>
+                <input type="text" id="uploadBatchId" placeholder="Leave blank for auto-generated timestamp (recommended)" />
+                <div class="hint">Workers claim work per batch. Reuse the same ID to append more SKUs to an existing batch.</div>
+              </label>
+              <label class="field">
+                <span class="lbl">Product file</span>
+                <div class="drop-zone" id="uploadDropZone">
+                  <div class="icon">📁</div>
+                  <div class="primary" id="uploadDropPrimary">Click or drag Excel / CSV here</div>
+                  <div class="sub" id="uploadDropSub">Required: <code>url</code> or <code>product_url</code>. Optional: <code>sku</code>, <code>product_name</code>, <code>priority</code>, <code>handles</code>, <code>brands</code>.</div>
+                  <input type="file" id="uploadFile" accept=".xlsx,.xls,.csv" />
+                </div>
+              </label>
+              <div id="uploadPreview"></div>
+              <div class="row" style="margin-top: 10px;">
+                <button id="uploadBtn" disabled>Upload to queue</button>
+                <button class="secondary" id="clearUploadBtn">Clear</button>
+              </div>
+              <div id="uploadResult"></div>
+            </div>
           </div>
-          <div id="uploadResult"></div>
+        </div>
+        <!-- Sidebar: recent batches + quick tips -->
+        <div>
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">📋</span>
+              <span class="card-title">Recent batches</span>
+              <span class="card-sub" id="uploadRecentSub">—</span>
+            </div>
+            <div class="card-body" id="uploadRecentBody" style="max-height: 260px; overflow: auto; padding: 6px 12px;">
+              <div class="empty" style="padding: 12px 6px;">No batches yet.</div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">💡</span>
+              <span class="card-title">Tips</span>
+            </div>
+            <div class="card-body" style="font-size: 12px; color: var(--text-2); line-height: 1.6;">
+              <div style="margin-bottom: 8px;"><strong style="color: var(--text-1);">Column names are case-insensitive.</strong> <code>Product URL</code>, <code>url</code>, <code>product_url</code>, <code>link</code> all work.</div>
+              <div style="margin-bottom: 8px;"><strong style="color: var(--text-1);">Cross-batch dedup:</strong> a URL already pending/claimed/done in another batch is skipped automatically.</div>
+              <div><strong style="color: var(--text-1);">Priority:</strong> integers 1 / 2 / 3 (1 = highest). Anything else defaults to 100 (lowest).</div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -195,7 +242,38 @@
         <button class="small secondary" id="anExportBtn" disabled>📥 Export this SKU as CSV</button>
       </div>
 
-      <div id="anSummary"><div class="empty"><div class="empty-icon">📈</div>Pick a batch + SKU to see analytics.</div></div>
+      <div id="anSummary">
+        <div class="two-col">
+          <div>
+            <div class="card">
+              <div class="card-head"><span class="card-icon">📈</span><span class="card-title">Waiting for input</span></div>
+              <div class="card-body">
+                <div class="empty" style="padding: 32px 12px;">
+                  <div class="empty-icon">📈</div>
+                  <strong>Pick a batch + SKU above</strong>
+                  <div style="margin-top: 6px; color: var(--text-3); font-size: 12px;">
+                    Analytics shows per-SKU keyword drill-downs — sources,<br>
+                    buying intent, top ranked keywords, image-match counts,<br>
+                    KP monthly search volume, and match confidence.
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div>
+            <div class="card">
+              <div class="card-head"><span class="card-icon">📚</span><span class="card-title">What you'll see</span></div>
+              <div class="card-body" style="font-size: 12px; color: var(--text-2); line-height: 1.7;">
+                <div><strong style="color: var(--text-1);">Summary tiles</strong> — total keywords, image matches, avg AdRating, KP metric coverage.</div>
+                <div style="margin-top: 8px;"><strong style="color: var(--text-1);">Source mix</strong> — how many rows came from KP vs autosuggest vs SERP vs PAA. Color-coded chips.</div>
+                <div style="margin-top: 8px;"><strong style="color: var(--text-1);">Top-10 by AdRating</strong> — inline bar chart of the highest-scoring keywords.</div>
+                <div style="margin-top: 8px;"><strong style="color: var(--text-1);">Keyword table</strong> — filterable/sortable. Filter by source, intent, min rating, or "only with image matches".</div>
+                <div style="margin-top: 8px;"><strong style="color: var(--text-1);">CSV export</strong> — one click, exports exactly the filtered set.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <div id="anTopChartCard" style="display:none;">
         <div class="card">
@@ -255,7 +333,7 @@
 
     <!-- ================= CONFIG ================= -->
     <section class="panel" id="panel-config">
-      <div class="card">
+      <div class="card collapsible">
         <div class="card-head">
           <span class="card-icon">📌</span>
           <span class="card-title">Pin active batch</span>
@@ -271,7 +349,7 @@
         </div>
       </div>
 
-      <div class="card">
+      <div class="card collapsible">
         <div class="card-head">
           <span class="card-icon">🎯</span>
           <span class="card-title">Worker config — pushed to every worker</span>
@@ -313,7 +391,7 @@
         </div>
       </div>
 
-      <div class="card">
+      <div class="card collapsible collapsed">
         <div class="card-head">
           <span class="card-icon">🗑</span>
           <span class="card-title">Delete a batch</span>
@@ -329,7 +407,7 @@
         </div>
       </div>
 
-      <div class="card" style="border-color: var(--danger);">
+      <div class="card collapsible collapsed" style="border-color: var(--danger);">
         <div class="card-head" style="background: var(--danger-soft);">
           <span class="card-icon">💥</span>
           <span class="card-title" style="color: var(--danger);">Reset everything (danger zone)</span>
@@ -348,7 +426,7 @@
         </div>
       </div>
 
-      <div class="card">
+      <div class="card collapsible collapsed">
         <div class="card-head">
           <span class="card-icon">🧹</span>
           <span class="card-title">Cleanup old data</span>
@@ -450,18 +528,43 @@
 
     <!-- ================= DOWNLOADS ================= -->
     <section class="panel" id="panel-downloads">
-      <div class="card">
-        <div class="card-head">
-          <span class="card-icon">📦</span>
-          <span class="card-title">Download batch results as CSVs</span>
-        </div>
-        <div class="card-body">
-          <div class="hint">Fetches every keyword row for the selected batch and writes one CSV per SKU. Zip is downloaded — one file per product. No extension needed.</div>
-          <div class="row" style="margin-top: 10px;">
-            <select id="downloadBatchSelect" style="min-width: 260px;"></select>
-            <button id="downloadCsvBtn">Download as ZIP</button>
+      <div class="two-col">
+        <div>
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">📦</span>
+              <span class="card-title">Batches — click to download</span>
+              <span class="card-sub" id="downloadListSub">—</span>
+            </div>
+            <div class="card-body" style="padding: 6px 12px;" id="downloadListBody">
+              <div class="empty" style="padding: 20px 8px;">No batches yet.</div>
+            </div>
           </div>
-          <div id="downloadResult"></div>
+        </div>
+        <div>
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">⚙</span>
+              <span class="card-title">Custom download</span>
+            </div>
+            <div class="card-body">
+              <div class="hint" style="margin-bottom: 10px;">Or pick a specific batch by ID. Every keyword row is grouped by SKU and each SKU is written to its own CSV.</div>
+              <select id="downloadBatchSelect" style="width: 100%; margin-bottom: 8px;"></select>
+              <button id="downloadCsvBtn" style="width: 100%;">📥 Download selected batch</button>
+              <div id="downloadResult"></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">💡</span>
+              <span class="card-title">Format</span>
+            </div>
+            <div class="card-body" style="font-size: 12px; color: var(--text-2); line-height: 1.7;">
+              <div>One CSV file <strong>per SKU</strong>. Filename pattern:<br>
+                <code style="color: var(--info);">adbrain_&lt;sku&gt;_&lt;batchId&gt;.csv</code></div>
+              <div style="margin-top: 8px;">Every column from the manager DB is preserved verbatim — 50+ fields including KP metrics, image matches, seller data, buying intent.</div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
