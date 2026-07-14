@@ -450,6 +450,47 @@ async function run() {
   assert(bySku.has('A1'), '20b.17 SKU grouping produces the SKU from the upload (A1)');
   assertEq(bySku.get('A1').length, 2, '20b.18 grouped rows match pushed count for SKU A1');
 
+  // ===== 20c. WORKER INSTALLER =====
+  // Verify the installer endpoints are un-authenticated (workers can't
+  // send a token before they're installed) and serve real content.
+  async function fetchNoAuth(path) {
+    const r = await fetch(`${BASE}${path}`);
+    const body = await r.text();
+    return { status: r.status, contentType: r.headers.get('content-type') || '', body };
+  }
+  const ps = await fetchNoAuth('/install-worker.ps1');
+  assertEq(ps.status, 200, '20c.1 /install-worker.ps1 returns 200 without token');
+  assert(ps.contentType.includes('text/plain'), '20c.2 /install-worker.ps1 served as text/plain');
+  assert(ps.body.includes('AdBrain worker installer'), '20c.3 installer script has expected header');
+  assert(ps.body.includes('Invoke-WebRequest'), '20c.4 installer uses Invoke-WebRequest');
+  assert(ps.body.includes('/worker/'), '20c.5 installer references /worker/ file route');
+  assert(ps.body.includes('Startup'), '20c.6 installer sets up Windows Startup shortcut');
+  assert(ps.body.includes('AdBrainWorker'), '20c.7 installer scoped to AdBrainWorker dir');
+
+  const wlist = await fetchNoAuth('/worker-files.json');
+  assertEq(wlist.status, 200, '20c.8 worker-files.json returns 200 without token');
+  const parsed = JSON.parse(wlist.body);
+  assert(parsed.ok === true && Array.isArray(parsed.files), '20c.9 worker-files.json is a real list');
+  assert(parsed.files.includes('manifest.json'), '20c.10 manifest.json in worker allowlist');
+  assert(parsed.files.includes('background.js'), '20c.11 background.js in worker allowlist');
+  assert(parsed.files.includes('modules/discovery-jobs.js'), '20c.12 discovery-jobs.js in worker allowlist');
+  assert(!parsed.files.some(f => f.startsWith('manager/')), '20c.13 manager/ files NOT in worker list');
+  assert(!parsed.files.some(f => f.startsWith('scripts/')), '20c.14 scripts/ files NOT in worker list');
+
+  // Serving individual files.
+  const mf = await fetchNoAuth('/worker/manifest.json');
+  assertEq(mf.status, 200, '20c.15 /worker/manifest.json served');
+  assert(mf.body.includes('"manifest_version"'), '20c.16 manifest.json content looks right');
+  const nested = await fetchNoAuth('/worker/modules/discovery-jobs.js');
+  assertEq(nested.status, 200, '20c.17 nested /worker/modules/... served');
+  const rejected = await fetchNoAuth('/worker/manager/server.js');
+  assertEq(rejected.status, 404, '20c.18 non-allowlisted paths rejected (no server.js leak)');
+  const wTrav = await fetchNoAuth('/worker/../.git/config');
+  assert(wTrav.status === 404 || wTrav.status === 400, '20c.19 traversal attempts rejected');
+
+  // The install one-liner should show up in the workers tab.
+  assert(idx.body.includes('installOneLiner'), '20c.20 install one-liner element in index.html');
+
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
   const [s1, w1, a1] = await Promise.all([
