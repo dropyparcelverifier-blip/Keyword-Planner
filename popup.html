@@ -36,35 +36,89 @@
       font-size: 13px; line-height: 1.5;
       min-width: 380px;
     }
-    /* Header */
-    .header {
+
+    /* ─────────── Compact top bar ─────────── */
+    .topbar {
       display: flex; align-items: center; gap: 10px;
-      padding: 12px 14px;
+      padding: 8px 14px;
       background: var(--bg-1); border-bottom: 1px solid var(--line-1);
     }
-    .brand { font-weight: 700; font-size: 14px; color: var(--text-0); letter-spacing: 0.3px; }
-    .brand .icon { color: var(--accent); }
-    .spacer { flex: 1; }
+    .topbar .brand { font-weight: 700; font-size: 12px; color: var(--text-1); letter-spacing: 0.3px; }
+    .topbar .brand .icon { color: var(--accent); }
+    .topbar .spacer { flex: 1; }
+    .topbar .worker-id { font-family: var(--mono); font-size: 10px; color: var(--text-3); }
 
-    /* Status pill */
-    .pill {
-      display: inline-flex; align-items: center; gap: 6px;
-      padding: 4px 10px; border-radius: 999px;
-      font-size: 11px; font-weight: 600;
-      background: var(--bg-2); border: 1px solid var(--line-2); color: var(--text-2);
+    /* ─────────── Hero status block ─────────── */
+    /* Big prominent "what am I doing right now" readout — the first
+       thing the user sees when they open the popup. */
+    .hero {
+      padding: 16px 16px 14px;
+      background: linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%);
+      border-bottom: 1px solid var(--line-1);
     }
-    .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
-    .pill.armed   { background: var(--info-soft); border-color: var(--info); color: var(--info); }
-    .pill.armed .dot   { background: var(--info); animation: pulse 2s ease-in-out infinite; }
-    .pill.running { background: var(--success-soft); border-color: var(--success); color: var(--success); }
-    .pill.running .dot { background: var(--success); animation: pulse 1.2s ease-in-out infinite; }
-    .pill.paused  { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
-    .pill.paused .dot  { background: var(--warn); }
-    .pill.stopped { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
-    .pill.stopped .dot { background: var(--danger); }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .hero-status {
+      display: flex; align-items: center; gap: 12px;
+      margin-bottom: 8px;
+    }
+    .hero-dot {
+      width: 14px; height: 14px; border-radius: 50%;
+      background: var(--text-3);
+      box-shadow: 0 0 0 3px rgba(255,255,255,0.03);
+      flex: 0 0 auto;
+    }
+    .hero.state-running  .hero-dot { background: var(--success); box-shadow: 0 0 0 4px var(--success-soft); animation: heroPulse 1.2s ease-in-out infinite; }
+    .hero.state-armed    .hero-dot { background: var(--info);    box-shadow: 0 0 0 4px var(--info-soft);    animation: heroPulse 2s ease-in-out infinite; }
+    .hero.state-paused   .hero-dot { background: var(--warn);    box-shadow: 0 0 0 4px var(--warn-soft); }
+    .hero.state-stopped  .hero-dot { background: var(--danger);  box-shadow: 0 0 0 4px var(--danger-soft); }
+    @keyframes heroPulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%      { opacity: 0.5; transform: scale(0.85); }
+    }
+    .hero-headline {
+      font-size: 16px; font-weight: 700; color: var(--text-0);
+      letter-spacing: 0.2px; line-height: 1.2;
+    }
+    .hero-sub {
+      font-size: 12px; color: var(--text-2);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .hero-batch {
+      display: inline-block; margin-top: 8px;
+      padding: 3px 8px; border-radius: 4px;
+      background: var(--bg-3); border: 1px solid var(--line-2);
+      font-family: var(--mono); font-size: 10px; color: var(--text-2);
+    }
+    /* Next-poll countdown pill on the right side of the hero */
+    .hero-countdown {
+      font-family: var(--mono); font-size: 11px;
+      color: var(--text-3);
+      padding: 4px 8px; border-radius: 4px;
+      background: var(--bg-3); border: 1px solid var(--line-2);
+    }
+    .hero-countdown.imminent { color: var(--info); border-color: var(--info); }
 
-    /* Body sections */
+    /* ─────────── Batch progress bar ─────────── */
+    .batch-progress {
+      margin-top: 10px;
+      display: none;   /* JS reveals when a batch is active */
+    }
+    .batch-progress-label {
+      display: flex; justify-content: space-between;
+      font-size: 10px; color: var(--text-3);
+      text-transform: uppercase; letter-spacing: 0.4px;
+      margin-bottom: 4px;
+    }
+    .batch-progress-bar {
+      height: 6px; background: var(--bg-input);
+      border-radius: 3px; overflow: hidden;
+    }
+    .batch-progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent) 0%, var(--info) 100%);
+      transition: width 400ms cubic-bezier(0.22,1,0.36,1);
+    }
+
+    /* ─────────── Body / cards ─────────── */
     .body { padding: 12px 14px; }
     .card {
       background: var(--bg-2); border: 1px solid var(--line-2);
@@ -76,26 +130,90 @@
       font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-2);
     }
     .card-body { padding: 8px 12px; }
+
+    /* ─────────── Error banner ─────────── */
+    /* Full-width red bar between hero and body when connection is unhealthy. */
+    .err-banner {
+      background: var(--danger-soft);
+      border-top: 1px solid var(--danger);
+      border-bottom: 1px solid var(--danger);
+      padding: 8px 14px;
+      color: var(--danger);
+      font-size: 11px;
+      display: none;
+      align-items: center; gap: 8px;
+    }
+    .err-banner.visible { display: flex; }
+    .err-banner .icon { font-size: 14px; }
+    .err-banner .msg { flex: 1; }
+
+    /* ─────────── Today counters ─────────── */
+    .today-tiles {
+      display: grid; grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px; text-align: center;
+    }
+    .today-tile { padding: 4px 0; }
+    .today-tile .val {
+      font-size: 22px; font-weight: 700;
+      font-family: var(--mono); line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+    .today-tile .lbl {
+      font-size: 9px; color: var(--text-3);
+      text-transform: uppercase; letter-spacing: 0.5px;
+      margin-top: 4px;
+    }
+    .today-tile.done .val { color: var(--success); }
+    .today-tile.kw   .val { color: var(--info); }
+    .today-tile.avg  .val { color: var(--text-0); }
+
+    /* 12-hour sparkline for rows landed */
+    .sparkline {
+      display: flex; align-items: flex-end; gap: 2px;
+      height: 26px; margin-top: 10px;
+    }
+    .sparkline .bar {
+      flex: 1; background: var(--info);
+      border-radius: 1px; min-height: 2px;
+      transition: height 200ms;
+    }
+    .sparkline .bar.now { background: var(--success); }
+
+    /* ─────────── Recent SKUs strip ─────────── */
+    .recent-list { list-style: none; padding: 0; margin: 0; }
+    .recent-list li {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 0; font-size: 11px;
+      border-bottom: 1px solid var(--line-1);
+    }
+    .recent-list li:last-child { border-bottom: none; }
+    .recent-list .ok-icon  { color: var(--success); font-weight: 700; flex: 0 0 12px; }
+    .recent-list .err-icon { color: var(--danger);  font-weight: 700; flex: 0 0 12px; }
+    .recent-list .sku      { font-family: var(--mono); font-size: 10px; color: var(--text-1); flex: 0 0 auto; }
+    .recent-list .name     { flex: 1; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .recent-list .ago      { color: var(--text-3); font-size: 10px; flex: 0 0 auto; }
+
+    /* ─────────── Key/value pairs ─────────── */
     .kv {
       display: grid; grid-template-columns: 96px 1fr; gap: 4px 8px;
       font-size: 12px;
     }
-    .kv .k { color: var(--text-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
+    .kv .k { color: var(--text-3); font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; }
     .kv .v { color: var(--text-1); font-family: var(--mono); font-size: 11px;
              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .kv .v.wrap { white-space: normal; word-break: break-all; }
     .kv .v.muted { color: var(--text-3); }
 
-    /* Buttons */
+    /* ─────────── Buttons ─────────── */
     .row-btns { display: flex; gap: 6px; }
     button {
-      flex: 1; padding: 8px 10px; font-size: 12px; font-weight: 600;
+      flex: 1; padding: 10px 12px; font-size: 12px; font-weight: 600;
       background: var(--bg-3); color: var(--text-1); border: 1px solid var(--line-2);
       border-radius: 6px; cursor: pointer; font-family: inherit;
       transition: all 120ms;
     }
-    button:hover:not(:disabled) { background: var(--line-2); border-color: var(--line-2); }
-    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button:hover:not(:disabled) { background: var(--line-2); border-color: var(--line-3); transform: translateY(-1px); }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
     button.primary { background: var(--accent); color: white; border-color: var(--accent); }
     button.primary:hover:not(:disabled) { background: var(--accent-2); border-color: var(--accent-2); }
     button.warn { background: var(--warn); color: var(--bg-0); border-color: var(--warn); }
@@ -103,11 +221,11 @@
     button.danger { background: var(--danger); color: white; border-color: var(--danger); }
     button.danger:hover:not(:disabled) { background: #d94040; border-color: #d94040; }
 
-    /* Log */
+    /* ─────────── Log ─────────── */
     .log {
-      max-height: 200px; overflow: auto;
+      max-height: 180px; overflow: auto;
       background: var(--bg-input); border: 1px solid var(--line-1);
-      border-radius: 6px; padding: 6px 8px;
+      border-radius: 6px; padding: 4px 6px;
       font-family: var(--mono); font-size: 10px; line-height: 1.5;
     }
     .log-line { padding: 2px 0; border-bottom: 1px solid var(--line-1); color: var(--text-1); }
@@ -118,11 +236,11 @@
     .log-line .ts { color: var(--text-3); margin-right: 6px; }
     .log-empty { padding: 12px 4px; text-align: center; color: var(--text-3); font-size: 11px; }
 
-    /* Footer */
+    /* ─────────── Footer ─────────── */
     .footer {
-      padding: 10px 14px;
+      padding: 8px 14px;
       border-top: 1px solid var(--line-1);
-      font-size: 11px; color: var(--text-3);
+      font-size: 10px; color: var(--text-3);
       display: flex; align-items: center; gap: 8px;
     }
     .footer a { color: var(--accent); text-decoration: none; }
@@ -130,80 +248,87 @@
   </style>
 </head>
 <body>
-  <div class="header">
+  <div class="topbar">
     <span class="brand"><span class="icon">◆</span> AdBrain Worker</span>
     <span class="spacer"></span>
-    <span class="pill" id="statusPill"><span class="dot"></span><span id="statusText">loading…</span></span>
+    <span class="worker-id" id="workerIdTop">—</span>
+  </div>
+
+  <!-- Hero: prominent "what's happening" block -->
+  <div class="hero" id="hero">
+    <div class="hero-status">
+      <div class="hero-dot"></div>
+      <div style="flex: 1; min-width: 0;">
+        <div class="hero-headline" id="heroHeadline">Loading…</div>
+        <div class="hero-sub" id="heroSub">Checking connection to manager</div>
+      </div>
+      <div class="hero-countdown" id="heroCountdown" title="Next auto-poll for work">—</div>
+    </div>
+    <div id="heroBatch"></div>
+    <div class="batch-progress" id="batchProgress">
+      <div class="batch-progress-label">
+        <span>Batch progress</span>
+        <span id="batchProgressPct">—</span>
+      </div>
+      <div class="batch-progress-bar">
+        <div class="batch-progress-fill" id="batchProgressFill" style="width:0%;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Error banner (hidden by default; shown when connection unhealthy) -->
+  <div class="err-banner" id="errBanner">
+    <span class="icon">⚠</span>
+    <span class="msg" id="errBannerMsg">—</span>
   </div>
 
   <div class="body">
-    <!-- Connection info -->
-    <div class="card">
-      <div class="card-head">Connection</div>
-      <div class="card-body">
-        <div class="kv">
-          <div class="k">Manager</div>   <div class="v wrap" id="managerUrl" title="—">—</div>
-          <div class="k">Worker ID</div> <div class="v" id="workerId">—</div>
-          <div class="k">Health</div>    <div class="v" id="healthStatus">—</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Config applied from manager -->
-    <div class="card">
-      <div class="card-head">Effective Config</div>
-      <div class="card-body">
-        <div class="kv">
-          <div class="k">KP URL</div>       <div class="v wrap" id="kpUrl" title="—">—</div>
-          <div class="k">Match profile</div><div class="v" id="matchProfile">—</div>
-          <div class="k">Batch</div>        <div class="v" id="currentBatch">—</div>
-        </div>
-      </div>
-    </div>
-
     <!-- Today's throughput -->
     <div class="card">
       <div class="card-head">
         Today
-        <span class="spacer"></span>
-        <span id="dayResetLabel" style="font-size: 10px; color: var(--text-3); text-transform: none; letter-spacing: 0;">since midnight</span>
+        <span style="flex:1;"></span>
+        <span style="font-size: 10px; color: var(--text-3); text-transform: none; letter-spacing: 0;">since midnight</span>
       </div>
       <div class="card-body" style="padding: 8px 12px;">
-        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; text-align: center;">
-          <div>
-            <div style="font-size: 20px; font-weight: 700; color: var(--success);" id="todayDone">0</div>
-            <div style="font-size: 9px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.4px;">Processed</div>
-          </div>
-          <div>
-            <div style="font-size: 20px; font-weight: 700; color: var(--info);" id="todayKw">0</div>
-            <div style="font-size: 9px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.4px;">Keywords</div>
-          </div>
-          <div>
-            <div style="font-size: 20px; font-weight: 700; color: var(--text-1);" id="todayAvg">—</div>
-            <div style="font-size: 9px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.4px;">Avg / SKU</div>
-          </div>
+        <div class="today-tiles">
+          <div class="today-tile done"><div class="val" id="todayDone">0</div><div class="lbl">Processed</div></div>
+          <div class="today-tile kw"><div class="val" id="todayKw">0</div><div class="lbl">Keywords</div></div>
+          <div class="today-tile avg"><div class="val" id="todayAvg">—</div><div class="lbl">Avg / SKU</div></div>
         </div>
-        <!-- Mini sparkline: rows/hour last 12h -->
-        <div id="workerSparkline" style="display: flex; align-items: flex-end; gap: 2px; height: 24px; margin-top: 10px;"></div>
+        <div class="sparkline" id="workerSparkline"></div>
       </div>
     </div>
 
-    <!-- Current run -->
-    <div class="card">
-      <div class="card-head">
-        Current run
-        <span class="spacer"></span>
-        <span id="progressText" style="font-size: 11px; color: var(--text-2); text-transform: none; letter-spacing: 0;">—</span>
+    <!-- Recent SKUs completed -->
+    <div class="card" id="recentCard" style="display:none;">
+      <div class="card-head">Recent SKUs</div>
+      <div class="card-body" style="padding: 4px 12px;">
+        <ul class="recent-list" id="recentList"></ul>
       </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="card">
+      <div class="card-head">Controls</div>
       <div class="card-body">
-        <div class="kv" style="margin-bottom: 8px;">
-          <div class="k">Last action</div>
-          <div class="v wrap" id="lastStatus">—</div>
-        </div>
         <div class="row-btns">
           <button id="pauseBtn" title="Stop after current SKU">⏸ Pause</button>
           <button id="resumeBtn" title="Resume claiming work" class="primary">▶ Resume</button>
-          <button id="stopBtn" title="Stop and disarm (needs manual restart)" class="danger">■ Stop</button>
+          <button id="stopBtn" title="Stop and disarm — needs manual restart" class="danger">■ Stop</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Connection + effective config (compact) -->
+    <div class="card">
+      <div class="card-head">Config from manager</div>
+      <div class="card-body">
+        <div class="kv">
+          <div class="k">Manager</div>   <div class="v wrap" id="managerUrl" title="—">—</div>
+          <div class="k">Health</div>    <div class="v" id="healthStatus">—</div>
+          <div class="k">KP URL</div>    <div class="v wrap" id="kpUrl" title="—">—</div>
+          <div class="k">Profile</div>   <div class="v" id="matchProfile">—</div>
         </div>
       </div>
     </div>
@@ -212,8 +337,8 @@
     <div class="card">
       <div class="card-head">
         Live log
-        <span class="spacer"></span>
-        <button id="clearLogBtn" style="flex: 0; font-size: 10px; padding: 2px 8px;">Clear</button>
+        <span style="flex:1;"></span>
+        <button id="clearLogBtn" style="flex: 0; font-size: 9px; padding: 2px 8px;">Clear</button>
       </div>
       <div class="card-body" style="padding: 6px 8px;">
         <div class="log" id="workerLog"><div class="log-empty">No activity yet.</div></div>
@@ -223,7 +348,7 @@
 
   <div class="footer">
     <a href="#" id="openManager">🖥️ Open manager dashboard</a>
-    <span class="spacer"></span>
+    <span style="flex:1;"></span>
     <span id="lastRefresh" style="font-size: 10px;">—</span>
   </div>
 

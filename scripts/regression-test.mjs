@@ -565,7 +565,7 @@ async function run() {
   assert(popupJs.length < 20000, `20f.18 popup.js trimmed (got ${popupJs.length} bytes)`);
   assert(!popupHtml.includes('data-role="manager"'), '20f.19 no manager role picker in popup');
   assert(!popupHtml.includes('mgrSaveCredsBtn'), '20f.20 no manager creds card in popup');
-  assert(popupHtml.includes('id="statusPill"'), '20f.21 worker status pill present');
+  assert(popupHtml.includes('id="hero"'), '20f.21 worker hero status block present');
   assert(popupHtml.includes('id="openManager"'), '20f.22 open-manager-dashboard footer link present');
 
   // ===== 20g. UX/ANALYTICS OVERHAUL =====
@@ -639,6 +639,22 @@ async function run() {
 
   // Two-col helper class exists
   assert(cssR.body.includes('.two-col'), '20h.17 two-col grid helper CSS');
+
+  // ===== 20i. WORKER POPUP OVERHAUL =====
+  // Hero + countdown + batch progress + error banner + recent SKUs.
+  assert(popupHtml.includes('id="hero"'),            '20i.1 worker hero block');
+  assert(popupHtml.includes('class="hero-dot"'),     '20i.2 worker hero status dot');
+  assert(popupHtml.includes('id="heroHeadline"'),    '20i.3 worker hero headline');
+  assert(popupHtml.includes('id="heroSub"'),         '20i.4 worker hero subtext');
+  assert(popupHtml.includes('id="heroCountdown"'),   '20i.5 next-poll countdown pill');
+  assert(popupHtml.includes('id="batchProgress"'),   '20i.6 batch progress bar element');
+  assert(popupHtml.includes('id="errBanner"'),       '20i.7 error banner element');
+  assert(popupHtml.includes('id="recentCard"'),      '20i.8 recent SKUs card');
+  assert(popupJs.includes('function computeState'),  '20i.9 hero state machine defined');
+  assert(popupJs.includes('renderCountdown'),        '20i.10 countdown renderer defined');
+  assert(popupJs.includes('renderErrBanner'),        '20i.11 error banner renderer defined');
+  assert(popupJs.includes('renderRecent'),           '20i.12 recent SKUs renderer defined');
+  assert(popupJs.includes('POLL_INTERVAL_MS'),       '20i.13 poll-cycle constant defined');
 
   // ===== 20d. INSTALLER AUTO-ARM =====
   // The installer must bake the current token + KP URL into the PS script
