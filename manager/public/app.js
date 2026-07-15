@@ -1602,7 +1602,71 @@ const analytics = {
   // Hide columns whose entire filtered set is null/0/empty. Cuts through
   // the "columns of nothing but em-dashes" visual noise. Toggleable.
   hideEmptyCols: true,
+  // Which column groups (see KEYWORD_COL_DEFS) are visible. 'core' is
+  // always on. Persisted to localStorage across reloads. Restored below.
+  visibleGroups: new Set(['kp', 'image', 'sellers']),
 };
+// Restore group visibility from localStorage.
+try {
+  const saved = JSON.parse(localStorage.getItem('adbrainAnGroups') || 'null');
+  if (Array.isArray(saved)) analytics.visibleGroups = new Set(saved);
+} catch {}
+
+// Full analytics-table column set — mirrors the CSV/XLSX export field list.
+// Each entry lives in exactly one group; 'core' is always visible.
+// Order here IS the on-screen order when multiple groups are enabled.
+const KEYWORD_COL_DEFS = [
+  // ─── Core (always on) ────────────────────────────────────────────
+  { group: 'core', key: 'opportunity_score', label: 'Score',      kind: 'score', tip: 'Opportunity score — blends Volume, AdRating, image matches, Competition and buying-intent. Higher = better SEO/Ad target.' },
+  { group: 'core', key: 'keyword',           label: 'Keyword',    kind: 'kw',    tip: 'Click to open the Google SERP for this keyword.' },
+  { group: 'core', key: 'buying_intent',     label: 'Intent',     kind: 'chip' },
+  { group: 'core', key: 'keyword_relevance', label: 'Relevance',  kind: 'chip',  tip: 'Semantic fit to the product (high / medium / low / sibling-brand).' },
+  { group: 'core', key: 'ad_rating',         label: 'AdRating',   kind: 'rating',tip: 'Blended relevance signal across all sources.' },
+  { group: 'core', key: 'source',            label: 'Source',     kind: 'chip' },
+  // ─── KP metrics (Volume + Ads) ───────────────────────────────────
+  { group: 'kp',   key: 'kp_monthly_searches', label: 'Volume',    kind: 'num',   tip: 'Google Keyword Planner monthly searches — real demand.' },
+  { group: 'kp',   key: 'kp_competition',    label: 'Comp',       kind: 'comp',  tip: 'KP competition (Low/Medium/High).' },
+  { group: 'kp',   key: 'kp_bid_low',        label: 'Bid low ₹',  kind: 'money', tip: 'KP low-end top-of-page bid.' },
+  { group: 'kp',   key: 'kp_bid_high',       label: 'Bid high ₹', kind: 'money', tip: 'KP high-end top-of-page bid — useful for paid-ads budgeting.' },
+  // ─── Image match ────────────────────────────────────────────────
+  { group: 'image', key: 'image_count',           label: 'Imgs',     kind: 'imgs', tip: 'SERP images that matched our product visually (CLIP + dHash).' },
+  { group: 'image', key: 'total_thumbs',          label: 'Thumbs',   kind: 'num',  tip: 'Total thumbnails captured on the SERP (denominator for Vis%).' },
+  { group: 'image', key: 'visibility_pct',        label: 'Vis %',    kind: 'pct',  tip: 'image_count / total_thumbs — fraction of the SERP that is our product.' },
+  { group: 'image', key: 'match_confidence_max', label: 'Match↑',   kind: 'num',  tip: 'Highest per-image match confidence on this keyword.' },
+  { group: 'image', key: 'link_checked_count',   label: 'Chk',      kind: 'num',  tip: 'Matched destination pages we opened for re-verification.' },
+  { group: 'image', key: 'link_verified_count',  label: 'Verified', kind: 'num',  tip: 'Matched destination pages that re-verified via CLIP.' },
+  // ─── Sellers & SERP presence ────────────────────────────────────
+  { group: 'sellers', key: 'total_sellers',   label: 'Sellers',    kind: 'num',   tip: 'Distinct sellers on this SERP.' },
+  { group: 'sellers', key: 'ads_on_serp',     label: 'Ads',        kind: 'num',   tip: 'Paid ads count on this SERP.' },
+  { group: 'sellers', key: 'dropy_is_seller', label: 'Us?',        kind: 'yesno', tip: 'Does dropy.in already list this product as a seller here?' },
+  { group: 'sellers', key: 'dropy_on_serp',   label: 'On SERP',    kind: 'yesno', tip: 'Does dropy.in appear anywhere on this SERP (not necessarily as seller)?' },
+  { group: 'sellers', key: 'top_match_seller',label: 'Top seller', kind: 'text',  tip: 'Seller domain behind the top-confidence image match.' },
+  { group: 'sellers', key: 'top_match_price', label: 'Top price',  kind: 'text',  tip: 'Price on the top-match seller.' },
+  { group: 'sellers', key: 'frequency',       label: 'Freq',       kind: 'num',   tip: 'How many discovery sources found this keyword — multi-source = stronger.' },
+  // ─── Amazon (India Round 3) ─────────────────────────────────────
+  { group: 'amazon', key: 'amazon_rank',           label: 'A.rank',   kind: 'num',   tip: 'Our position on the Amazon.in SERP for this keyword.' },
+  { group: 'amazon', key: 'amazon_price',          label: 'A.price',  kind: 'text',  tip: 'Amazon.in observed price.' },
+  { group: 'amazon', key: 'amazon_rating',         label: 'A.rating', kind: 'num',   tip: 'Amazon.in product rating (out of 5).' },
+  { group: 'amazon', key: 'amazon_reviews',        label: 'A.reviews',kind: 'num',   tip: 'Amazon.in review count.' },
+  { group: 'amazon', key: 'amazon_suggest_count',  label: 'A.suggest',kind: 'num',   tip: 'Amazon autosuggest occurrences for this seed.' },
+  { group: 'amazon', key: 'amazon_total_results',  label: 'A.total',  kind: 'num',   tip: 'Amazon.in total results reported for this query.' },
+  // ─── Meta / classification ──────────────────────────────────────
+  { group: 'meta', key: 'topic',           label: 'Topic',   kind: 'text' },
+  { group: 'meta', key: 'funnel',          label: 'Funnel',  kind: 'text' },
+  { group: 'meta', key: 'faq',             label: 'FAQ?',    kind: 'yesno', tip: 'Marked as a question / FAQ-style query.' },
+  { group: 'meta', key: 'parent_keyword',  label: 'Parent',  kind: 'text',  tip: 'The seed keyword that spawned this one (for autosuggest/related/PAA rows).' },
+  // ─── Pinned actions (always on) ─────────────────────────────────
+  { group: 'core', key: '__details',       label: '',        kind: 'details', tip: 'Open full details for this keyword.' },
+];
+// Human-facing labels + counts for the group toggle strip.
+const KEYWORD_COL_GROUPS = [
+  { key: 'core',    label: 'Core',              icon: '🎯', locked: true },
+  { key: 'kp',      label: 'KP (volume + bids)', icon: '📊' },
+  { key: 'image',   label: 'Image match',        icon: '📷' },
+  { key: 'sellers', label: 'Sellers & SERP',     icon: '🛒' },
+  { key: 'amazon',  label: 'Amazon.in',          icon: '📦' },
+  { key: 'meta',    label: 'Meta',               icon: '🏷️' },
+];
 
 // Opportunity score — a single number that ranks a keyword by SEO/Ads value.
 // Design goals:
@@ -2719,8 +2783,37 @@ function scoreTier(n) {
   if (n >= 3)  return { tier: 'ok',        color: 'var(--warn)'    };
   return          { tier: 'low',       color: 'var(--text-3)'  };
 }
+function renderColumnGroupStrip(rows) {
+  const el = $('anColGroups');
+  if (!el) return;
+  // Per-group column count (visible + total) for the badge on each chip.
+  const groupCounts = {};
+  for (const c of KEYWORD_COL_DEFS) {
+    if (c.key === '__details') continue;
+    groupCounts[c.group] = (groupCounts[c.group] || 0) + 1;
+  }
+  el.innerHTML = KEYWORD_COL_GROUPS.map(g => {
+    const on = g.locked || analytics.visibleGroups.has(g.key);
+    const disabled = g.locked ? 'disabled' : '';
+    const cls = `col-group ${on ? 'on' : ''} ${g.locked ? 'locked' : ''}`;
+    return `<button class="${cls}" data-group="${g.key}" ${disabled} title="${g.locked ? 'Core columns are always visible.' : `Toggle ${g.label} columns (${groupCounts[g.key] || 0}).`}">
+      ${g.icon} <strong>${esc(g.label)}</strong> <span class="col-group-count">${groupCounts[g.key] || 0}</span>
+    </button>`;
+  }).join('');
+  el.querySelectorAll('button[data-group]:not(.locked)').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.group;
+      if (analytics.visibleGroups.has(key)) analytics.visibleGroups.delete(key);
+      else analytics.visibleGroups.add(key);
+      try { localStorage.setItem('adbrainAnGroups', JSON.stringify(Array.from(analytics.visibleGroups))); } catch {}
+      filterAndRenderAnalytics();
+    });
+  });
+}
+
 function renderAnalyticsTable(rows) {
   const el = $('anTable');
+  renderColumnGroupStrip(rows);
   // Note the hidden count is updated below (after we compute hiddenCols).
   if (rows.length === 0) {
     el.innerHTML = `<tr><td style="padding:16px; text-align:center; color:var(--text-3);">No keywords match the current filters.</td></tr>`;
@@ -2729,27 +2822,13 @@ function renderAnalyticsTable(rows) {
   // Max score across the current filtered set — used to normalize the inline
   // bar in the Score column so the top row always looks full.
   const maxScore = Math.max(...rows.map(r => Number(r.opportunity_score) || 0), 1);
-  // Column order matters — most-important SEO/Ad signals first, mapping to
-  // the CSV/XLSX export layout so the dashboard mirrors what users see in
-  // Excel. Score is a computed opportunity score (see opportunityScore()).
-  const cols = [
-    { key: 'opportunity_score',    label: 'Score',      kind: 'score', tip: 'Opportunity score — blends Volume, AdRating, image matches, Competition and buying-intent. Higher = better SEO/Ad target.' },
-    { key: 'keyword',              label: 'Keyword',    kind: 'kw',    tip: 'Click to open the Google SERP for this keyword (uses stored serp_url when available).' },
-    { key: 'kp_monthly_searches',  label: 'Volume',     kind: 'num',   tip: 'Google Keyword Planner monthly searches — real demand.' },
-    { key: 'buying_intent',        label: 'Intent',     kind: 'chip' },
-    { key: 'keyword_relevance',    label: 'Relevance',  kind: 'chip',  tip: 'Semantic fit of the keyword to the product (high / medium / low / sibling-brand).' },
-    { key: 'kp_competition',       label: 'Comp',       kind: 'comp',  tip: 'KP competition (Low/Medium/High). High = crowded → harder to rank/bid.' },
-    { key: 'ad_rating',            label: 'AdRating',   kind: 'rating',tip: 'Blended relevance signal across all sources.' },
-    { key: 'image_count',          label: 'Imgs',       kind: 'imgs',  tip: 'SERP images that matched our product visually (CLIP + dHash).' },
-    { key: 'visibility_pct',       label: 'Vis %',      kind: 'pct',   tip: 'Fraction of that SERP that is our product (image_count / total_thumbs).' },
-    { key: 'frequency',            label: 'Freq',       kind: 'num',   tip: 'Number of sources that surfaced this keyword — multi-source is stronger.' },
-    { key: 'total_sellers',        label: 'Sellers',    kind: 'num',   tip: 'Distinct sellers seen on this keyword.' },
-    { key: 'dropy_is_seller',      label: 'Us?',        kind: 'yesno', tip: 'Does dropy.in already sell this product on the keyword’s Shopping/SERP?' },
-    { key: 'link_verified_count',  label: 'Verified',   kind: 'num',   tip: 'Matched destination pages that re-verified via CLIP.' },
-    { key: 'kp_bid_high',          label: 'Top bid ₹',  kind: 'money', tip: 'KP high-end top-of-page bid (₹) — useful for paid-ads planning.' },
-    { key: 'source',               label: 'Source',     kind: 'chip' },
-    { key: '__details',            label: '',           kind: 'details', tip: 'Open full details for this keyword.' },
-  ];
+  // Column definitions grouped to mirror the CSV/XLSX export layout —
+  // analytics is meant to be feature-parity with the file, so every
+  // export column is available here. Groups can be toggled on/off via
+  // the button strip above the table; visibility state persists in
+  // localStorage (see analytics.visibleGroups). Order matters — this
+  // is the on-screen order when multiple groups are enabled.
+  const cols = KEYWORD_COL_DEFS.filter(c => c.group === 'core' || analytics.visibleGroups.has(c.group));
   // Auto-hide any column whose entire filtered set is empty (all null / 0
   // / "" — the em-dash forest). Anchor + score + keyword + details are
   // pinned so they always show, and users can toggle via the button below.
