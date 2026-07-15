@@ -8,3 +8,5 @@ Thumbs.db
 manager/adbrain.db
 manager/adbrain.db-wal
 manager/adbrain.db-shm
+manager/backups/
+manager/autostart.log
