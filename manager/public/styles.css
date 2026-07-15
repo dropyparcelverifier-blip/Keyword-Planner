@@ -960,6 +960,40 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
 .hero-trend-down { color: var(--danger); }
 .hero-trend-flat { color: var(--text-3); }
 
+/* Data-quality banner — appears at the top of the Analytics hero when
+   we can diagnose a concrete data issue (0% KP volume, low kw count,
+   0% image match). Tone-colored border + icon; body has actionable
+   next-step text with jump-to-tab links. */
+.dq-banner {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-3);
+  border-radius: var(--radius);
+  border-left: 4px solid;
+  background: var(--bg-2);
+  align-items: start;
+}
+.dq-banner.tone-warn   { border-left-color: var(--warn);   background: linear-gradient(90deg, rgba(251,191,36,0.08) 0%, var(--bg-2) 40%); }
+.dq-banner.tone-info   { border-left-color: var(--info);   background: linear-gradient(90deg, rgba(96,165,250,0.08) 0%, var(--bg-2) 40%); }
+.dq-banner.tone-danger { border-left-color: var(--danger); background: linear-gradient(90deg, rgba(248,113,113,0.10) 0%, var(--bg-2) 40%); }
+.dq-icon    { font-size: 20px; padding-top: 2px; }
+.dq-title   { font-weight: 700; color: var(--text-0); font-size: var(--text-md); margin-bottom: var(--space-1); }
+.dq-body    { color: var(--text-2); font-size: var(--text-base); line-height: 1.5; }
+.dq-body a  { color: var(--accent); text-decoration: none; }
+.dq-body a:hover { text-decoration: underline; }
+.dq-body code {
+  background: var(--bg-input); padding: 1px 6px; border-radius: 3px;
+  font-family: var(--mono); font-size: var(--text-sm); color: var(--text-1);
+}
+.dq-close {
+  background: transparent; border: none; color: var(--text-3);
+  font-size: 20px; cursor: pointer; padding: 0 var(--space-2);
+  line-height: 1;
+}
+.dq-close:hover { color: var(--danger); }
+
 /* Analytics hero — product identity block ABOVE the hero card row.
    Gives the SKU a proper header (name + link + DQ grade + kw count)
    so users know at a glance which product they're looking at without

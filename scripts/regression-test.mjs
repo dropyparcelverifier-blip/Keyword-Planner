@@ -1194,6 +1194,15 @@ async function run() {
   assert(htmlFull.includes('<div id="anGapCard">\n          <div class="card collapsible">'),       'DS.31 Gap card collapsible');
   assert(htmlFull.includes('<div id="anTableCard" style="display:none;">\n        <div class="card collapsible">'), 'DS.32 Deep-dive keyword table collapsible');
   assert(appFull.includes('adbrainCollapsedCards'), 'DS.33 collapsed state persisted to localStorage');
+  // Scatter fallback + KP diagnostic banner + verify-on-connect.
+  assert(appFull.includes("mode = 'imgs'"),                        'DS.34 scatter falls back to image_count (independent of Score)');
+  assert(!/mode\s*=\s*'rating'/.test(appFull),                     'DS.35 scatter no longer uses AdRating for X (diagonal-line bug)');
+  assert(appFull.includes('KP volume data missing on every row'),  'DS.36 KP-missing diagnostic banner defined');
+  assert(htmlFull.includes('id="anDataQualityBanner"'),            'DS.37 DQ banner container in HTML');
+  assert(cssFull.includes('.dq-banner'),                           'DS.38 DQ banner CSS defined');
+  const bgFull = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
+  assert(bgFull.includes("fetch(`${normalized}/api/health`"),       'DS.39 setup-code import verifies manager reachability');
+  assert(bgFull.includes('saved: true'),                            'DS.40 setup-code import distinguishes saved-but-unreachable from decode error');
   assert(cssFull.includes('.scatter-full'),                        'DS.26 full-width scatter variant defined');
   assert(htmlFull.includes('scatter-full'),                        'DS.27 scatter uses full-width layout');
   assert(/\.card-title\s*\{[\s\S]{0,120}font-size:\s*var\(--text-md\)/.test(cssFull), 'DS.28 unified card-title sizing');

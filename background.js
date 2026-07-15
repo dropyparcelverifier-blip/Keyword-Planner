@@ -2317,7 +2317,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           updates[STORAGE_KEY_KP_URL] = String(payload.kpUrl).trim();
         }
         await chrome.storage.local.set(updates);
-        sendResponse({ ok: true, applied: { kpUrl: !!updates[STORAGE_KEY_KP_URL] } });
+        // Verify the manager is actually reachable before we call the
+        // import "successful". Without this, a stale or wrong-network
+        // setup code silently saves bad settings and the first heartbeat
+        // fails later with a cryptic message. A quick /api/health ping
+        // catches URL typos, wrong ports, expired tunnels, wrong tokens
+        // (401), and manager-offline in one shot.
+        try {
+          const healthResp = await fetch(`${normalized}/api/health`, {
+            method: 'GET',
+            headers: updates[STORAGE_KEY_MANAGER_TOKEN]
+              ? { 'X-Manager-Token': updates[STORAGE_KEY_MANAGER_TOKEN] }
+              : {},
+            signal: AbortSignal.timeout(5000),
+          });
+          if (!healthResp.ok) {
+            const detail = healthResp.status === 401
+              ? 'Token was rejected — the setup code may be stale. Ask the manager for a fresh one.'
+              : `Manager responded with HTTP ${healthResp.status}.`;
+            throw new Error(`Manager reachable but not healthy: ${detail}`);
+          }
+          const health = await healthResp.json().catch(() => ({}));
+          if (!health.ok) throw new Error('Manager health check returned ok=false.');
+        } catch (verifyErr) {
+          // Save partially-applied settings but WARN clearly. The user
+          // can still choose to keep them (in case the manager is
+          // temporarily down) or clear them.
+          sendResponse({
+            ok: false,
+            saved: true,
+            error: `Settings saved but manager isn't reachable at ${normalized}: ${verifyErr.message}`,
+          });
+          return;
+        }
+        sendResponse({ ok: true, applied: { kpUrl: !!updates[STORAGE_KEY_KP_URL] }, verified: true });
       } catch (e) {
         sendResponse({ ok: false, error: e.message });
       }
