@@ -422,6 +422,42 @@ button.small { padding: 4px 10px; font-size: 11px; }
 .tbl.compact td { padding: 3px 6px; }
 .tbl.compact td .chip { padding: 1px 6px; font-size: 9px; }
 
+/* Active-filters bar — shows the current cross-filter selection as
+   removable chips. Sticky-ish position (below the picker) so users
+   always see what they're filtering on. */
+.af-bar {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 8px 12px; margin-bottom: 12px;
+  background: var(--info-soft);
+  border: 1px solid var(--info);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.af-lbl { font-weight: 700; color: var(--info); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+.af-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 8px; border-radius: var(--radius-pill);
+  background: var(--bg-2); border: 1px solid var(--info); color: var(--text-1);
+  font-size: 11px; cursor: pointer;
+}
+.af-chip:hover { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
+.af-chip .af-x { font-weight: 700; font-size: 14px; line-height: 1; }
+.af-clear {
+  margin-left: auto; padding: 3px 10px; font-size: 11px;
+  background: transparent; border: 1px solid var(--danger); color: var(--danger);
+  border-radius: var(--radius-pill); cursor: pointer;
+}
+.af-clear:hover { background: var(--danger); color: #fff; }
+
+/* Clickable chips/slices/rows across cards — visual affordance that
+   they're interactive. Applied inline via class="clickable-x". */
+.clickable-x { cursor: pointer; transition: transform 80ms, box-shadow 80ms; }
+.clickable-x:hover { transform: scale(1.04); box-shadow: 0 2px 6px rgba(0,0,0,0.2); }
+.chip.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* Analytics section layers — 4 clean bands (Executive / Prioritize /
    Distribute / Content / Deep-dive). Each layer gets a subtle header
    so the flow reads as a top-down narrative instead of a mass of cards. */
@@ -450,6 +486,17 @@ button.small { padding: 4px 10px; font-size: 11px; }
 .scatter circle      { cursor: pointer; transition: r 120ms, stroke-width 120ms; }
 .scatter circle:hover { stroke-width: 2; stroke: #fff; }
 .scatter-legend { display: flex; gap: 12px; font-size: 10px; color: var(--text-2); margin-top: 8px; flex-wrap: wrap; }
+.scatter-tt {
+  position: absolute; z-index: 20; pointer-events: none;
+  background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 6px;
+  padding: 8px 10px; font-size: 11px; line-height: 1.5;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  min-width: 220px; max-width: 240px;
+}
+.scatter-tt .tt-kw    { font-weight: 700; color: var(--text-0); margin-bottom: 2px; }
+.scatter-tt .tt-score { font-family: var(--mono); font-weight: 700; margin-bottom: 4px; }
+.scatter-tt .tt-meta  { color: var(--text-2); }
+.scatter-tt .tt-hint  { color: var(--accent); font-size: 10px; margin-top: 4px; }
 .scatter-legend .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
 .scatter .quick-wins-badge {
   fill: var(--success); font-size: 10px; font-family: var(--mono);
