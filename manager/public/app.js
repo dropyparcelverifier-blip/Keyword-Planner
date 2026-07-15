@@ -985,18 +985,46 @@ function renderWorkerFleet() {
     return { label: (act.message || '').slice(0, 30), color: 'var(--text-2)' };
   };
 
-  el.innerHTML = `<table class="tbl">
+  // Detect stopped-by-user workers still holding in-flight claims —
+  // this is the root cause of "only one worker is running" when the
+  // other has been stopped mid-work. Those claims stay locked to the
+  // dead worker for up to 10 min (the stale-release default) unless
+  // we surface + fix it. Show a big warning banner + a one-click
+  // "Release all locked SKUs" action that hits the new manager-side
+  // /api/jobs/release-by-worker endpoint (works even if the worker
+  // is truly offline — no command-poll dependency).
+  const stuck = state.workers.filter(w => {
+    const stage = stageFor(w._lastActivity, w);
+    const isStopped = stage.label === 'stopped by user' || stage.label === 'OFFLINE';
+    return isStopped && (w.in_flight || 0) > 0;
+  });
+  const stuckBanner = stuck.length > 0 ? `
+    <div class="banner warn" style="margin-bottom: 10px; display: flex; align-items: center; gap: 10px;">
+      <span style="font-size: 18px;">⚠</span>
+      <div style="flex: 1;">
+        <strong>${stuck.reduce((s, w) => s + (w.in_flight || 0), 0)} SKU(s) locked to stopped worker${stuck.length > 1 ? 's' : ''}</strong>
+        (${stuck.map(w => `${w.worker_id} · ${w.in_flight}`).join(', ')}) —
+        other workers can't pick these up until released. Auto-release after 10 min OR click →
+      </div>
+      <button id="releaseAllStuckBtn" class="small danger">↻ Release all locked SKUs now</button>
+    </div>` : '';
+
+  el.innerHTML = stuckBanner + `<table class="tbl">
     <thead><tr><th>Worker</th><th>Current step</th><th>Last hb</th><th class="num">In-flight</th><th class="num">Done</th><th class="num">Failed</th><th style="width: 1%;">Actions</th></tr></thead>
     <tbody>${state.workers.map(w => {
       const stage = stageFor(w._lastActivity, w);
+      const isStuck = stuck.includes(w);
+      const inFlightCell = isStuck
+        ? `<td class="num" style="color:var(--warn); font-weight:700;" title="Locked to a stopped worker — click ↻ to release">${w.in_flight || 0} ⚠</td>`
+        : `<td class="num">${w.in_flight || 0}</td>`;
       return `
-      <tr>
+      <tr${isStuck ? ' style="background: rgba(251, 191, 36, 0.05);"' : ''}>
         <td><span class="chip ${workerDotClass(w.last_heartbeat)}">●</span>
             <a href="#" class="mono" data-filter-worker="${esc(w.worker_id)}" style="color: var(--info); text-decoration: none;" title="Filter activity log to this worker">${esc(w.worker_id)}</a></td>
         <td><span style="color: ${stage.color}; font-size: 11px;" title="${esc(w._lastActivity?.message || '')}">${esc(stage.label)}</span>
             ${w._lastActivity ? `<div style="font-size: 10px; color: var(--text-3);">${fmtAgo(w._lastActivity.ts)}</div>` : ''}</td>
         <td>${fmtAgo(w.last_heartbeat)}</td>
-        <td class="num">${w.in_flight || 0}</td>
+        ${inFlightCell}
         <td class="num" style="color:var(--success);">${w.done || 0}</td>
         <td class="num" style="color:${(w.failed||0) > 0 ? 'var(--danger)' : 'var(--text-3)'};">${w.failed || 0}</td>
         <td>
@@ -1004,7 +1032,7 @@ function renderWorkerFleet() {
             <button data-worker="${esc(w.worker_id)}" data-cmd="wake"   title="Wake — start claiming (respects manual Stop on the worker PC)">▶</button>
             <button data-worker="${esc(w.worker_id)}" data-cmd="reconnect" title="Force reconnect — overrides Stop, use if Wake was ignored" style="color: var(--warn); border-color: var(--warn);">⟳</button>
             <button data-worker="${esc(w.worker_id)}" data-cmd="pause"  title="Pause after current SKU">⏸</button>
-            <button data-worker="${esc(w.worker_id)}" data-cmd="release_claims" class="danger-btn" title="Release claims back to queue">↻</button>
+            <button data-worker="${esc(w.worker_id)}" data-release-worker="${esc(w.worker_id)}" class="danger-btn" title="Release this worker's claims back to queue (manager-side — works even if worker is offline).">↻</button>
             <button data-worker="${esc(w.worker_id)}" data-cmd="stop"   class="danger-btn" title="Stop and disarm">■</button>
             <button data-worker="${esc(w.worker_id)}" data-wol="1" title="Wake-on-LAN — send magic packet to this PC's NIC (only works if this manager PC is on the same physical LAN as the target)" style="color: var(--info); border-color: var(--info);">🔌</button>
           </div>
@@ -1012,6 +1040,32 @@ function renderWorkerFleet() {
       </tr>`;
     }).join('')}
     </tbody></table>`;
+
+  // Wire the per-row "↻ release claims" button to the direct
+  // manager-side endpoint (was going through the worker command which
+  // needed the worker to poll for it — useless when the worker is off).
+  el.querySelectorAll('button[data-release-worker]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const wid = btn.dataset.releaseWorker;
+      if (!confirm(`Release all claims held by ${wid}? Those SKUs go back to pending immediately.`)) return;
+      try {
+        const r = await api.jobsReleaseByWorker(wid);
+        toast(`Released ${r.released} SKU(s) from ${wid} — other workers can now claim them.`, 'ok', { title: '↻ Claims released' });
+        refreshDashboard();
+      } catch (e) { toast(e.message, 'err', { title: 'Release failed' }); }
+    });
+  });
+  // Wire the "release ALL locked SKUs" banner button — one click frees
+  // every stuck worker at once.
+  $('releaseAllStuckBtn')?.addEventListener('click', async () => {
+    if (!confirm(`Release ${stuck.reduce((s, w) => s + (w.in_flight || 0), 0)} locked SKU(s) from ${stuck.length} stopped worker(s)?`)) return;
+    let total = 0;
+    for (const w of stuck) {
+      try { const r = await api.jobsReleaseByWorker(w.worker_id); total += r.released || 0; } catch {}
+    }
+    toast(`Released ${total} SKU(s) — active workers will pick them up on the next claim cycle.`, 'ok', { title: '↻ All locked SKUs released' });
+    refreshDashboard();
+  });
   // Click worker ID -> filter activity log to that worker.
   el.querySelectorAll('a[data-filter-worker]').forEach(a => {
     a.addEventListener('click', (e) => {

@@ -556,7 +556,11 @@ async function run() {
   assert(appJs.body.includes('src-autosuggest') && appJs.body.includes('src-related'), '20f.14 source-color chips styled in analytics');
 
   assert(appJs.body.includes('worker-actions'), '20f.15 per-worker action buttons wired');
-  assert(appJs.body.includes("data-cmd=\"release_claims\""), '20f.16 release-claims per-worker action');
+  // 20f.16 updated: the per-row release button now uses the direct
+  // manager-side endpoint (data-release-worker), not the worker command
+  // path (data-cmd=release_claims). The command path is still available
+  // via dashboard broadcast for backward-compat.
+  assert(appJs.body.includes('data-release-worker'), '20f.16 per-row release button uses manager-side release-by-worker');
 
   // Worker popup slim-down — the extension is now worker-only.
   const popupHtml = readFileSync(resolve(REPO, 'popup.html'), 'utf-8');
@@ -1214,6 +1218,22 @@ async function run() {
   assert(!appFull.includes("label: 'Visual visibility'"),            'DS.48 duplicate Visual-visibility takeaway removed');
   assert(appFull.includes('range ${batchMin.toFixed(1)}'),           'DS.49 Top-10 chart shows actual score range in subtitle');
   assert(appFull.includes('score - batchMin) / span'),               'DS.50 Top-10 bars normalize against actual data span');
+  // Stuck-worker auto-detection + manager-side release-by-worker endpoint.
+  const srvFull = readFileSync(resolve(REPO, 'manager/server.js'), 'utf-8');
+  assert(srvFull.includes('/api/jobs/release-by-worker'),             'DS.51 release-by-worker endpoint defined');
+  assert(srvFull.includes('releaseByWorker'),                          'DS.52 releaseByWorker prepared statement defined');
+  const apiFull = readFileSync(resolve(REPO, 'manager/public/api.js'), 'utf-8');
+  assert(apiFull.includes('jobsReleaseByWorker'),                     'DS.53 client API wrapper wired');
+  assert(appFull.includes('locked to stopped worker'),                 'DS.54 stuck-worker warning banner defined');
+  assert(appFull.includes('data-release-worker'),                     'DS.55 per-row release button hits new endpoint');
+  assert(appFull.includes('releaseAllStuckBtn'),                       'DS.56 one-click release-all-stuck button wired');
+
+  // Live endpoint smoke test.
+  const relBad = await req('POST', '/api/jobs/release-by-worker', {});
+  assertEq(relBad.status, 400,                                          'DS.57 release-by-worker requires workerId');
+  const relOk = await req('POST', '/api/jobs/release-by-worker', { workerId: 'nonexistent-worker' });
+  assertEq(relOk.status, 200,                                           'DS.58 release-by-worker returns 200 for unknown worker');
+  assert(relOk.data.ok === true && relOk.data.released === 0,           'DS.59 release-by-worker returns released count');
   assert(cssFull.includes('.scatter-full'),                        'DS.26 full-width scatter variant defined');
   assert(htmlFull.includes('scatter-full'),                        'DS.27 scatter uses full-width layout');
   assert(/\.card-title\s*\{[\s\S]{0,120}font-size:\s*var\(--text-md\)/.test(cssFull), 'DS.28 unified card-title sizing');

@@ -243,6 +243,11 @@ const Q = {
   markDone: db.prepare(`UPDATE jobs SET status='done', done_at=? WHERE batch_id=? AND product_url=?`),
   markFailed: db.prepare(`UPDATE jobs SET status='failed', failed_reason=?, done_at=? WHERE batch_id=? AND product_url=?`),
   releaseStale: db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL WHERE status='claimed' AND (heartbeat_at IS NULL OR heartbeat_at < ?)`),
+  // Direct release by worker_id — bypasses the release_claims command
+  // (which routes through the worker's SW). Used when a worker is stopped
+  // or offline and its stale claims are blocking other workers from
+  // picking up the SKUs.
+  releaseByWorker: db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL WHERE status='claimed' AND claimed_by=?`),
   summary: db.prepare(`SELECT batch_id,
       COUNT(*) total,
       SUM(status='pending') pending, SUM(status='claimed') claimed,
@@ -842,6 +847,16 @@ const server = http.createServer(async (req, res) => {
       const b = await readJson(req); const mins = Number.isFinite(b.staleMinutes) ? b.staleMinutes : 10;
       const info = Q.releaseStale.run(now() - mins * 60000);
       return send(res, 200, { ok: true, released: info.changes });
+    }
+    // Release all claims held by a specific worker — used when the
+    // dashboard detects a stopped/offline worker still holding SKUs
+    // that other workers could be processing.
+    if (m === 'POST' && p === '/api/jobs/release-by-worker') {
+      const b = await readJson(req);
+      const wid = String(b.workerId || '').trim();
+      if (!wid) return send(res, 400, { ok: false, error: 'workerId required' });
+      const info = Q.releaseByWorker.run(wid);
+      return send(res, 200, { ok: true, released: info.changes, workerId: wid });
     }
     if (m === 'GET' && p === '/api/jobs/summary')      return send(res, 200, { ok: true, batches: Q.summary.all() });
     if (m === 'GET' && p === '/api/jobs/worker-stats') return send(res, 200, { ok: true, workers: Q.workerStats.all() });
