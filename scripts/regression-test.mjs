@@ -969,6 +969,11 @@ async function run() {
   assert(wd.body.includes('__EXTDIR__'),  '20q.7 template has extdir placeholder');
   assert(wd.body.includes('__CHROME__'),  '20q.8 template has chrome placeholder');
   assert(wd.body.includes('Start-Process'), '20q.9 template launches chrome via Start-Process');
+  // Manager-aware watchdog additions
+  assert(wd.body.includes('__MGR__'),             '20q.10 template has manager URL placeholder');
+  assert(wd.body.includes('/api/health'),         '20q.11 watchdog pings manager health first');
+  assert(wd.body.includes("exit 0"),              '20q.12 watchdog exits silently when manager down');
+  assert(ps.body.includes("'__MGR__'"),           '20q.13 installer substitutes __MGR__ placeholder');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.

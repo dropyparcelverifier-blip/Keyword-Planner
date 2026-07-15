@@ -550,6 +550,7 @@ try {
   $wdBody = $wdBody -replace '__EXTDIR__',  ($extDir -replace "'","''")
   $wdBody = $wdBody -replace '__CHROME__',  ($chrome -replace "'","''")
   $wdBody = $wdBody -replace '__LOG__',     ($logPathVar -replace "'","''")
+  $wdBody = $wdBody -replace '__MGR__',     ($mgr    -replace "'","''")
   Set-Content -Path $watchdogPath -Value $wdBody -Encoding UTF8
 
   $taskName = 'AdBrain Chrome Watchdog'
