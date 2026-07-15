@@ -679,6 +679,31 @@ $('dashRefreshInterval').addEventListener('change', () => {
   startDashPolling();
 });
 $('dashRefreshBtn').addEventListener('click', refreshDashboard);
+
+// Clear buttons on Activity log + Errors card. Activity clear respects
+// the current worker filter (only clears rows for the filtered worker),
+// so users can scope-clear without wiping everyone.
+$('activityClearBtn')?.addEventListener('click', async () => {
+  const scoped = state.workerFilter ? ` for worker ${state.workerFilter}` : '';
+  if (!confirm(`Clear activity log${scoped}? This cannot be undone (but new events will start populating immediately as workers continue).`)) return;
+  try {
+    const filters = state.activeBatch ? { batchId: state.activeBatch } : {};
+    if (state.workerFilter) filters.workerId = state.workerFilter;
+    const r = await api.activityClear(filters);
+    toast(`Cleared ${r.deleted.toLocaleString()} activity row(s)${scoped}.`, 'ok', { title: '🗑 Log cleared' });
+    refreshDashboard();
+  } catch (e) { toast(e.message, 'err', { title: 'Clear failed' }); }
+});
+$('errorsClearBtn')?.addEventListener('click', async () => {
+  if (!confirm('Clear all error-level events? Info + warn events are kept.')) return;
+  try {
+    const filters = { level: 'err' };
+    if (state.activeBatch) filters.batchId = state.activeBatch;
+    const r = await api.activityClear(filters);
+    toast(`Cleared ${r.deleted.toLocaleString()} error event(s).`, 'ok', { title: '🗑 Errors cleared' });
+    refreshDashboard();
+  } catch (e) { toast(e.message, 'err', { title: 'Clear failed' }); }
+});
 // Activity log worker filter — scoping the log to one worker is
 // essential once you have 3+ workers all logging every 30s.
 $('activityWorkerFilter')?.addEventListener('change', () => {
@@ -930,6 +955,115 @@ function renderBatchOverview() {
     </tbody></table>`;
 }
 
+// Per-worker monitor modal — click 🖥 on any worker row.
+// Zooms into a full-screen card with everything about ONE worker:
+// health chip, current step + heartbeat, big action buttons, and a
+// live-filtered activity log scoped to this worker. Refreshes every
+// 5s while the modal is open (a lightweight per-worker refresh loop
+// that hits /api/activity?workerId=X + /api/workers/list — much
+// cheaper than a full dashboard refresh).
+let _workerMonitorTimer = null;
+async function openWorkerMonitor(workerId) {
+  const modal = $('workerMonitorModal');
+  const title = $('workerMonitorTitle');
+  const body  = $('workerMonitorBody');
+  if (!modal || !title || !body || !workerId) return;
+  title.innerHTML = `🖥 <span class="mono">${esc(workerId)}</span>`;
+  body.innerHTML = `<div class="hint">Loading…</div>`;
+  modal.style.display = 'flex';
+  await refreshWorkerMonitor(workerId);
+  if (_workerMonitorTimer) clearInterval(_workerMonitorTimer);
+  _workerMonitorTimer = setInterval(() => {
+    if (modal.style.display === 'none') { clearInterval(_workerMonitorTimer); _workerMonitorTimer = null; return; }
+    refreshWorkerMonitor(workerId);
+  }, 5000);
+}
+async function refreshWorkerMonitor(workerId) {
+  const body = $('workerMonitorBody');
+  if (!body) return;
+  const w = state.workers.find(x => x.worker_id === workerId);
+  const stage = w ? (function() {
+    const now = Date.now();
+    const hb  = Number(w.last_heartbeat || 0);
+    if (!hb || now - hb > 5 * 60 * 1000) return { label: 'OFFLINE',       color: 'var(--danger)',  dot: 'danger' };
+    if (       now - hb > 3 * 60 * 1000) return { label: 'stale',         color: 'var(--warn)',    dot: 'warn' };
+    if (w._lastActivity) {
+      const msg = String(w._lastActivity.message || '').toLowerCase();
+      if (msg.includes('stopped by')) return { label: 'stopped by user', color: 'var(--danger)', dot: 'danger' };
+    }
+    return { label: 'online',   color: 'var(--success)', dot: 'ok' };
+  })() : { label: 'unknown', color: 'var(--text-3)', dot: 'idle' };
+  let activity = { events: [] };
+  try { activity = await api.activityGet(state.activeBatch, 200, workerId); } catch {}
+  const events = activity.events || [];
+  const errCount = events.filter(e => e.level === 'err').length;
+  const rowColor = (lv) => lv === 'err' ? 'var(--danger)' : lv === 'warn' ? 'var(--warn)' : lv === 'ok' ? 'var(--success)' : 'var(--text-2)';
+  body.innerHTML = `
+    <div class="wm-hdr">
+      <div class="wm-status">
+        <span class="pulse-dot ${stage.dot}"></span>
+        <div>
+          <div class="wm-stage" style="color:${stage.color};">${esc(stage.label)}</div>
+          <div class="wm-hb hint">last heartbeat ${w ? fmtAgo(w.last_heartbeat) : '—'}</div>
+        </div>
+      </div>
+      <div class="wm-tiles">
+        <div class="tile"><div class="lbl">In flight</div><div class="val">${w?.in_flight || 0}</div></div>
+        <div class="tile"><div class="lbl">Done</div><div class="val" style="color:var(--success);">${w?.done || 0}</div></div>
+        <div class="tile"><div class="lbl">Failed</div><div class="val" style="color:${(w?.failed||0) > 0 ? 'var(--danger)' : 'var(--text-3)'};">${w?.failed || 0}</div></div>
+      </div>
+    </div>
+    <div class="wm-actions">
+      <button data-worker="${esc(workerId)}" data-cmd="wake" title="Wake — start claiming. IGNORED if worker was stopped-by-user (use ⟳ Reconnect instead).">▶ Wake</button>
+      <button data-worker="${esc(workerId)}" data-cmd="reconnect" style="background:var(--warn); color:#000;" title="Force reconnect — overrides Stop. Use this when Wake was ignored.">⟳ Force reconnect</button>
+      <button data-worker="${esc(workerId)}" data-cmd="pause" class="secondary" title="Pause after current SKU. Worker finishes current job then stops claiming.">⏸ Pause</button>
+      <button data-worker="${esc(workerId)}" data-release-worker="${esc(workerId)}" class="danger" title="Release all this worker's claims back to pending. Manager-side — works even if worker is offline.">↻ Release claims</button>
+      <button data-worker="${esc(workerId)}" data-cmd="stop" class="danger" title="Stop and disarm — worker requires an explicit Connect to resume.">■ Stop</button>
+      <button data-worker="${esc(workerId)}" data-wol="1" class="secondary" title="Wake-on-LAN — send magic packet (only works when manager is on the same physical LAN).">🔌 WoL</button>
+    </div>
+    <div class="wm-log-hdr">
+      <span>📜 Activity (this worker, latest ${events.length}) · ${errCount > 0 ? `<span style="color:var(--danger);">${errCount} error(s)</span>` : 'no errors'}</span>
+      <button class="small ghost" id="wmClearBtn" title="Clear this worker's activity rows (leaves other workers' rows intact).">🗑 Clear this worker's log</button>
+    </div>
+    <div class="wm-log">
+      ${events.length === 0 ? '<div class="empty">No activity for this worker.</div>' : events.map(e => `
+        <div class="wm-log-row" style="border-left: 3px solid ${rowColor(e.level)};">
+          <span class="wm-log-ts">${fmtTime(e.ts)}</span>
+          <span class="wm-log-src">${esc(e.source || 'engine')}</span>
+          <span class="wm-log-msg">${esc(e.message)}</span>
+        </div>`).join('')}
+    </div>`;
+  // Wire the in-modal action buttons (same handlers as the fleet grid).
+  body.querySelectorAll('button[data-cmd]').forEach(btn => btn.addEventListener('click', async () => {
+    const cmd = btn.dataset.cmd;
+    try {
+      await api.commandsSend(workerId, cmd, {});
+      toast(`${cmd} → ${workerId}`, 'ok');
+      setTimeout(() => refreshWorkerMonitor(workerId), 500);
+    } catch (e) { toast(e.message, 'err'); }
+  }));
+  body.querySelectorAll('button[data-release-worker]').forEach(btn => btn.addEventListener('click', async () => {
+    if (!confirm(`Release all claims held by ${workerId}?`)) return;
+    try {
+      const r = await api.jobsReleaseByWorker(workerId);
+      toast(`Released ${r.released} SKU(s)`, 'ok');
+      refreshWorkerMonitor(workerId);
+    } catch (e) { toast(e.message, 'err'); }
+  }));
+  body.querySelectorAll('button[data-wol]').forEach(btn => btn.addEventListener('click', async () => {
+    try { await api.wakeOnLan(workerId); toast(`WoL sent to ${workerId}`, 'ok'); }
+    catch (e) { toast(e.message, 'err'); }
+  }));
+  body.querySelector('#wmClearBtn')?.addEventListener('click', async () => {
+    if (!confirm(`Clear activity log for ${workerId}?`)) return;
+    try {
+      const r = await api.activityClear({ workerId });
+      toast(`Cleared ${r.deleted} row(s)`, 'ok');
+      refreshWorkerMonitor(workerId);
+    } catch (e) { toast(e.message, 'err'); }
+  });
+}
+
 function renderWorkerFleet() {
   const el = $('workerGrid');
   $('workerCountLabel').textContent = `${state.workers.length} worker(s)`;
@@ -1029,8 +1163,9 @@ function renderWorkerFleet() {
         <td class="num" style="color:${(w.failed||0) > 0 ? 'var(--danger)' : 'var(--text-3)'};">${w.failed || 0}</td>
         <td>
           <div class="worker-actions">
-            <button data-worker="${esc(w.worker_id)}" data-cmd="wake"   title="Wake — start claiming (respects manual Stop on the worker PC)">▶</button>
-            <button data-worker="${esc(w.worker_id)}" data-cmd="reconnect" title="Force reconnect — overrides Stop, use if Wake was ignored" style="color: var(--warn); border-color: var(--warn);">⟳</button>
+            <button data-worker="${esc(w.worker_id)}" data-monitor="1" title="Open this worker's monitor — full status, all controls, filtered activity log." style="color: var(--info); border-color: var(--info);">🖥</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="wake"   title="Wake — start claiming (respects manual Stop on the worker PC). If the worker was stopped by the user, use ⟳ Force reconnect instead.">▶</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="reconnect" title="Force reconnect — overrides Stop. Use this when Wake gets 'ignored' because the worker was manually stopped." style="color: var(--warn); border-color: var(--warn);">⟳</button>
             <button data-worker="${esc(w.worker_id)}" data-cmd="pause"  title="Pause after current SKU">⏸</button>
             <button data-worker="${esc(w.worker_id)}" data-release-worker="${esc(w.worker_id)}" class="danger-btn" title="Release this worker's claims back to queue (manager-side — works even if worker is offline).">↻</button>
             <button data-worker="${esc(w.worker_id)}" data-cmd="stop"   class="danger-btn" title="Stop and disarm">■</button>
@@ -1054,6 +1189,10 @@ function renderWorkerFleet() {
         refreshDashboard();
       } catch (e) { toast(e.message, 'err', { title: 'Release failed' }); }
     });
+  });
+  // Wire the 🖥 monitor button — opens per-worker modal.
+  el.querySelectorAll('button[data-monitor]').forEach(btn => {
+    btn.addEventListener('click', () => openWorkerMonitor(btn.dataset.worker));
   });
   // Wire the "release ALL locked SKUs" banner button — one click frees
   // every stuck worker at once.

@@ -1123,6 +1123,25 @@ const server = http.createServer(async (req, res) => {
       const c = Q.cleanupCommands.run(now() - (b.commandsDays ?? 1) * 86400000);
       return send(res, 200, { ok: true, activityLog: a.changes, ackedCommands: c.changes });
     }
+    // Clear activity log immediately with optional filters — used by the
+    // "clear" buttons on the dashboard's Errors + Activity cards.
+    // Supports: {level:'err'|'warn'|'info'} to scope by level,
+    //           {workerId:'PC-XXX'} to scope by worker,
+    //           {batchId:'...'} to scope by batch,
+    //           {olderThanMs:N} to keep only recent.
+    // Any combination ANDs together. Empty body = nuke every activity row.
+    if (m === 'POST' && p === '/api/activity/clear') {
+      const b = await readJson(req).catch(() => ({}));
+      const conds = [], args = [];
+      if (b.level)       { conds.push('level = ?');       args.push(String(b.level)); }
+      if (b.workerId)    { conds.push('worker_id = ?');   args.push(String(b.workerId)); }
+      if (b.batchId)     { conds.push('batch_id = ?');    args.push(String(b.batchId)); }
+      if (Number.isFinite(b.olderThanMs)) { conds.push('ts < ?'); args.push(now() - Number(b.olderThanMs)); }
+      const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+      const stmt = db.prepare(`DELETE FROM activity_log ${where}`);
+      const info = stmt.run(...args);
+      return send(res, 200, { ok: true, deleted: info.changes });
+    }
 
     return send(res, 404, { ok: false, error: 'no such route' });
   } catch (e) {
