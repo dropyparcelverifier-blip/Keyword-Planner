@@ -357,6 +357,16 @@
            "Clear all" wipes them. Hidden when no filters are active. -->
       <div id="anActiveFilters" class="af-bar" style="display:none;"></div>
 
+      <!-- Analytics hero — product identity + 6 metric cards. Same visual
+           language as the Dashboard hero, tuned to per-SKU signals: total
+           keywords, opportunity avg, image-match %, KP-vol coverage,
+           high-intent count, data-quality grade. Populated by
+           renderAnalyticsHero() on every filter change. -->
+      <div id="anHeroWrap" class="an-hero-wrap" style="display:none;">
+        <div id="anHeroProduct" class="an-hero-product"></div>
+        <div class="hero" id="anHero"></div>
+      </div>
+
       <!-- ─── LAYER: EXECUTIVE — 30-second summary ─────────────────── -->
       <div id="anLayerExec" class="an-layer" style="display:none;">
         <div class="an-layer-head">📋 Executive summary <span class="an-layer-hint">the 30-second read</span></div>
