@@ -190,9 +190,18 @@ function serveStatic(res, urlPath) {
       : ext === '.js' || ext === '.mjs' ? 'text/javascript'
       : ext === '.css' ? 'text/css'
       : 'application/octet-stream';
-    // no-cache so users don't have to hard-refresh after each fix. The
-    // manager typically serves a handful of small files locally over
-    // Tailscale — cache benefit is negligible, cache pain is real.
+    // Rewrite asset URLs in index.html to include a version query string
+    // pinned to the file's mtime. no-cache headers alone don't stop Chrome
+    // from reusing its disk cache after a tab restore; a URL that changes
+    // whenever the JS/CSS changes DOES. This is the belt to the no-cache
+    // suspenders, so the user never has to hard-refresh again.
+    if (ext === '.html') {
+      const v = assetVersion();
+      data = Buffer.from(String(data).replace(
+        /(<(?:link|script)[^>]*\s(?:href|src)=")(\/public\/[^"?]+)(")/g,
+        (_, pre, url, post) => `${pre}${url}?v=${v}${post}`
+      ));
+    }
     res.writeHead(200, {
       'Content-Type': type,
       'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -201,6 +210,23 @@ function serveStatic(res, urlPath) {
     });
     res.end(data);
   });
+}
+// Cheap asset version — max mtime of app.js + styles.css + api.js so any
+// edit to those bumps the string. Cached for a couple seconds so index.html
+// doesn't stat three files on every hit.
+let _assetVerCache = { at: 0, v: '0' };
+function assetVersion() {
+  const now = Date.now();
+  if (now - _assetVerCache.at < 2000) return _assetVerCache.v;
+  let mtimeMax = 0;
+  for (const f of ['app.js', 'styles.css', 'api.js', 'index.html']) {
+    try {
+      const st = fs.statSync(path.join(PUBLIC_DIR, f));
+      if (st.mtimeMs > mtimeMax) mtimeMax = st.mtimeMs;
+    } catch {}
+  }
+  _assetVerCache = { at: now, v: String(Math.floor(mtimeMax)) };
+  return _assetVerCache.v;
 }
 
 // ---------------- Prepared statements ----------------
