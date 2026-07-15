@@ -1712,32 +1712,32 @@ const KEYWORD_COL_DEFS = [
   { group: 'core', key: 'ad_rating',         label: 'AdRating',   kind: 'rating',tip: 'Blended relevance signal across all sources.' },
   { group: 'core', key: 'source',            label: 'Source',     kind: 'chip' },
   // ─── KP metrics (Volume + Ads) ───────────────────────────────────
-  { group: 'kp',   key: 'kp_monthly_searches', label: 'Volume',    kind: 'num',   tip: 'Google Keyword Planner monthly searches — real demand.' },
-  { group: 'kp',   key: 'kp_competition',    label: 'Comp',       kind: 'comp',  tip: 'KP competition (Low/Medium/High).' },
-  { group: 'kp',   key: 'kp_bid_low',        label: 'Bid low ₹',  kind: 'money', tip: 'KP low-end top-of-page bid.' },
-  { group: 'kp',   key: 'kp_bid_high',       label: 'Bid high ₹', kind: 'money', tip: 'KP high-end top-of-page bid — useful for paid-ads budgeting.' },
+  { group: 'kp',   key: 'kp_monthly_searches', label: 'Vol/mo',    kind: 'num',   tip: 'Google Keyword Planner monthly searches. Real search demand — the closer this is to reality, the more trustworthy the Score column.' },
+  { group: 'kp',   key: 'kp_competition',    label: 'KP comp',    kind: 'comp',  tip: 'KP competition (Low / Medium / High). Low = cheap to rank & bid; High = crowded auction.' },
+  { group: 'kp',   key: 'kp_bid_low',        label: 'Bid low',    kind: 'money', tip: 'Google KP low-range top-of-page bid (₹). Cheapest you can realistically show at the top of paid results.' },
+  { group: 'kp',   key: 'kp_bid_high',       label: 'Bid high',   kind: 'money', tip: 'Google KP high-range top-of-page bid (₹). Upper end of what competitors are paying.' },
   // ─── Image match ────────────────────────────────────────────────
-  { group: 'image', key: 'image_count',           label: 'Imgs',     kind: 'imgs', tip: 'SERP images that matched our product visually (CLIP + dHash).' },
-  { group: 'image', key: 'total_thumbs',          label: 'Thumbs',   kind: 'num',  tip: 'Total thumbnails captured on the SERP (denominator for Vis%).' },
-  { group: 'image', key: 'visibility_pct',        label: 'Vis %',    kind: 'pct',  tip: 'image_count / total_thumbs — fraction of the SERP that is our product.' },
-  { group: 'image', key: 'match_confidence_max', label: 'Match↑',   kind: 'num',  tip: 'Highest per-image match confidence on this keyword.' },
-  { group: 'image', key: 'link_checked_count',   label: 'Chk',      kind: 'num',  tip: 'Matched destination pages we opened for re-verification.' },
-  { group: 'image', key: 'link_verified_count',  label: 'Verified', kind: 'num',  tip: 'Matched destination pages that re-verified via CLIP.' },
+  { group: 'image', key: 'image_count',           label: 'Imgs',      kind: 'imgs', tip: 'Number of SERP images that matched our product visually (CLIP + dHash). Higher = more visual visibility on Google.' },
+  { group: 'image', key: 'total_thumbs',          label: 'SERP imgs', kind: 'num',  tip: 'Total thumbnails captured on this keyword\'s SERP (matched + unmatched). Denominator for Vis%.' },
+  { group: 'image', key: 'visibility_pct',        label: 'Vis %',     kind: 'pct',  tip: 'Visibility percentage = Imgs / SERP imgs. What fraction of the visual SERP is our product.' },
+  { group: 'image', key: 'match_confidence_max', label: 'Match ↑',   kind: 'num',  tip: 'Highest per-image CLIP similarity score on this keyword (0-100). Above ~72 = confident match.' },
+  { group: 'image', key: 'link_checked_count',   label: 'Links ✓',   kind: 'num',  tip: 'How many matched destination pages we opened to re-verify the product actually lives there.' },
+  { group: 'image', key: 'link_verified_count',  label: 'Links ok',  kind: 'num',  tip: 'How many of those re-verifications confirmed our product on the destination page.' },
   // ─── Sellers & SERP presence ────────────────────────────────────
-  { group: 'sellers', key: 'total_sellers',   label: 'Sellers',    kind: 'num',   tip: 'Distinct sellers on this SERP.' },
-  { group: 'sellers', key: 'ads_on_serp',     label: 'Ads',        kind: 'num',   tip: 'Paid ads count on this SERP.' },
-  { group: 'sellers', key: 'dropy_is_seller', label: 'Us?',        kind: 'yesno', tip: 'Does dropy.in already list this product as a seller here?' },
-  { group: 'sellers', key: 'dropy_on_serp',   label: 'On SERP',    kind: 'yesno', tip: 'Does dropy.in appear anywhere on this SERP (not necessarily as seller)?' },
-  { group: 'sellers', key: 'top_match_seller',label: 'Top seller', kind: 'text',  tip: 'Seller domain behind the top-confidence image match.' },
-  { group: 'sellers', key: 'top_match_price', label: 'Top price',  kind: 'text',  tip: 'Price on the top-match seller.' },
-  { group: 'sellers', key: 'frequency',       label: 'Freq',       kind: 'num',   tip: 'How many discovery sources found this keyword — multi-source = stronger.' },
+  { group: 'sellers', key: 'total_sellers',   label: 'Sellers',     kind: 'num',   tip: 'Distinct sellers listing this SKU (or a similar one) across the SERP. Higher = deeper marketplace supply.' },
+  { group: 'sellers', key: 'ads_on_serp',     label: 'Ads seen',    kind: 'num',   tip: 'Number of paid ads on this keyword\'s SERP. 0 = no advertisers found value here (yet).' },
+  { group: 'sellers', key: 'dropy_is_seller', label: 'Dropy sells', kind: 'yesno', tip: 'Does dropy.in list this exact product as a seller on the SERP\'s Shopping/organic block? ✓ = protected position.' },
+  { group: 'sellers', key: 'dropy_on_serp',   label: 'Dropy shown', kind: 'yesno', tip: 'Does dropy.in appear anywhere on this SERP (not necessarily as the seller)?' },
+  { group: 'sellers', key: 'top_match_seller',label: 'Top seller',  kind: 'text',  tip: 'Domain of the seller behind the highest-confidence image match.' },
+  { group: 'sellers', key: 'top_match_price', label: 'Top price',   kind: 'text',  tip: 'Price shown by the top-match seller (raw, no currency normalization).' },
+  { group: 'sellers', key: 'frequency',       label: 'Sources',     kind: 'num',   tip: 'How many discovery sources found this keyword (KP / autosuggest / SERP / PAA / related / amazon). Multi-source = stronger signal.' },
   // ─── Amazon (India Round 3) ─────────────────────────────────────
-  { group: 'amazon', key: 'amazon_rank',           label: 'A.rank',   kind: 'num',   tip: 'Our position on the Amazon.in SERP for this keyword.' },
-  { group: 'amazon', key: 'amazon_price',          label: 'A.price',  kind: 'text',  tip: 'Amazon.in observed price.' },
-  { group: 'amazon', key: 'amazon_rating',         label: 'A.rating', kind: 'num',   tip: 'Amazon.in product rating (out of 5).' },
-  { group: 'amazon', key: 'amazon_reviews',        label: 'A.reviews',kind: 'num',   tip: 'Amazon.in review count.' },
-  { group: 'amazon', key: 'amazon_suggest_count',  label: 'A.suggest',kind: 'num',   tip: 'Amazon autosuggest occurrences for this seed.' },
-  { group: 'amazon', key: 'amazon_total_results',  label: 'A.total',  kind: 'num',   tip: 'Amazon.in total results reported for this query.' },
+  { group: 'amazon', key: 'amazon_rank',           label: 'Amz rank',    kind: 'num',   tip: 'Our position on the Amazon.in search results for this keyword (1 = top).' },
+  { group: 'amazon', key: 'amazon_price',          label: 'Amz price',   kind: 'text',  tip: 'Price observed on the Amazon.in listing (raw, no currency normalization).' },
+  { group: 'amazon', key: 'amazon_rating',         label: 'Amz stars',   kind: 'num',   tip: 'Amazon.in product rating out of 5.' },
+  { group: 'amazon', key: 'amazon_reviews',        label: 'Amz reviews', kind: 'num',   tip: 'Number of reviews on the Amazon.in listing.' },
+  { group: 'amazon', key: 'amazon_suggest_count',  label: 'Amz suggest', kind: 'num',   tip: 'How many times this keyword appeared in Amazon.in autosuggest for related seeds.' },
+  { group: 'amazon', key: 'amazon_total_results',  label: 'Amz total',   kind: 'num',   tip: 'Total matching results Amazon.in reports for this query — proxy for category size.' },
   // ─── Meta / classification ──────────────────────────────────────
   { group: 'meta', key: 'topic',           label: 'Topic',   kind: 'text' },
   { group: 'meta', key: 'funnel',          label: 'Funnel',  kind: 'text' },
@@ -2910,30 +2910,14 @@ function renderExecutiveSummary(sourceRows, filteredRows) {
   // reads at a glance without extra icons.
   const takeaways = [];
 
-  // Coverage takeaway.
-  takeaways.push({
-    tone: targetStatus.tone,
-    label: 'Keyword coverage',
-    body: `${scored.length.toLocaleString()} keywords collected for <strong>${esc(productName)}</strong> — ${targetStatus.text}. ${excellent > 0 ? `<strong>${excellent}</strong> (${excPct}%) rank <span style="color:var(--success);">Excellent</span> (score ≥ 12).` : 'None rank Excellent yet — consider expanding autosuggest depth.'}`,
-  });
-
-  // Demand-signal takeaway (KP volume).
-  if (volPct >= 50) {
-    takeaways.push({ tone: 'success', label: 'Search-demand data', body: `${volPct}% of rows carry Google KP monthly-search volume — confident demand ranking.` });
-  } else if (volPct > 0) {
-    takeaways.push({ tone: 'warn', label: 'Search-demand data', body: `Only ${volPct}% of rows (${withVol}/${scored.length}) have KP volume. Ranking leans on relevance + image-match signals; enable KP-metrics backfill for tighter demand estimates.` });
-  } else {
-    takeaways.push({ tone: 'warn', label: 'Search-demand data', body: `<strong>No KP volume data on any row.</strong> Ranking relies purely on relevance + image matches. Fix: ensure the Keyword Planner URL is set and <code>backfillKpMetrics</code> is enabled per worker.` });
-  }
-
-  // Visual-visibility takeaway.
-  if (imgPct >= 30) {
-    takeaways.push({ tone: 'success', label: 'Visual visibility', body: `Our product visually surfaces on <strong>${imgPct}%</strong> of these keyword SERPs (${withImg} of ${scored.length}). Strong organic footprint.` });
-  } else if (imgPct > 0) {
-    takeaways.push({ tone: 'info', label: 'Visual visibility', body: `Product surfaces visually on <strong>${imgPct}%</strong> of SERPs — decent but there's room to lift image visibility with better product photography and Merchant Center feeds.` });
-  } else {
-    takeaways.push({ tone: 'warn', label: 'Visual visibility', body: `Product doesn't surface visually on any SERP. Suggests product images may not be indexed or don't match SERP thumbnails — investigate.` });
-  }
+  // NOTE: The 3 takeaways that used to lead this section — "Keyword
+  // coverage", "Search-demand data", "Visual visibility" — were removed
+  // as unwanted duplicates. Keyword count + status already shows in the
+  // KEYWORDS hero card + coverage gauge; KP-vol status shows in the KP
+  // VOLUME ROWS hero card + the top-of-page diagnostic banner; image %
+  // shows in the IMAGE MATCH hero card. Business Takeaways now carries
+  // only what those don't: intent balance, discovery mix, merchandising
+  // wins, and the top-opportunity spotlight.
 
   // Intent balance takeaway.
   if (highPct >= 25) {
@@ -2944,11 +2928,19 @@ function renderExecutiveSummary(sourceRows, filteredRows) {
     takeaways.push({ tone: 'warn', label: 'Buying-intent balance', body: `Only ${highPct}% high-intent (${lowPct}% low). Expand around "buy", "price", "best", "review", and city-modified queries to lift commercial intent.` });
   }
 
-  // Best channel takeaway (which source is doing the heavy lifting).
+  // Best channel takeaway — inline text (used to embed an ugly chip
+  // that fought the takeaway's own tone-border for attention).
   if (topSrc) {
     const [srcName, srcCount] = topSrc;
     const srcPct = Math.round((srcCount / scored.length) * 100);
-    takeaways.push({ tone: 'neutral', label: 'Discovery mix', body: `<strong>${srcPct}%</strong> of the pool came from <span class="chip src-${srcName.toLowerCase().split('_')[0]}" style="font-size:10px;">${esc(srcName)}</span>. Diversify by adding more KP seeds or a deeper autosuggest crawl if this is over-concentrated.` });
+    const overweight = srcPct >= 60;
+    takeaways.push({
+      tone: overweight ? 'info' : 'neutral',
+      label: 'Discovery mix',
+      body: overweight
+        ? `<strong>${srcPct}%</strong> of the pool came from a single source (<code>${esc(srcName)}</code>). Diversify by adding more KP seeds or a deeper autosuggest crawl.`
+        : `Top source: <code>${esc(srcName)}</code> (${srcPct}%). Discovery is well-distributed across ${Object.keys(primarySrc).length} sources.`,
+    });
   }
 
   // Merchandising takeaway.
@@ -3094,14 +3086,22 @@ function renderAnalyticsTopChart(rows) {
     .filter(r => (r.opportunity_score || 0) > 0)
     .sort((a, b) => (b.opportunity_score || 0) - (a.opportunity_score || 0))
     .slice(0, 10);
-  $('anTopChartSub').textContent = `top ${top.length} by opportunity score`;
-  if (top.length === 0) { el.innerHTML = `<div class="hint">No scored keywords yet.</div>`; return; }
-  const maxV = Math.max(...top.map(r => r.opportunity_score || 0), 1);
+  if (top.length === 0) { el.innerHTML = `<div class="hint">No scored keywords yet.</div>`; $('anTopChartSub').textContent = '—'; return; }
+  // Normalize bars against the ACTUAL score span of the whole batch (min→max),
+  // not top-N only. Previously bars normalized against max-of-top-10 → when
+  // scores clustered (e.g. all top-10 in 60-65) every bar rendered near 100%
+  // width and the chart discriminated nothing.
+  const batchMax = Math.max(...rows.map(r => r.opportunity_score || 0), 1);
+  const batchMin = Math.min(...rows.map(r => r.opportunity_score || 0), 0);
+  const span = Math.max(batchMax - batchMin, 0.1);
+  $('anTopChartSub').textContent = `range ${batchMin.toFixed(1)} → ${batchMax.toFixed(1)}`;
   el.innerHTML = top.map(r => {
     const kwRaw = String(r.keyword || '—');
     const kw    = esc(kwRaw);
     const score = toNum(r.opportunity_score) ?? 0;
-    const pct   = Math.round((score / maxV) * 100);
+    // Position within actual data span — a score at batchMax renders full,
+    // a score at batchMin renders empty. Discriminates the actual differences.
+    const pct   = Math.round(((score - batchMin) / span) * 100);
     const img   = toNum(r.image_count) ?? 0;
     const vol   = toNum(r.kp_monthly_searches);
     const href  = r.serp_url || `https://www.google.com/search?q=${encodeURIComponent(kwRaw)}`;
@@ -3222,19 +3222,28 @@ function renderAnalyticsTable(rows) {
     <tr class="tier-${rowTier.tier}" style="${rowStyle}">${visibleCols.map(c => {
       const v = r[c.key];
       if (c.kind === 'chip' && v) {
-        // Source column uses source-specific colors; intent/relevance columns
-        // use done/claimed/pending green→yellow→grey.
-        let cls;
+        // Source column: collapse multi-source strings to primary chip
+        // + "+N" badge. Prior render stacked every source as its own chip,
+        // making rows 3-4 lines tall on multi-source keywords. Full list
+        // lives in the tooltip.
         if (c.key === 'source') {
-          const s = String(v).toLowerCase();
-          cls = s.includes('kp') ? 'src-kp'
-              : s.includes('autosuggest') ? 'src-autosuggest'
-              : s.includes('serp') ? 'src-serp'
-              : s.includes('paa') ? 'src-paa'
-              : s.includes('related') ? 'src-related'
-              : s.includes('amazon') ? 'src-amazon'
-              : 'pending';
-        } else if (c.key === 'keyword_relevance') {
+          const parts = String(v).split(',').map(s => s.trim()).filter(Boolean);
+          const primary = parts[0];
+          const p = primary.toLowerCase();
+          const cls = p.includes('kp') ? 'src-kp'
+                    : p.includes('autosuggest') ? 'src-autosuggest'
+                    : p.includes('serp') ? 'src-serp'
+                    : p.includes('paa') ? 'src-paa'
+                    : p.includes('related') ? 'src-related'
+                    : p.includes('amazon') ? 'src-amazon'
+                    : 'pending';
+          const more = parts.length > 1
+            ? `<span class="more-badge" title="Also from: ${esc(parts.slice(1).join(', '))}">+${parts.length - 1}</span>`
+            : '';
+          return `<td><span class="multi-src"><span class="chip ${cls}" title="${esc(v)}">${esc(primary)}</span>${more}</span></td>`;
+        }
+        let cls;
+        if (c.key === 'keyword_relevance') {
           const s = String(v).toLowerCase();
           cls = s === 'high' ? 'done' : s === 'medium' ? 'claimed' : s.includes('sibling') ? 'src-paa' : 'pending';
         } else {
