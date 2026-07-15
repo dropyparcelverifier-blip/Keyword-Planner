@@ -523,19 +523,39 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
   outline-offset: 1px;
 }
 
-/* Analytics section layers — 4 clean bands (Executive / Prioritize /
+/* Analytics section layers — 5 clean bands (Executive / Prioritize /
    Distribute / Content / Deep-dive). Each layer gets a subtle header
-   so the flow reads as a top-down narrative instead of a mass of cards. */
-.an-layer { margin: 18px 0 8px; }
+   so the flow reads as a top-down narrative instead of a mass of cards.
+   The header has a colored accent square + subtle gradient underline
+   so the section divider reads at a glance in a long-scroll page. */
+.an-layer { margin: var(--space-5) 0 var(--space-2); }
+.an-layer:first-of-type { margin-top: var(--space-3); }
 .an-layer-head {
-  font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase;
-  color: var(--text-2); padding: 4px 2px 8px;
+  font-size: var(--text-sm); font-weight: 800; letter-spacing: 1.5px;
+  text-transform: uppercase; color: var(--text-1);
+  padding: var(--space-1) 0 var(--space-3);
+  margin-bottom: var(--space-3);
   border-bottom: 1px solid var(--line-1);
-  margin-bottom: 10px;
+  position: relative;
+  display: flex; align-items: baseline; gap: var(--space-2);
+}
+.an-layer-head::after {
+  content: ''; position: absolute; bottom: -1px; left: 0;
+  width: 60px; height: 2px; background: var(--accent); border-radius: 1px;
 }
 .an-layer-hint {
-  font-size: 10px; font-weight: 500; letter-spacing: .5px; text-transform: none;
-  color: var(--text-3); margin-left: 8px;
+  font-size: var(--text-xs); font-weight: 500; letter-spacing: .5px;
+  text-transform: none; color: var(--text-3);
+}
+
+/* Cards inside layers get a subtle entry animation on first show —
+   makes navigating between SKUs feel snappy instead of jarring. */
+.an-layer .card, .an-layer .an-hero-wrap {
+  animation: cardIn var(--dur-slow) var(--ease);
+}
+@keyframes cardIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 /* Score × Volume scatter plot — the quick-wins quadrant. */
@@ -911,6 +931,42 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
 .hero-trend-up   { color: var(--success); }
 .hero-trend-down { color: var(--danger); }
 .hero-trend-flat { color: var(--text-3); }
+
+/* Analytics hero — product identity block ABOVE the hero card row.
+   Gives the SKU a proper header (name + link + DQ grade + kw count)
+   so users know at a glance which product they're looking at without
+   scrolling back up to the picker. */
+.an-hero-wrap { margin-bottom: var(--space-4); }
+.an-hero-product {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: linear-gradient(90deg, var(--bg-2) 0%, var(--bg-1) 100%);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  margin-bottom: var(--space-3);
+  flex-wrap: wrap;
+}
+.an-hero-product .an-hp-name {
+  font-size: var(--text-xl); font-weight: 700; color: var(--text-0);
+  flex: 1; min-width: 240px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.an-hero-product .an-hp-sku {
+  font-family: var(--mono); font-size: var(--text-sm); color: var(--text-3);
+  padding: 2px 8px; background: var(--bg-3); border-radius: var(--radius-sm);
+}
+.an-hero-product .an-hp-badge {
+  font-family: var(--mono); font-size: var(--text-sm); font-weight: 700;
+  padding: 3px 10px; border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+}
+.an-hero-product .an-hp-link {
+  font-size: var(--text-sm); color: var(--accent); text-decoration: none;
+  padding: 4px 10px; border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  transition: background var(--dur-fast) var(--ease);
+}
+.an-hero-product .an-hp-link:hover { background: var(--accent); color: white; }
 
 /* Live pulse dot — used on worker cards, live-status indicators. */
 .pulse-dot {

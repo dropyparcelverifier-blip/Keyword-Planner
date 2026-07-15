@@ -2337,6 +2337,7 @@ function filterAndRenderAnalytics() {
 
   analytics.skuRows = filtered;
   renderActiveFiltersBar();
+  renderAnalyticsHero(source);
   renderExecutiveSummary(source, filtered);
   renderAnalyticsSummary(source);
   renderAnalyticsInsights(source, filtered);
@@ -2349,7 +2350,7 @@ function filterAndRenderAnalytics() {
   renderAnalyticsTable(filtered);
 
   const show = source.length > 0 ? '' : 'none';
-  ['anLayerExec', 'anLayerPrioritize', 'anLayerDistribute', 'anLayerContent', 'anLayerDeepDive',
+  ['anHeroWrap', 'anLayerExec', 'anLayerPrioritize', 'anLayerDistribute', 'anLayerContent', 'anLayerDeepDive',
    'anTableCard', 'anTopChartCard'].forEach(id => {
     const el = $(id); if (el) el.style.display = show;
   });
@@ -2779,6 +2780,74 @@ function renderContentGaps(rows) {
     catch { toast('Copy failed.', 'err'); }
   });
   if (sub) sub.textContent = `${topGaps.length} gap(s) · top ${Math.min(20, topGaps.length)} shown`;
+}
+
+// ─────────── Analytics hero ───────────
+// Top-of-tab identity block + 6 metric cards. Same visual grammar as the
+// Dashboard hero (renderDashHero) but tuned to the per-SKU signals users
+// scan: kw count vs 100-300 target, avg opportunity, image visibility,
+// KP volume coverage, high-intent count, data-quality grade.
+function renderAnalyticsHero(rows) {
+  const wrap = $('anHeroWrap');
+  const hero = $('anHero');
+  const prod = $('anHeroProduct');
+  if (!wrap || !hero || !prod) return;
+  if (!rows || rows.length === 0) { wrap.style.display = 'none'; return; }
+
+  const ctx = rows.find(r => r.product_name) || rows[0];
+  const productName = ctx.product_name || analytics.sku || '(unnamed SKU)';
+  const productUrl  = ctx.product_url || '';
+  const sku         = analytics.sku || ctx.sku || '';
+
+  // Data-quality composite grade — same logic as the SKU picker preview
+  // but restated here so the hero is self-contained. 0-8 pts.
+  const withVol   = rows.filter(r => (toNum(r.kp_monthly_searches) || 0) > 0).length;
+  const withImg   = rows.filter(r => (toNum(r.image_count) || 0) > 0).length;
+  const highIntent = rows.filter(r => String(r.buying_intent || '').toLowerCase() === 'high').length;
+  const volPct  = Math.round((withVol   / rows.length) * 100);
+  const imgPct  = Math.round((withImg   / rows.length) * 100);
+  const highPct = Math.round((highIntent / rows.length) * 100);
+  let dq = 0;
+  if (rows.length >= 100) dq += 2; else if (rows.length >= 50) dq += 1;
+  if (volPct   >= 50) dq += 2; else if (volPct   >= 20) dq += 1;
+  if (imgPct   >= 30) dq += 2; else if (imgPct   >= 10) dq += 1;
+  if (highPct  >= 20) dq += 2; else if (highPct  >= 10) dq += 1;
+  const grade = dq >= 7 ? { l: 'A', c: 'var(--success)', t: 'Trustworthy — full signal set' }
+              : dq >= 5 ? { l: 'B', c: 'var(--accent)',  t: 'Solid — most signals present' }
+              : dq >= 3 ? { l: 'C', c: 'var(--warn)',    t: 'Partial — some signals missing' }
+              :           { l: 'D', c: 'var(--danger)',  t: 'Thin — analytics may mislead' };
+
+  // Product identity strip.
+  prod.innerHTML = `
+    <div class="an-hp-name" title="${esc(productName)}">${esc(productName)}</div>
+    ${sku ? `<span class="an-hp-sku">${esc(sku)}</span>` : ''}
+    <span class="an-hp-badge" style="background:${grade.c}20; color:${grade.c}; border-color:${grade.c};" title="Data quality: ${esc(grade.t)}">DQ ${grade.l}</span>
+    ${productUrl ? `<a href="${esc(productUrl)}" target="_blank" rel="noopener" class="an-hp-link">📦 Open product →</a>` : ''}
+  `;
+
+  // Cards.
+  const scored = rows.map(r => ({ ...r, __s: opportunityScore(r) }));
+  const excellent = scored.filter(r => r.__s >= 12).length;
+  const avgScore = scored.reduce((s, r) => s + r.__s, 0) / scored.length;
+  const target = rows.length < 100 ? { tone: 'warn',    hint: `${100 - rows.length} short of 100 min` }
+               : rows.length > 300 ? { tone: 'info',    hint: `${rows.length - 300} over 300 max` }
+               :                     { tone: 'success', hint: `on target (100–300)` };
+  const cards = [
+    { tone: target.tone,                         icon: '🔍', label: 'Keywords',        value: rows.length.toLocaleString(),   sub: target.hint },
+    { tone: excellent > 0 ? 'success' : 'neutral',icon: '⭐', label: 'Excellent tier',   value: excellent,                       sub: `avg score ${avgScore.toFixed(1)}` },
+    { tone: imgPct >= 30 ? 'success' : imgPct > 0 ? 'info' : 'warn', icon: '📷', label: 'Image match', value: `${imgPct}%`, sub: `${withImg} of ${rows.length} rows` },
+    { tone: volPct > 0 ? 'success' : 'warn',     icon: '📊', label: 'KP volume rows',  value: `${volPct}%`,                    sub: volPct === 0 ? 'no KP data yet' : `${withVol} of ${rows.length}` },
+    { tone: highPct >= 20 ? 'success' : highPct >= 10 ? 'info' : 'neutral', icon: '🎯', label: 'High-intent', value: highIntent, sub: `${highPct}% of pool` },
+    { tone: 'info',                              icon: '💎', label: 'Top score',       value: (scored[0]?.__s ?? 0).toFixed(1), sub: scored[0]?.keyword ? esc(String(scored[0].keyword).slice(0, 30)) : '—' },
+  ];
+  hero.innerHTML = cards.map(c => `
+    <div class="hero-card tone-${c.tone}">
+      <div class="hero-icon">${c.icon}</div>
+      <div class="hero-label">${esc(c.label)}</div>
+      <div class="hero-value">${c.value}</div>
+      <div class="hero-sub">${c.sub}</div>
+    </div>`).join('');
+  wrap.style.display = '';
 }
 
 // ─────────── Executive summary ───────────

@@ -1176,6 +1176,13 @@ async function run() {
   const appFull = readFileSync(resolve(REPO, 'manager/public/app.js'), 'utf-8');
   assert(appFull.includes('function renderDashHero'),         'DS.16 renderDashHero wired');
   assert(appFull.includes('renderDashHero(timeline)'),        'DS.17 hero renderer called in refresh loop');
+  // Analytics hero — same treatment as Dashboard.
+  assert(htmlFull.includes('id="anHero"'),                    'DS.18 analytics hero container in HTML');
+  assert(htmlFull.includes('id="anHeroProduct"'),             'DS.19 analytics product identity strip in HTML');
+  assert(appFull.includes('function renderAnalyticsHero'),    'DS.20 renderAnalyticsHero wired');
+  assert(appFull.includes('renderAnalyticsHero(source)'),     'DS.21 analytics hero called in filter pipeline');
+  assert(cssFull.includes('.an-hero-product'),                'DS.22 analytics hero product strip styled');
+  assert(cssFull.includes('@keyframes cardIn'),               'DS.23 card entry animation defined');
 
   // ===== FLEET FIXES: quota, stale claims, per-SKU flush, co-brand =====
   const mfFleet = readFileSync(resolve(REPO, 'manifest.json'), 'utf-8');
