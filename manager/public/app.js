@@ -2323,17 +2323,41 @@ function renderScatter(rows) {
 
   if (scored.length === 0) { el.innerHTML = `<div class="hint">No scored keywords yet.</div>`; if (sub) sub.textContent = '—'; return; }
 
-  // Prefer real KP volume if we have coverage; otherwise fall back to
-  // AdRating so the chart is still useful when KP data is missing.
-  const hasVol = scored.filter(r => r.vol > 0).length >= Math.min(5, scored.length * 0.1);
-  const xVal = (r) => hasVol ? r.vol : r.rating;
-  const xLabel = hasVol ? 'KP monthly searches (log scale)' : 'AdRating (KP volume unavailable — fallback)';
-  if (title) title.textContent = hasVol ? 'Score × Volume — quick-wins quadrant' : 'Score × Relevance — quick-wins quadrant';
-  if (sub) sub.textContent = hasVol ? `${scored.length} scored keyword(s) · ${scored.filter(r => r.vol > 0).length} with KP volume` : `${scored.length} scored · KP volume missing, using AdRating for X-axis`;
-
-  // Log-scale for volume so a 3-keyword outlier at 500k doesn't crush the
-  // interesting mid-band. Linear for AdRating fallback.
-  const xScale = hasVol ? (v) => v > 0 ? Math.log10(v + 1) : 0 : (v) => v;
+  // X-axis pick — MUST be independent of Score (which weights AdRating
+  // heavily). Falling back to AdRating produced a useless diagonal line
+  // (Score = 0.6·AdRating + …); dots landed on Score/0.6. Preference order:
+  //   1. KP monthly searches (real demand signal) if we have ≥5 rows
+  //   2. Image match count (visual SERP reach, capped in Score at ≤5 imgs
+  //      so it's largely orthogonal to Score for the long tail)
+  //   3. Total sellers (SERP crowding — orthogonal to Score entirely)
+  const volCount = scored.filter(r => r.vol > 0).length;
+  const imgCount = scored.filter(r => r.imgs > 0).length;
+  const sellersOn = scored.filter(r => (Number(r.total_sellers) || 0) > 0).length;
+  let mode;
+  if (volCount >= Math.min(5, scored.length * 0.1)) mode = 'vol';
+  else if (imgCount >= Math.min(5, scored.length * 0.1)) mode = 'imgs';
+  else if (sellersOn >= Math.min(5, scored.length * 0.1)) mode = 'sellers';
+  else mode = 'imgs'; // desperate fallback still shows *something*
+  const xVal = (r) => mode === 'vol' ? r.vol
+                    : mode === 'imgs' ? r.imgs
+                    :                   (Number(r.total_sellers) || 0);
+  const xLabel = mode === 'vol'     ? 'KP monthly searches (log scale)'
+              : mode === 'imgs'     ? 'Image matches per SERP (KP volume unavailable)'
+              :                       'Total sellers per SERP (KP + image data unavailable)';
+  const titleTxt = mode === 'vol'  ? 'Score × Volume — quick-wins quadrant'
+                : mode === 'imgs'  ? 'Score × Visual reach — quick-wins quadrant'
+                :                    'Score × SERP crowding — quick-wins quadrant';
+  if (title) title.textContent = titleTxt;
+  if (sub) {
+    sub.textContent = mode === 'vol'
+      ? `${scored.length} scored · ${volCount} with KP volume`
+      : mode === 'imgs'
+      ? `${scored.length} scored · using image_count for X (${imgCount} rows with matches). Enable KP backfill for volume-based ranking.`
+      : `${scored.length} scored · using total_sellers for X. Enable KP backfill + verify image matching for richer prioritization.`;
+  }
+  // Log-scale only for volume (spans orders of magnitude). Linear for
+  // image_count / total_sellers (single-digit ranges).
+  const xScale = mode === 'vol' ? (v) => v > 0 ? Math.log10(v + 1) : 0 : (v) => v;
   const xs = scored.map(r => xScale(xVal(r)));
   const ys = scored.map(r => r.score);
   const xMin = 0, xMax = Math.max(...xs, 1);
@@ -2761,6 +2785,57 @@ function renderAnalyticsHero(rows) {
     <span class="an-hp-badge" style="background:${grade.c}20; color:${grade.c}; border-color:${grade.c};" title="Data quality: ${esc(grade.t)}">DQ ${grade.l}</span>
     ${productUrl ? `<a href="${esc(productUrl)}" target="_blank" rel="noopener" class="an-hp-link">📦 Open product →</a>` : ''}
   `;
+
+  // Data-quality banner — prominent, actionable warnings for the specific
+  // issues we can diagnose from the data itself. Only one banner shows at
+  // a time (most critical first) so users aren't drowned in warnings.
+  const banner = document.getElementById('anDataQualityBanner');
+  if (banner) {
+    let msg = null;
+    if (volPct === 0 && rows.length >= 20) {
+      msg = {
+        tone: 'warn',
+        icon: '⚠',
+        title: 'KP volume data missing on every row',
+        body: `Ranking relies purely on relevance + image matches. To fix: (1) confirm the Keyword Planner URL is set in <a href="#" data-jump-tab="config" style="color:inherit; text-decoration:underline;">Config → Worker config</a>, (2) ensure the worker's Google Ads session is signed in, (3) verify <code>backfillKpMetrics</code> is enabled per worker. Once fixed, the Score × Volume scatter and Volume column populate automatically.`,
+      };
+    } else if (rows.length < 100) {
+      msg = {
+        tone: 'info',
+        icon: '💡',
+        title: `Only ${rows.length} keywords collected (target: 100–300)`,
+        body: `Coverage is below the target range. To widen the net: (1) confirm autosuggest expansion is enabled, (2) check for competitor-brand filter over-rejection in the discovery logs, (3) consider raising <code>MAX_R1_KP_SERP_SEEDS</code> (currently 60) in <code>modules/keyword-discovery.js</code>.`,
+      };
+    } else if (imgPct === 0 && rows.length >= 20) {
+      msg = {
+        tone: 'warn',
+        icon: '⚠',
+        title: 'Product does not surface visually on any SERP',
+        body: `0 image matches across ${rows.length} keywords. Investigate: (1) product images may not be indexed by Google Images, (2) Merchant Center feed missing, (3) CLIP threshold may be too strict (Config → Worker config). Without visual visibility our organic footprint is negligible.`,
+      };
+    }
+    if (msg) {
+      banner.innerHTML = `
+        <div class="dq-banner tone-${msg.tone}">
+          <div class="dq-icon">${msg.icon}</div>
+          <div class="dq-content">
+            <div class="dq-title">${esc(msg.title)}</div>
+            <div class="dq-body">${msg.body}</div>
+          </div>
+          <button class="dq-close" title="Dismiss this warning for the session.">×</button>
+        </div>`;
+      banner.style.display = '';
+      banner.querySelector('.dq-close')?.addEventListener('click', () => { banner.style.display = 'none'; });
+      // Tab-jump link handler.
+      banner.querySelector('[data-jump-tab]')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        const t = e.target.dataset.jumpTab;
+        document.querySelector(`.tab[data-tab="${t}"]`)?.click();
+      });
+    } else {
+      banner.style.display = 'none';
+    }
+  }
 
   // Cards.
   const scored = rows.map(r => ({ ...r, __s: opportunityScore(r) }));
