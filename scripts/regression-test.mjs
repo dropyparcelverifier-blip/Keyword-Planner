@@ -1269,6 +1269,111 @@ async function run() {
   assert(cssFull.includes('.card-icon { display: none'),               'DS.84 card-icons hidden by default (unless .show applied)');
   assert(cssFull.includes('.an-layer-hint { display: none'),           'DS.85 layer-hint subtitles hidden');
   assert(cssFull.includes('.tier-strip'),                              'DS.86 inline tier-strip styling defined');
+
+  // ═════════════════════════════════════════════════════════════════════
+  // QUEUE CRUD (safe against active workers)
+  // ═════════════════════════════════════════════════════════════════════
+  // Fresh batch dedicated to CRUD tests so we don't clobber earlier assertions.
+  const CRUD_BATCH = 'crud-test-' + Math.floor(1e6);
+  const up = await req('POST', '/api/jobs/upload', {
+    batchId: CRUD_BATCH,
+    products: [
+      { url: 'https://example.com/p/a', sku: 'CRUD-A', product_name: 'Product A', priority: 100 },
+      { url: 'https://example.com/p/b', sku: 'CRUD-B', product_name: 'Product B', priority: 100 },
+      { url: 'https://example.com/p/c', sku: 'CRUD-C', product_name: 'Product C', priority: 100 },
+    ],
+  });
+  assertEq(up.status, 200, 'CRUD.1 CRUD test batch uploaded');
+
+  // GET /api/jobs/list returns all jobs with richer fields than /per-product.
+  const list1 = await req('GET', `/api/jobs/list?batchId=${CRUD_BATCH}`);
+  assertEq(list1.status, 200, 'CRUD.2 /jobs/list returns 200');
+  assertEq(list1.data.rows.length, 3, 'CRUD.3 /jobs/list returns all uploaded jobs');
+  assert(list1.data.rows.every(r => 'attempts' in r && 'heartbeat_at' in r), 'CRUD.4 /jobs/list rows include worker fields');
+  const jobA = list1.data.rows.find(r => r.sku === 'CRUD-A');
+  assert(jobA, 'CRUD.5 job A retrievable by SKU');
+
+  // Priority-only update path (always safe).
+  const prioUp = await req('POST', '/api/jobs/update', { jobId: jobA.id, priority: 250 });
+  assertEq(prioUp.status, 200, 'CRUD.6 priority-only update returns 200');
+  assertEq(prioUp.data.mode, 'priority-only', 'CRUD.7 update uses priority-only fast path');
+  const list2 = await req('GET', `/api/jobs/list?batchId=${CRUD_BATCH}`);
+  assertEq(list2.data.rows.find(r => r.id === jobA.id).priority, 250, 'CRUD.8 priority persisted');
+
+  // Full-field update on a pending job — allowed without force.
+  const fieldUp = await req('POST', '/api/jobs/update', { jobId: jobA.id, sku: 'CRUD-A-RENAMED', product_name: 'Renamed Product A' });
+  assertEq(fieldUp.status, 200, 'CRUD.9 full-field update on pending job returns 200');
+  const list3 = await req('GET', `/api/jobs/list?batchId=${CRUD_BATCH}`);
+  assertEq(list3.data.rows.find(r => r.id === jobA.id).sku, 'CRUD-A-RENAMED', 'CRUD.10 renamed SKU persisted');
+
+  // === Two-worker safety scenario ===
+  // Worker 1 claims job B, then someone tries to delete/modify it.
+  const claim = await req('POST', '/api/jobs/claim', { workerId: 'crud-worker-1', batchId: CRUD_BATCH, limit: 1 });
+  const claimed = claim.data.jobs[0];
+  assert(claimed, 'CRUD.11 worker 1 claimed a job');
+  // Full-field update on CLAIMED job — should refuse.
+  const badUpd = await req('POST', '/api/jobs/update', { jobId: claimed.id, sku: 'DIFFERENT' });
+  assertEq(badUpd.status, 409, 'CRUD.12 full-field update on claimed job returns 409 (worker-safe)');
+  // Priority update on claimed job — allowed (safe).
+  const okUpd = await req('POST', '/api/jobs/update', { jobId: claimed.id, priority: 500 });
+  assertEq(okUpd.status, 200, 'CRUD.13 priority update on claimed job allowed (safe)');
+  // Delete claimed job WITHOUT force — should refuse.
+  const badDel = await req('POST', '/api/jobs/delete-one', { jobId: claimed.id });
+  assertEq(badDel.status, 409, 'CRUD.14 delete on claimed job refused without force');
+  // Delete claimed job WITH force — should succeed + drop keyword rows.
+  const forceDel = await req('POST', '/api/jobs/delete-one', { jobId: claimed.id, force: true });
+  assertEq(forceDel.status, 200, 'CRUD.15 delete-one with force allowed on claimed job');
+  assertEq(forceDel.data.deleted, 1, 'CRUD.16 delete-one reports deleted=1');
+  // Verify it's gone.
+  const list4 = await req('GET', `/api/jobs/list?batchId=${CRUD_BATCH}`);
+  assert(!list4.data.rows.find(r => r.id === claimed.id), 'CRUD.17 deleted job no longer appears in /jobs/list');
+  // Worker 2 claims — should get the remaining pending job(s).
+  const crudClaim2 = await req('POST', '/api/jobs/claim', { workerId: 'crud-worker-2', batchId: CRUD_BATCH, limit: 5 });
+  assert(crudClaim2.data.jobs.length >= 1, 'CRUD.18 worker 2 can claim remaining jobs after worker 1 deletion');
+
+  // Reset endpoint: force a done job back to pending.
+  const jobC = list4.data.rows.find(r => r.sku === 'CRUD-C');
+  assert(jobC, 'CRUD.19 job C still in queue for reset test');
+  // Mark done then try to reset.
+  await req('POST', '/api/jobs/done', { batchId: CRUD_BATCH, productUrl: jobC.product_url });
+  const badReset = await req('POST', '/api/jobs/reset', { jobId: jobC.id });
+  assertEq(badReset.status, 409, 'CRUD.20 reset on done job refused without force');
+  const okReset = await req('POST', '/api/jobs/reset', { jobId: jobC.id, force: true });
+  assertEq(okReset.status, 200, 'CRUD.21 reset on done job allowed with force');
+  const list5 = await req('GET', `/api/jobs/list?batchId=${CRUD_BATCH}`);
+  assertEq(list5.data.rows.find(r => r.id === jobC.id).status, 'pending', 'CRUD.22 job C is pending again after force-reset');
+
+  // Add-one: insert a single SKU into the existing batch.
+  const addOne = await req('POST', '/api/jobs/add-one', {
+    batchId: CRUD_BATCH,
+    url: 'https://example.com/p/d',
+    sku: 'CRUD-D',
+    product_name: 'Late-added Product D',
+    priority: 50,
+  });
+  assertEq(addOne.status, 200, 'CRUD.23 add-one returns 200');
+  assert(Number.isFinite(addOne.data.jobId), 'CRUD.24 add-one returns new jobId');
+  const list6 = await req('GET', `/api/jobs/list?batchId=${CRUD_BATCH}`);
+  const jobD = list6.data.rows.find(r => r.sku === 'CRUD-D');
+  assert(jobD && jobD.priority === 50, 'CRUD.25 added job appears with correct priority');
+  // Missing URL → 400.
+  const addBad = await req('POST', '/api/jobs/add-one', { batchId: CRUD_BATCH });
+  assertEq(addBad.status, 400, 'CRUD.26 add-one refuses missing url');
+
+  // Client API + UI wiring.
+  const apiCrud = readFileSync(resolve(REPO, 'manager/public/api.js'), 'utf-8');
+  assert(apiCrud.includes('jobUpdate'),                                'CRUD.27 client jobUpdate wrapper');
+  assert(apiCrud.includes('jobDelete'),                                'CRUD.28 client jobDelete wrapper');
+  assert(apiCrud.includes('jobReset'),                                 'CRUD.29 client jobReset wrapper');
+  assert(apiCrud.includes('jobAddOne'),                                'CRUD.30 client jobAddOne wrapper');
+  assert(appFull.includes('function openQueueManager'),                'CRUD.31 openQueueManager wired');
+  assert(htmlFull.includes('id="queueManageModal"'),                   'CRUD.32 queue manage modal in HTML');
+  assert(appFull.includes('data-queue-manage'),                        'CRUD.33 Manage buttons per batch row');
+  assert(cssFull.includes('.qm-strip'),                                'CRUD.34 qm-strip status counts styled');
+
+  // Claude "Open in Claude" now uses anchor click (preserves session cookies).
+  assert(appFull.includes("a.href = 'https://claude.ai/new'"),         'CRUD.35 Open-in-Claude uses anchor click (session preserved)');
+  assert(!appFull.includes("window.open('https://claude.ai/new'"),      'CRUD.36 window.open path removed');
   assert(cssFull.includes('.scatter-full'),                        'DS.26 full-width scatter variant defined');
   assert(htmlFull.includes('scatter-full'),                        'DS.27 scatter uses full-width layout');
   assert(/\.card-title\s*\{[\s\S]{0,120}font-size:\s*var\(--text-md\)/.test(cssFull), 'DS.28 unified card-title sizing');

@@ -486,6 +486,16 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
 /* Executive summary bullets — one card = one plain-English takeaway.
    Colored left border encodes tone (success/info/warn/neutral) without
    needing an icon per row. */
+/* Queue manager modal — status counts strip above the CRUD table. */
+.qm-strip {
+  display: flex; gap: var(--space-4); align-items: center;
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-2);
+  border: 1px solid var(--line-1); border-radius: var(--radius-sm);
+  font-size: var(--text-md); margin-bottom: var(--space-3);
+}
+.qm-strip strong { font-family: var(--mono); font-weight: 700; }
+
 /* Inline tier strip — replaces the noisy score-distribution bar chart
    with a compact one-line summary. Score-tier already has a color; a
    whole SVG histogram was showing the same information twice. */

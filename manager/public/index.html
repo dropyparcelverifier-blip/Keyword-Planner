@@ -305,6 +305,22 @@
         </div>
       </div>
 
+      <!-- Queue manager modal — per-job CRUD (view / edit priority /
+           re-queue / delete / add single SKU). Opens from the batch row
+           in the Dashboard. Worker-safe: refuses to delete claimed jobs
+           by default (force checkbox to override). -->
+      <div id="queueManageModal" class="modal-root" style="display:none;">
+        <div class="modal-backdrop" data-close-modal="1"></div>
+        <div class="modal-card" style="max-width: 1200px;">
+          <div class="modal-head">
+            <span class="modal-title" id="queueManageTitle">Queue</span>
+            <span class="spacer" style="flex:1;"></span>
+            <button class="small secondary" data-close-modal="1">Close</button>
+          </div>
+          <div class="modal-body" id="queueManageBody"></div>
+        </div>
+      </div>
+
       <!-- Per-worker monitor modal — click any worker's 🖥 button (or
            the worker id itself) to zoom into a full-screen card with
            the worker's live status, all controls, and its filtered
