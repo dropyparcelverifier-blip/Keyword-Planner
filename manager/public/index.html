@@ -319,35 +319,16 @@
         </div>
       </div>
 
+      <!-- Empty-state placeholder — replaced by renderAnalyticsHero() as
+           soon as a batch loads. Kept minimal (single line) so it doesn't
+           balloon the "waiting" view. -->
       <div id="anSummary">
-        <div class="two-col">
-          <div>
-            <div class="card">
-              <div class="card-head"><span class="card-icon">📈</span><span class="card-title">Waiting for input</span></div>
-              <div class="card-body">
-                <div class="empty" style="padding: 32px 12px;">
-                  <div class="empty-icon">📈</div>
-                  <strong>Pick a batch + SKU above</strong>
-                  <div style="margin-top: 6px; color: var(--text-3); font-size: 12px;">
-                    Analytics shows per-SKU keyword drill-downs — sources,<br>
-                    buying intent, top ranked keywords, image-match counts,<br>
-                    KP monthly search volume, and match confidence.
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div>
-            <div class="card">
-              <div class="card-head"><span class="card-icon">📚</span><span class="card-title">What you'll see</span></div>
-              <div class="card-body" style="font-size: 12px; color: var(--text-2); line-height: 1.7;">
-                <div><strong style="color: var(--text-1);">Summary tiles</strong> — total keywords, image matches, avg AdRating, KP metric coverage.</div>
-                <div style="margin-top: 8px;"><strong style="color: var(--text-1);">Source mix</strong> — how many rows came from KP vs autosuggest vs SERP vs PAA. Color-coded chips.</div>
-                <div style="margin-top: 8px;"><strong style="color: var(--text-1);">Top-10 by AdRating</strong> — inline bar chart of the highest-scoring keywords.</div>
-                <div style="margin-top: 8px;"><strong style="color: var(--text-1);">Keyword table</strong> — filterable/sortable. Filter by source, intent, min rating, or "only with image matches".</div>
-                <div style="margin-top: 8px;"><strong style="color: var(--text-1);">CSV export</strong> — one click, exports exactly the filtered set.</div>
-              </div>
-            </div>
+        <div class="empty" style="padding: 40px 12px; background: var(--bg-2); border: 1px dashed var(--line-2); border-radius: var(--radius); margin-bottom: var(--space-4);">
+          <div class="empty-icon">📈</div>
+          <strong>Pick a batch + SKU above</strong>
+          <div style="margin-top: 6px; color: var(--text-3); font-size: 12px;">
+            Analytics loads a per-SKU keyword deep-dive — hero metrics, prioritization scatter,<br>
+            distribution charts, keyword themes, content gaps, and a full sortable table.
           </div>
         </div>
       </div>
@@ -426,31 +407,30 @@
       </div>
 
       <!-- ─── LAYER: PRIORITIZE — what to act on first ─────────────── -->
+      <!-- Scatter is the visual centerpiece: full-width, tall, so users
+           can actually see the quick-wins quadrant. Top-10 bar chart
+           lives BELOW as a companion ranking. -->
       <div id="anLayerPrioritize" class="an-layer" style="display:none;">
         <div class="an-layer-head">🎯 Prioritize <span class="an-layer-hint">what to target first</span></div>
-        <div class="two-col">
-          <!-- Scatter plot: Score vs demand — the quick-wins quadrant. -->
+        <div class="card">
+          <div class="card-head">
+            <span class="card-icon">💎</span>
+            <span class="card-title" id="anScatterTitle">Quick-wins quadrant</span>
+            <span class="card-sub" id="anScatterSub">—</span>
+          </div>
+          <div class="card-body">
+            <div id="anScatter" class="scatter-full"></div>
+          </div>
+        </div>
+        <div id="anTopChartCard" style="display:none;">
           <div class="card">
             <div class="card-head">
-              <span class="card-icon">💎</span>
-              <span class="card-title" id="anScatterTitle">Quick-wins quadrant</span>
-              <span class="card-sub" id="anScatterSub">—</span>
+              <span class="card-icon">🏆</span>
+              <span class="card-title">Top 10 by opportunity score</span>
+              <span class="card-sub" id="anTopChartSub">—</span>
             </div>
             <div class="card-body">
-              <div id="anScatter"></div>
-            </div>
-          </div>
-          <!-- Top-10 bar chart (moved from below — belongs in prioritize layer). -->
-          <div id="anTopChartCard" style="display:none;">
-            <div class="card">
-              <div class="card-head">
-                <span class="card-icon">🏆</span>
-                <span class="card-title">Top 10 by opportunity score</span>
-                <span class="card-sub" id="anTopChartSub">—</span>
-              </div>
-              <div class="card-body">
-                <div id="anTopChart"></div>
-              </div>
+              <div id="anTopChart"></div>
             </div>
           </div>
         </div>

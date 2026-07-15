@@ -1102,7 +1102,7 @@ async function run() {
   assert(cssBody.includes('.gap-list'),                           '20s.68 gap-list CSS defined');
   assert(html.includes('id="anCopyKwBtn"'),                       '20s.69 Copy top keywords button in HTML');
   assert(appJs.body.includes('anCopyKwBtn'),                      '20s.70 Copy top keywords wired');
-  assert(appJs.body.includes('dq-badge'),                         '20s.71 DQ badge injected in SKU preview');
+  assert(appJs.body.includes('DQ '),                              '20s.71 DQ grade now lives in the hero (moved from picker preview)');
   assert(cssBody.includes('.dq-badge'),                           '20s.72 DQ badge CSS defined');
   // Column-group toggles + full export-parity column set.
   assert(appJs.body.includes('KEYWORD_COL_DEFS'),                 '20s.73 KEYWORD_COL_DEFS defined');
@@ -1183,6 +1183,12 @@ async function run() {
   assert(appFull.includes('renderAnalyticsHero(source)'),     'DS.21 analytics hero called in filter pipeline');
   assert(cssFull.includes('.an-hero-product'),                'DS.22 analytics hero product strip styled');
   assert(cssFull.includes('@keyframes cardIn'),               'DS.23 card entry animation defined');
+  // Dedup pass: old summary tiles no longer called; slim SKU preview.
+  assert(!/^\s*renderAnalyticsSummary\(source\);/m.test(appFull), 'DS.24 renderAnalyticsSummary not called in main pipeline (dedup with hero)');
+  assert(appFull.includes('Full stats appear in the hero below'), 'DS.25 slim SKU preview when SKU picked (hero owns identity)');
+  assert(cssFull.includes('.scatter-full'),                        'DS.26 full-width scatter variant defined');
+  assert(htmlFull.includes('scatter-full'),                        'DS.27 scatter uses full-width layout');
+  assert(/\.card-title\s*\{[\s\S]{0,120}font-size:\s*var\(--text-md\)/.test(cssFull), 'DS.28 unified card-title sizing');
 
   // ===== FLEET FIXES: quota, stale claims, per-SKU flush, co-brand =====
   const mfFleet = readFileSync(resolve(REPO, 'manifest.json'), 'utf-8');
