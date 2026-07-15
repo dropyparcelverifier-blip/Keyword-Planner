@@ -1840,54 +1840,13 @@ function renderBatchPreview() {
 function renderSkuPreview() {
   const el = $('anSkuPreview');
   if (!el) return;
-  if (!analytics.sku) { el.innerHTML = `<span style="color:var(--text-3);">Pick a SKU (or leave blank for all-batch view).</span>`; return; }
-  const rows = analytics.allRows.filter(r => (r.sku || r.product_url) === analytics.sku);
-  if (rows.length === 0) { el.innerHTML = `<span style="color:var(--text-3);">No rows for this SKU yet.</span>`; return; }
-  const ctx = rows.find(r => r.product_name) || rows[0];
-  const scored = rows.map(r => ({ ...r, __s: opportunityScore(r) }));
-  const topScore = Math.max(...scored.map(r => r.__s || 0), 0);
-  const highIntent = rows.filter(r => String(r.buying_intent || '').toLowerCase() === 'high').length;
-  const withImg = rows.filter(r => (toNum(r.image_count) || 0) > 0).length;
-  const withVol = rows.filter(r => (toNum(r.kp_monthly_searches) || 0) > 0).length;
-  const target = rows.length < 100 ? '<span style="color:var(--warn);">⚠ below 100</span>'
-               : rows.length > 300 ? '<span style="color:var(--info);">above 300</span>'
-               : '<span style="color:var(--success);">✓ in 100–300</span>';
-  const productUrl = ctx.product_url || '';
-  const productLink = productUrl
-    ? `&nbsp;·&nbsp;<a href="${esc(productUrl)}" target="_blank" rel="noopener" style="color:var(--accent);">📦 open product</a>`
-    : '';
-
-  // Composite data-quality badge. Scores each dimension 0-2, gives an
-  // overall grade so users know at-a-glance whether to trust the analytics
-  // or fix data first (missing KP is the biggest degrader).
-  let dq = 0;
-  const volPct = Math.round((withVol / rows.length) * 100);
-  const imgPct = Math.round((withImg / rows.length) * 100);
-  const highPct = Math.round((highIntent / rows.length) * 100);
-  if (rows.length >= 100)  dq += 2; else if (rows.length >= 50) dq += 1;
-  if (volPct   >= 50) dq += 2; else if (volPct   >= 20) dq += 1;
-  if (imgPct   >= 30) dq += 2; else if (imgPct   >= 10) dq += 1;
-  if (highPct  >= 20) dq += 2; else if (highPct  >= 10) dq += 1;
-  // dq is out of 8. Grade A/B/C/D.
-  const grade = dq >= 7 ? { l: 'A', c: 'var(--success)', t: 'Trustworthy — full signal set' }
-              : dq >= 5 ? { l: 'B', c: 'var(--accent)',  t: 'Solid — most signals present' }
-              : dq >= 3 ? { l: 'C', c: 'var(--warn)',    t: 'Partial — some signals missing' }
-              :           { l: 'D', c: 'var(--danger)',  t: 'Thin — analytics may mislead; enable KP backfill / broaden discovery' };
-  const badge = `<span class="dq-badge" style="background:${grade.c}20; color:${grade.c}; border-color:${grade.c};" title="Data quality: ${esc(grade.t)}">DQ&nbsp;${grade.l}</span>`;
-
-  el.innerHTML = `
-    <div style="display:flex; justify-content:space-between; align-items:baseline; gap:8px; margin-bottom: 4px;">
-      <div style="color:var(--text-1); font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(ctx.product_name || '')}">${esc(ctx.product_name || analytics.sku)}</div>
-      ${badge}
-    </div>
-    <div class="row-mini">
-      <span class="stat">keywords: <b>${rows.length}</b> ${target}</span>
-      <span class="stat">high-intent: <b style="color:var(--success);">${highIntent}</b></span>
-      <span class="stat">img-match: <b>${withImg}</b></span>
-      <span class="stat">KP vol: <b>${withVol}</b></span>
-      <span class="stat">top score: <b style="color:var(--accent);">${topScore.toFixed(1)}</b></span>
-      ${productLink}
-    </div>`;
+  // Product identity + DQ grade + open-product all live in the hero now
+  // (see renderAnalyticsHero). Keep this slot short so it just confirms
+  // the selection and doesn't compete for attention. When no SKU is
+  // picked, still nudge the user; when a SKU IS loaded, we hide the
+  // preview entirely to remove visual noise from the picker.
+  if (!analytics.sku) { el.style.display = ''; el.innerHTML = `<span style="color:var(--text-3);">Pick a SKU (or leave blank for all-batch view). Full stats appear in the hero below.</span>`; return; }
+  el.style.display = 'none';
 }
 
 // Search-as-you-type filters both dropdowns without shuffling the DOM tree
@@ -2339,7 +2298,11 @@ function filterAndRenderAnalytics() {
   renderActiveFiltersBar();
   renderAnalyticsHero(source);
   renderExecutiveSummary(source, filtered);
-  renderAnalyticsSummary(source);
+  // NOTE: renderAnalyticsSummary intentionally REMOVED — it duplicated
+  // metrics that now live in the hero (keywords / image-match / avg
+  // opportunity / KP-vol) plus source+intent chips that Insights already
+  // shows via donut chart + intent-mix chips. Kept as a function for
+  // any future consumers; not called on the main pipeline.
   renderAnalyticsInsights(source, filtered);
   renderScatter(source);
   renderSourceDonut(source);
@@ -2354,6 +2317,8 @@ function filterAndRenderAnalytics() {
    'anTableCard', 'anTopChartCard'].forEach(id => {
     const el = $(id); if (el) el.style.display = show;
   });
+  // Hide the empty-state placeholder once data is on-screen.
+  const emptyEl = $('anSummary'); if (emptyEl) emptyEl.style.display = source.length > 0 ? 'none' : '';
   $('anExportBtn').disabled = filtered.length === 0;
   const claudeBtn = $('anClaudeBtn');
   if (claudeBtn) claudeBtn.disabled = source.length === 0;
@@ -3138,7 +3103,11 @@ function renderAnalyticsInsights(sourceRows, filteredRows) {
       </div>`;
   }).join('');
 
-  // Render.
+  // Render. The KP-coverage + image-match tiles that used to live here
+  // are now in the hero — showing them again in Insights was pure
+  // duplication. We keep the two ACTIONABLE tiles (low-comp+high-vol
+  // opportunities + dropy-already-listed count) because those aren't
+  // in the hero and drive concrete next actions.
   el.innerHTML = `
     <div class="tiles" style="margin-bottom: 10px;">
       <div class="tile ${lowCompHighVol > 0 ? 'success' : ''}">
@@ -3150,16 +3119,6 @@ function renderAnalyticsInsights(sourceRows, filteredRows) {
         <div class="lbl">We're already listed on</div>
         <div class="val">${dropySellerRows}</div>
         <div style="font-size:10px; color:var(--text-2); margin-top:2px;">dropy.in on SERP</div>
-      </div>
-      <div class="tile ${kpCoveragePct >= 60 ? 'success' : kpCoveragePct >= 30 ? 'warn' : ''}">
-        <div class="lbl">KP metric coverage</div>
-        <div class="val">${kpCoveragePct}%</div>
-        <div style="font-size:10px; color:var(--text-2); margin-top:2px;">${kpMetric}/${total} rows have Volume</div>
-      </div>
-      <div class="tile ${imgCoveragePct >= 30 ? 'success' : ''}">
-        <div class="lbl">Image-match coverage</div>
-        <div class="val">${imgCoveragePct}%</div>
-        <div style="font-size:10px; color:var(--text-2); margin-top:2px;">${withImg}/${total} rows have hits</div>
       </div>
       ${skuCoverageBlock}
     </div>
