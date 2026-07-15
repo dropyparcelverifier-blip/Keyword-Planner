@@ -48,6 +48,7 @@ export const api = {
   jobsActiveBatch:   ()                => _fetch('/api/jobs/active-batch'),
   jobsRequeue:       (jobId)           => _fetch('/api/jobs/requeue', { method: 'POST', body: { jobId } }),
   jobsReleaseStale:  (staleMinutes)    => _fetch('/api/jobs/release-stale', { method: 'POST', body: { staleMinutes } }),
+  jobsReleaseByWorker: (workerId)      => _fetch('/api/jobs/release-by-worker', { method: 'POST', body: { workerId } }),
   keywordsGet:       (batchId)         => _fetch(`/api/keywords?batchId=${encodeURIComponent(batchId)}`),
   activityGet:       (batchId, limit, workerId) => _fetch(`/api/activity?batchId=${encodeURIComponent(batchId || '')}&limit=${limit || 120}${workerId ? `&workerId=${encodeURIComponent(workerId)}` : ''}`),
   activityErrors:    (batchId, limit) => _fetch(`/api/activity?batchId=${encodeURIComponent(batchId || '')}&limit=${limit || 60}&level=err`),
