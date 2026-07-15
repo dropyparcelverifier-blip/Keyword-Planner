@@ -63,6 +63,8 @@ export const api = {
   requeueAllFailed:  (batchId)         => _fetch('/api/jobs/requeue-all-failed', { method: 'POST', body: { batchId: batchId || '' } }),
   keywordsTimeline:  (batchId)         => _fetch(`/api/keywords/timeline${batchId ? `?batchId=${encodeURIComponent(batchId)}` : ''}`),
   keywordsBatches:   ()                => _fetch('/api/keywords/batches'),
+  keywordsOrphans:   ()                => _fetch('/api/keywords/orphans'),
+  cleanupOrphans:    ()                => _fetch('/api/keywords/cleanup-orphans', { method: 'POST', body: { confirm: 'CLEAN_ORPHANS' } }),
 };
 
 // Live keyword stats — mirrors the extension's dashboard fetchBatchKeywordStats.

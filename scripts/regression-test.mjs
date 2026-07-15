@@ -859,6 +859,34 @@ async function run() {
   assert(appJs.body.includes('Worker offline'),       '20m.18 emits toast when worker goes silent');
   assert(appJs.body.includes('Batch complete'),       '20m.19 emits toast when batch finishes');
 
+  // ===== 20n. ORPHAN KEYWORD MANAGEMENT =====
+  // /api/keywords/batches lists every batch that has keyword rows
+  const kwB = await req('GET', '/api/keywords/batches');
+  assertEq(kwB.status, 200, '20n.1 GET /api/keywords/batches 200');
+  assert(Array.isArray(kwB.data.batches), '20n.2 batches array returned');
+  // /api/keywords/orphans preflight
+  const orph = await req('GET', '/api/keywords/orphans');
+  assertEq(orph.status, 200, '20n.3 GET /api/keywords/orphans 200');
+  assert('orphanRows' in orph.data, '20n.4 orphanRows count returned');
+  assert('claimedNow' in orph.data, '20n.5 claimedNow (in-flight) returned');
+  assert('activeWorkers' in orph.data, '20n.6 activeWorkers returned');
+  // Create an orphan: push a keyword with a batch_id that has no jobs
+  await req('POST', '/api/keywords', { rows: [{ batch_id: 'ghost-batch-xyz', keyword: 'ghost', product_url: 'https://x' }] });
+  const orph2 = await req('GET', '/api/keywords/orphans');
+  assert(orph2.data.orphanRows >= 1, '20n.7 orphan row detected after synthetic push');
+  // Cleanup requires confirm string
+  const cleanNo = await req('POST', '/api/keywords/cleanup-orphans', {});
+  assertEq(cleanNo.status, 400, '20n.8 cleanup requires confirm string');
+  // With confirm, orphans are wiped
+  const cleanOK = await req('POST', '/api/keywords/cleanup-orphans', { confirm: 'CLEAN_ORPHANS' });
+  assertEq(cleanOK.status, 200, '20n.9 cleanup with correct confirm 200');
+  assert(cleanOK.data.deleted >= 1, '20n.10 cleanup reports deleted count');
+  // UI wiring
+  assert(idx.body.includes('id="cleanupOrphansBtn"'), '20n.11 cleanup button in Config');
+  assert(idx.body.includes('id="orphanCountSub"'),    '20n.12 orphan-count subtitle element');
+  assert(appJs.body.includes('refreshOrphanCount'),   '20n.13 refreshOrphanCount() defined');
+  assert(appJs.body.includes('WORK IN PROGRESS DETECTED'), '20n.14 reset-all preflight warns on active workers');
+
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
   const [s1, w1, a1] = await Promise.all([

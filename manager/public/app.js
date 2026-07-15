@@ -416,7 +416,7 @@ document.querySelectorAll('.tab').forEach(btn => {
     else stopDashPolling();
     if (btn.dataset.tab === 'upload') refreshUploadSidebar();
     if (btn.dataset.tab === 'analytics') refreshAnalyticsTab();
-    if (btn.dataset.tab === 'config') loadConfigForm();
+    if (btn.dataset.tab === 'config') { loadConfigForm(); refreshOrphanCount(); }
     if (btn.dataset.tab === 'workers') refreshWorkersTab();
     if (btn.dataset.tab === 'downloads') refreshDownloadsTab();
   });
@@ -1187,7 +1187,23 @@ $('resetConfirmInput').addEventListener('input', () => {
 });
 $('resetAllBtn').addEventListener('click', async () => {
   if ($('resetConfirmInput').value !== 'RESET') return;
-  if (!confirm('LAST WARNING — this wipes every batch, every keyword row, every activity entry, every command. Only worker config (KP URL, token, pacing) is preserved. Continue?')) return;
+  // Preflight: check for active workers and in-flight jobs. If either is
+  // non-zero, we'll create orphan keyword rows (workers push results after
+  // reset with old batch_ids). Warn explicitly with counts.
+  let preflight = null;
+  try { preflight = await api.keywordsOrphans(); } catch {}
+  let msg = 'LAST WARNING — this wipes every batch, every keyword row, every activity entry, every command. Only worker config (KP URL, token, pacing) is preserved. Continue?';
+  if (preflight && (preflight.activeWorkers > 0 || preflight.claimedNow > 0)) {
+    msg = `⚠ WORK IN PROGRESS DETECTED\n\n`
+        + `- Active workers (heartbeat < 3 min): ${preflight.activeWorkers}\n`
+        + `- Jobs currently claimed (in-flight): ${preflight.claimedNow}\n\n`
+        + `If you reset NOW, those workers will keep processing locally and push their `
+        + `results with the old batch_id → creating orphan keyword rows.\n\n`
+        + `RECOMMENDED: click 'Stop' or 'Release claims' on each worker in the Dashboard `
+        + `first, wait 30-60s for them to quiesce, THEN reset.\n\n`
+        + `Continue with the reset anyway?`;
+  }
+  if (!confirm(msg)) return;
   try {
     const r = await api.resetAll();
     const msg = `${r.deletedJobs} jobs, ${r.deletedKeywords} keywords, ${r.deletedActivity} activity, ${r.deletedCommands} commands.`;
@@ -1197,6 +1213,37 @@ $('resetAllBtn').addEventListener('click', async () => {
     $('resetAllBtn').disabled = true;
     await loadConfigForm();
   } catch (e) { setResult($('resetAllResult'), `Reset failed: ${e.message}`, 'err'); toast(e.message, 'err', { title: 'Reset failed' }); }
+});
+// Orphan-keywords cleanup — refreshes count on tab open + on button click.
+async function refreshOrphanCount() {
+  const sub = $('orphanCountSub');
+  const btn = $('cleanupOrphansBtn');
+  if (!sub || !btn) return;
+  try {
+    const r = await api.keywordsOrphans();
+    if (r.orphanRows > 0) {
+      sub.textContent = `${r.orphanRows.toLocaleString()} row(s) across ${r.orphanBatches} batch(es)`;
+      sub.style.color = 'var(--warn)';
+      btn.disabled = false;
+    } else {
+      sub.textContent = 'none — DB is clean';
+      sub.style.color = 'var(--success)';
+      btn.disabled = true;
+    }
+  } catch (e) { sub.textContent = 'error'; }
+}
+$('refreshOrphansBtn')?.addEventListener('click', refreshOrphanCount);
+$('cleanupOrphansBtn')?.addEventListener('click', async () => {
+  if (!confirm('Delete every orphan keyword row? This cannot be undone. Download them first from the Downloads tab if you need the data.')) return;
+  try {
+    const r = await api.cleanupOrphans();
+    setResult($('cleanupOrphansResult'), `✓ Deleted ${r.deleted.toLocaleString()} orphan row(s).`, 'ok');
+    toast(`${r.deleted} orphan keyword row(s) deleted`, 'ok', { title: 'Cleaned' });
+    refreshOrphanCount();
+  } catch (e) {
+    setResult($('cleanupOrphansResult'), `Cleanup failed: ${e.message}`, 'err');
+    toast(e.message, 'err', { title: 'Cleanup failed' });
+  }
 });
 $('cleanupBtn').addEventListener('click', async () => {
   const logDays = parseInt($('cleanupLogDays').value, 10) || 0;

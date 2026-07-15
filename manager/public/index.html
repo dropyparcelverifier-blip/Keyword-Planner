@@ -440,6 +440,22 @@
         </div>
       </div>
 
+      <div class="card collapsible">
+        <div class="card-head">
+          <span class="card-icon">🧽</span>
+          <span class="card-title">Clean orphan keyword rows</span>
+          <span class="card-sub" id="orphanCountSub">—</span>
+        </div>
+        <div class="card-body">
+          <div class="hint">Orphans are keyword rows whose <code>batch_id</code> no longer has any jobs — typically because a reset ran while workers were still pushing results. They're still viewable/downloadable via the Analytics + Downloads tabs but can safely be cleaned once you've grabbed what you need.</div>
+          <div class="row" style="margin-top: 10px;">
+            <button id="cleanupOrphansBtn" class="danger" disabled>🧽 Clean orphan keywords</button>
+            <button id="refreshOrphansBtn" class="secondary">Recount</button>
+          </div>
+          <div id="cleanupOrphansResult"></div>
+        </div>
+      </div>
+
       <div class="card collapsible collapsed">
         <div class="card-head">
           <span class="card-icon">🧹</span>
