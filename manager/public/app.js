@@ -1253,6 +1253,11 @@ async function refreshDownloadsTab() {
     const s = await api.jobsSummary();
     state.batches = s.batches || [];
     populateBatchSelects();
+    // Auto-select the only batch when there's exactly one, same as Analytics.
+    const dSel = $('downloadBatchSelect');
+    if (dSel && !dSel.value && state.batches.length === 1) {
+      dSel.value = state.batches[0].batch_id;
+    }
     if (state.batches.length === 0) {
       sub.textContent = '0';
       body.innerHTML = `<div class="empty" style="padding: 20px 8px;">
@@ -1357,6 +1362,13 @@ async function refreshAnalyticsTab() {
     state.batches = s.batches || [];
     populateBatchSelects();
     if (analytics.batchId && $('anBatchSelect')) $('anBatchSelect').value = analytics.batchId;
+    // Auto-select: if there's exactly one batch and none is chosen yet,
+    // pick it. Removes the confusing "Waiting for input" empty state
+    // when there's only one obvious batch to look at.
+    if (!analytics.batchId && state.batches.length === 1) {
+      analytics.batchId = state.batches[0].batch_id;
+      if ($('anBatchSelect')) $('anBatchSelect').value = analytics.batchId;
+    }
   } catch {}
   if (analytics.batchId) await loadAnalyticsBatch(analytics.batchId);
 }
@@ -1417,7 +1429,13 @@ async function loadAnalyticsBatch(batchId) {
     ).join('');
     // If we previously had a SKU selected and it still exists, keep it.
     if (analytics.sku && bySku.has(analytics.sku)) $('anSkuSelect').value = analytics.sku;
-    else analytics.sku = '';
+    else {
+      // Auto-pick the most-productive SKU (top of skuList, already sorted
+      // desc by row count) so users see analytics immediately instead of
+      // a placeholder telling them to pick a SKU.
+      analytics.sku = skuList[0]?.key || '';
+      if ($('anSkuSelect')) $('anSkuSelect').value = analytics.sku;
+    }
   } catch (e) {
     summary.innerHTML = `<div class="banner err">Failed to load: ${esc(e.message)}</div>`;
     return;
