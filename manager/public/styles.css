@@ -422,6 +422,54 @@ button.small { padding: 4px 10px; font-size: 11px; }
 .tbl.compact td { padding: 3px 6px; }
 .tbl.compact td .chip { padding: 1px 6px; font-size: 9px; }
 
+/* Data-quality badge — A/B/C/D grade shown in the SKU picker preview.
+   Border is 1px of the tone color; background is a soft variant. */
+.dq-badge {
+  display: inline-flex; align-items: center;
+  padding: 2px 8px; border-radius: var(--radius-pill);
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  letter-spacing: .5px; border: 1px solid transparent;
+  cursor: help; flex-shrink: 0;
+}
+
+/* Keyword theme rows — grid = [label][bar][count][best-kw][imgs]. */
+.theme-list { display: flex; flex-direction: column; gap: 4px; }
+.theme-row {
+  display: grid;
+  grid-template-columns: 200px 1fr 80px minmax(0, 2fr) 70px;
+  gap: 10px; align-items: center;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.theme-row:not(.head):hover { background: var(--bg-3); }
+.theme-row.head {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .5px;
+  color: var(--text-3); padding: 4px 10px;
+  border-bottom: 1px solid var(--line-1); margin-bottom: 2px;
+}
+.theme-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.theme-bar-wrap { background: var(--bg-input); border-radius: 3px; height: 10px; overflow: hidden; }
+.theme-bar { height: 100%; transition: width 200ms; }
+.theme-count { font-family: var(--mono); font-size: 11px; text-align: right; }
+.theme-top { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11px; }
+.theme-top a { color: var(--text-1); text-decoration: none; }
+.theme-top a:hover { color: var(--accent); text-decoration: underline; }
+.theme-top-score { margin-left: 6px; font-weight: 600; }
+.theme-imgs { font-family: var(--mono); font-size: 11px; text-align: right; color: var(--text-2); }
+@media (max-width: 900px) {
+  .theme-row { grid-template-columns: 1fr; gap: 4px; }
+  .theme-row.head { display: none; }
+}
+
+/* Content-gap list — question queries as an ordered actionable list. */
+.gap-list { padding-left: 20px; margin: 0; }
+.gap-list li { padding: 4px 0; border-bottom: 1px solid var(--line-1); font-size: 13px; }
+.gap-list li:last-child { border-bottom: none; }
+.gap-list li a { color: var(--text-1); text-decoration: none; }
+.gap-list li a:hover { color: var(--accent); text-decoration: underline; }
+.gap-list .gap-meta { display: inline-block; margin-left: 8px; font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+
 /* Inline "show N empty cols" toggle — reads as a link but is a button so
    we get keyboard focus + hit-target without loading a URL. */
 .tiny-link {

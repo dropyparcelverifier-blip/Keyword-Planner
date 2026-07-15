@@ -1734,8 +1734,30 @@ function renderSkuPreview() {
   const productLink = productUrl
     ? `&nbsp;·&nbsp;<a href="${esc(productUrl)}" target="_blank" rel="noopener" style="color:var(--accent);">📦 open product</a>`
     : '';
+
+  // Composite data-quality badge. Scores each dimension 0-2, gives an
+  // overall grade so users know at-a-glance whether to trust the analytics
+  // or fix data first (missing KP is the biggest degrader).
+  let dq = 0;
+  const volPct = Math.round((withVol / rows.length) * 100);
+  const imgPct = Math.round((withImg / rows.length) * 100);
+  const highPct = Math.round((highIntent / rows.length) * 100);
+  if (rows.length >= 100)  dq += 2; else if (rows.length >= 50) dq += 1;
+  if (volPct   >= 50) dq += 2; else if (volPct   >= 20) dq += 1;
+  if (imgPct   >= 30) dq += 2; else if (imgPct   >= 10) dq += 1;
+  if (highPct  >= 20) dq += 2; else if (highPct  >= 10) dq += 1;
+  // dq is out of 8. Grade A/B/C/D.
+  const grade = dq >= 7 ? { l: 'A', c: 'var(--success)', t: 'Trustworthy — full signal set' }
+              : dq >= 5 ? { l: 'B', c: 'var(--accent)',  t: 'Solid — most signals present' }
+              : dq >= 3 ? { l: 'C', c: 'var(--warn)',    t: 'Partial — some signals missing' }
+              :           { l: 'D', c: 'var(--danger)',  t: 'Thin — analytics may mislead; enable KP backfill / broaden discovery' };
+  const badge = `<span class="dq-badge" style="background:${grade.c}20; color:${grade.c}; border-color:${grade.c};" title="Data quality: ${esc(grade.t)}">DQ&nbsp;${grade.l}</span>`;
+
   el.innerHTML = `
-    <div style="color:var(--text-1); font-weight:600; margin-bottom: 4px;" title="${esc(ctx.product_name || '')}">${esc(ctx.product_name || analytics.sku)}</div>
+    <div style="display:flex; justify-content:space-between; align-items:baseline; gap:8px; margin-bottom: 4px;">
+      <div style="color:var(--text-1); font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(ctx.product_name || '')}">${esc(ctx.product_name || analytics.sku)}</div>
+      ${badge}
+    </div>
     <div class="row-mini">
       <span class="stat">keywords: <b>${rows.length}</b> ${target}</span>
       <span class="stat">high-intent: <b style="color:var(--success);">${highIntent}</b></span>
@@ -1946,6 +1968,23 @@ function openClaudePromptModal() {
   $('claudeModal').style.display = 'flex';
 }
 $('anClaudeBtn')?.addEventListener('click', openClaudePromptModal);
+// Copy top-N keywords (scored, deduped, one per line). N = 25 by default —
+// enough to seed an ad group or meta-keywords block without dumping the
+// whole 480-row pool.
+$('anCopyKwBtn')?.addEventListener('click', async () => {
+  const rows = analytics.sku
+    ? analytics.allRows.filter(r => (r.sku || r.product_url) === analytics.sku)
+    : analytics.allRows;
+  if (rows.length === 0) { toast('No keywords to copy.', 'warn'); return; }
+  const N = 25;
+  const scored = rows.map(r => ({ kw: r.keyword, s: opportunityScore(r) }))
+    .filter(r => r.kw)
+    .sort((a, b) => b.s - a.s)
+    .slice(0, N);
+  const text = scored.map(r => r.kw).join('\n');
+  try { await navigator.clipboard.writeText(text); toast(`${scored.length} top keyword(s) copied.`, 'ok', { title: 'Copied' }); }
+  catch { toast('Copy failed.', 'err'); }
+});
 $('claudeCopyBtn')?.addEventListener('click', async () => {
   const t = $('claudePromptText').value;
   try { await navigator.clipboard.writeText(t); toast('Prompt copied — paste into Claude.', 'ok', { title: 'Copied' }); }
@@ -2069,6 +2108,8 @@ function filterAndRenderAnalytics() {
   renderExecutiveSummary(source, filtered);
   renderAnalyticsSummary(source);
   renderAnalyticsInsights(source, filtered);
+  renderThemesCard(source);
+  renderContentGaps(source);
   renderAnalyticsTopChart(filtered);
   renderAnalyticsTable(filtered);
 
@@ -2076,9 +2117,175 @@ function filterAndRenderAnalytics() {
   $('anTableCard').style.display    = source.length > 0 ? '' : 'none';
   $('anTopChartCard').style.display = source.length > 0 ? '' : 'none';
   $('anInsightsCard').style.display = source.length > 0 ? '' : 'none';
+  $('anThemesCard').style.display   = source.length > 0 ? '' : 'none';
+  $('anGapCard').style.display      = source.length > 0 ? '' : 'none';
   $('anExportBtn').disabled = filtered.length === 0;
   const claudeBtn = $('anClaudeBtn');
   if (claudeBtn) claudeBtn.disabled = source.length === 0;
+  const copyKwBtn = $('anCopyKwBtn');
+  if (copyKwBtn) copyKwBtn.disabled = source.length === 0;
+}
+
+// ─────────── Keyword theme clustering ───────────
+// Each theme carries a match predicate + display metadata. Order matters —
+// first-match wins so more-specific themes ("questions") beat generic ones
+// ("informational") when a keyword fits both.
+const KW_THEMES = [
+  { key: 'questions',     icon: '❓', label: 'Questions',            color: '#f59e0b',
+    test: (kw) => /^(what|how|why|when|where|is|are|does|do|can|should|which|will|has|have)\b/.test(kw) || /\?$/.test(kw) },
+  { key: 'price',         icon: '💰', label: 'Price / cost / deals', color: '#22c55e',
+    test: (kw) => /\b(price|cost|cheap|deal|offer|discount|buy|sale|₹|rs\.?|inr|amazon|flipkart|nykaa|myntra)\b/.test(kw) },
+  { key: 'ingredients',   icon: '🧪', label: 'Ingredients / composition', color: '#8b5cf6',
+    test: (kw) => /\b(ingredient|ingredients|composition|contains|made of|formula|active|toxic|safe|natural|organic|paraben|sulfate|vegan|gluten)\b/.test(kw) },
+  { key: 'howto',         icon: '📖', label: 'How to use / instructions', color: '#06b6d4',
+    test: (kw) => /\b(how to|how do|how does|use|apply|application|routine|steps|instruction|direction|dose|dosage|amount)\b/.test(kw) },
+  { key: 'reviews',       icon: '⭐', label: 'Reviews / ratings',    color: '#f43f5e',
+    test: (kw) => /\b(review|reviews|rating|ratings|feedback|testimonial|opinion|worth it|good|bad|best|top)\b/.test(kw) },
+  { key: 'comparison',    icon: '⚖️', label: 'Comparison / vs / alternative', color: '#ec4899',
+    test: (kw) => /\b(vs|versus|alternative|compare|comparison|dupe|substitute|similar)\b/.test(kw) },
+  { key: 'variants',      icon: '📦', label: 'Variants / sizes / packs', color: '#3b82f6',
+    test: (kw) => /\b(spf\s*\d+|\d+\s*(ml|g|gm|gram|oz|ounce|kg|pack|count|ct|tube|bottle|pcs|piece)|small|medium|large|xl|mini|big|jumbo|combo|refill)\b/.test(kw) },
+  { key: 'benefits',      icon: '✨', label: 'Benefits / effects',  color: '#10b981',
+    test: (kw) => /\b(for|benefit|effects|works|helps|treat|treatment|solve|reduce|remove|repair|heal|cure|prevent|glow|smooth|clear|dry|oily|sensitive)\b/.test(kw) },
+  { key: 'brand',         icon: '🏷️', label: 'Brand / competitor',  color: '#a855f7',
+    test: (kw, prodName) => {
+      // Anything that looks brand-y and doesn't contain the product name tokens.
+      const brand = /\b(cetaphil|aquaphor|listerine|neutrogena|olay|ponds|dove|nivea|lakme|maybelline|loreal|nykaa|mamaearth|plum|minimalist|dot ?& ?key|the derma co)\b/.test(kw);
+      return brand;
+    },
+  },
+  { key: 'location',      icon: '📍', label: 'India / location',   color: '#0ea5e9',
+    test: (kw) => /\b(india|indian|mumbai|delhi|bangalore|bengaluru|chennai|kolkata|hyderabad|pune|near me)\b/.test(kw) },
+];
+function clusterKeywordsByTheme(rows, productName) {
+  const buckets = new Map();
+  const uncategorized = [];
+  for (const r of rows) {
+    const kw = String(r.keyword || '').toLowerCase();
+    let hit = null;
+    for (const th of KW_THEMES) {
+      if (th.test(kw, productName)) { hit = th; break; }
+    }
+    if (hit) {
+      if (!buckets.has(hit.key)) buckets.set(hit.key, { theme: hit, rows: [] });
+      buckets.get(hit.key).rows.push(r);
+    } else {
+      uncategorized.push(r);
+    }
+  }
+  const out = Array.from(buckets.values());
+  if (uncategorized.length) out.push({ theme: { key: 'other', icon: '·', label: 'Uncategorized', color: '#64748b' }, rows: uncategorized });
+  out.sort((a, b) => b.rows.length - a.rows.length);
+  return out;
+}
+function renderThemesCard(rows) {
+  const el = $('anThemes');
+  const sub = $('anThemesSub');
+  if (!el) return;
+  if (!rows || rows.length === 0) { el.innerHTML = ''; if (sub) sub.textContent = '—'; return; }
+  const ctx = rows.find(r => r.product_name) || rows[0];
+  const productName = String(ctx.product_name || '').toLowerCase();
+  const clusters = clusterKeywordsByTheme(rows, productName);
+  const total = rows.length;
+
+  // Distribution bar — one row per theme, sorted desc by count.
+  const maxCount = Math.max(...clusters.map(c => c.rows.length), 1);
+  const bars = clusters.map(c => {
+    const pct = Math.round((c.rows.length / total) * 100);
+    const width = Math.round((c.rows.length / maxCount) * 100);
+    // Best kw per theme by opportunity score.
+    const scored = c.rows.map(r => ({ ...r, __s: opportunityScore(r) })).sort((a, b) => b.__s - a.__s);
+    const top = scored[0];
+    const topKw = top ? top.keyword : '';
+    const href = top ? (top.serp_url || `https://www.google.com/search?q=${encodeURIComponent(topKw)}&gl=in`) : '#';
+    const avgImg = c.rows.reduce((s, r) => s + (toNum(r.image_count) || 0), 0) / c.rows.length;
+    return `
+      <div class="theme-row" data-theme="${c.theme.key}">
+        <div class="theme-name" style="color:${c.theme.color};">
+          <span style="font-size:14px;">${c.theme.icon}</span>&nbsp;<strong>${esc(c.theme.label)}</strong>
+        </div>
+        <div class="theme-bar-wrap">
+          <div class="theme-bar" style="width:${width}%; background:${c.theme.color};"></div>
+        </div>
+        <div class="theme-count"><strong>${c.rows.length}</strong><span style="opacity:.6;"> · ${pct}%</span></div>
+        <div class="theme-top" title="Best-scoring keyword in this theme">
+          ${top ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(topKw)}</a>` : '—'}
+          ${top ? `<span class="theme-top-score" style="color:${c.theme.color};">${top.__s.toFixed(1)}</span>` : ''}
+        </div>
+        <div class="theme-imgs" title="Average image matches in this theme">${avgImg > 0 ? '📷 ' + avgImg.toFixed(1) : '—'}</div>
+      </div>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div class="theme-list">
+      <div class="theme-row head">
+        <div>Theme</div>
+        <div>Share</div>
+        <div>Rows</div>
+        <div>Best keyword in theme</div>
+        <div>Avg imgs</div>
+      </div>
+      ${bars}
+    </div>`;
+  if (sub) sub.textContent = `${clusters.length} theme(s) across ${total.toLocaleString()} keyword(s)`;
+}
+
+// ─────────── Content-gap card ───────────
+// Question-shaped queries + faq-flagged rows are surfaced as "questions
+// to answer on the product page". Deduped by lowercase form so PAA and
+// autosuggest variants don't repeat the same question twice.
+function renderContentGaps(rows) {
+  const el = $('anGap');
+  const sub = $('anGapSub');
+  if (!el) return;
+  if (!rows || rows.length === 0) { el.innerHTML = ''; if (sub) sub.textContent = '—'; return; }
+  const seen = new Set();
+  const gaps = [];
+  const isQuestion = (kw) => /^(what|how|why|when|where|is|are|does|do|can|should|which|will|has|have)\b/.test(kw) || /\?$/.test(kw);
+  for (const r of rows) {
+    const raw = String(r.keyword || '').trim();
+    if (!raw) continue;
+    const kw = raw.toLowerCase();
+    const flagged = String(r.faq || '').toLowerCase() === 'yes';
+    if (!isQuestion(kw) && !flagged) continue;
+    if (seen.has(kw)) continue;
+    seen.add(kw);
+    gaps.push({ ...r, __s: opportunityScore(r) });
+  }
+  gaps.sort((a, b) => b.__s - a.__s);
+  const topGaps = gaps.slice(0, 20);
+  if (topGaps.length === 0) {
+    el.innerHTML = `<div class="hint">No question-shaped queries in this SKU's research — the keyword pool is entirely commercial. Nothing to add to the FAQ block from this data.</div>`;
+    if (sub) sub.textContent = '0 gaps';
+    return;
+  }
+  el.innerHTML = `
+    <div class="hint" style="margin-bottom: 10px;">
+      ${topGaps.length} question${topGaps.length === 1 ? '' : 's'} from real search data — ideal seed material for an on-page FAQ block. Sorted by opportunity score. Click any to open the SERP and see how competitors answer.
+    </div>
+    <ol class="gap-list">${topGaps.map(g => {
+      const href = g.serp_url || `https://www.google.com/search?q=${encodeURIComponent(g.keyword)}&gl=in`;
+      const vol = toNum(g.kp_monthly_searches);
+      const tier = scoreTier(g.__s);
+      return `<li>
+        <a href="${esc(href)}" target="_blank" rel="noopener">${esc(g.keyword)}</a>
+        <span class="gap-meta">
+          <span style="color:${tier.color}; font-weight:600;">${g.__s.toFixed(1)}</span>
+          ${vol && vol > 0 ? `· ${vol.toLocaleString()} vol` : ''}
+          ${g.buying_intent ? `· ${esc(g.buying_intent)} intent` : ''}
+          ${(g.image_count || 0) > 0 ? `· 📷 ${g.image_count}` : ''}
+        </span>
+      </li>`;
+    }).join('')}</ol>
+    <div class="row" style="margin-top: 10px;">
+      <button id="anGapCopyBtn" class="small secondary" title="Copy all gap questions to clipboard, one per line. Paste into your Claude brief, FAQ builder, or content doc.">📋 Copy ${topGaps.length} question(s)</button>
+    </div>`;
+  $('anGapCopyBtn')?.addEventListener('click', async () => {
+    const text = topGaps.map(g => g.keyword).join('\n');
+    try { await navigator.clipboard.writeText(text); toast(`${topGaps.length} question(s) copied.`, 'ok'); }
+    catch { toast('Copy failed.', 'err'); }
+  });
+  if (sub) sub.textContent = `${topGaps.length} gap(s) · top ${Math.min(20, topGaps.length)} shown`;
 }
 
 // ─────────── Executive summary ───────────

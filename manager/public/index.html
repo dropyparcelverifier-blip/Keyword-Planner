@@ -268,6 +268,7 @@
         </div>
         <div class="picker-actions">
           <button class="small" id="anClaudeBtn" disabled title="Assemble a Claude prompt from this SKU's keyword research (title, subtitle, description, ingredients, how-to-use, FAQs, SEO, ad copy).">🤖 Claude listing brief</button>
+          <button class="small secondary" id="anCopyKwBtn" disabled title="Copy the top-scoring keywords to clipboard (one per line). Handy for meta-keywords, ad-group seeds, or dropping into another tool.">📋 Copy top keywords</button>
           <button class="small secondary" id="anExportBtn" disabled>📥 Export this SKU as CSV</button>
         </div>
       </div>
@@ -369,6 +370,37 @@
           </div>
           <div class="card-body">
             <div id="anInsights"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Keyword themes — groups the pool into 8-10 semantic buckets so
+           users see where demand is concentrated (price / ingredients /
+           how-to / reviews / questions / brand / variant / etc). -->
+      <div id="anThemesCard" style="display:none;">
+        <div class="card">
+          <div class="card-head">
+            <span class="card-icon">🎨</span>
+            <span class="card-title">Keyword themes — where demand is concentrated</span>
+            <span class="card-sub" id="anThemesSub">—</span>
+          </div>
+          <div class="card-body">
+            <div id="anThemes"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Content-gap card — questions from research that likely aren't
+           on the product page yet. Actionable list for the copy team. -->
+      <div id="anGapCard" style="display:none;">
+        <div class="card">
+          <div class="card-head">
+            <span class="card-icon">🕳️</span>
+            <span class="card-title">Content gaps — questions to answer on the product page</span>
+            <span class="card-sub" id="anGapSub">—</span>
+          </div>
+          <div class="card-body">
+            <div id="anGap"></div>
           </div>
         </div>
       </div>
