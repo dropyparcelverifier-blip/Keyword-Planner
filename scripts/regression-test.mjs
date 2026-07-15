@@ -1024,15 +1024,20 @@ async function run() {
   assert(appJs.body.includes('function opportunityScore'),  '20s.2 opportunityScore function defined');
   assert(appJs.body.includes('renderAnalyticsInsights'),    '20s.3 insights renderer defined');
   assert(html.includes('anInsightsCard'),                   '20s.4 insights card in HTML');
-  // Column ordering: Score < Keyword < Volume < Intent < ... < Source (Source moved to the end).
-  const colBlock = appJs.body.match(/const cols = \[[\s\S]{0,3000}?\];/)?.[0] || '';
+  // Column ordering — asserted against KEYWORD_COL_DEFS (grouped export
+  // set). Score/Keyword lead; Volume/Intent appear before AdRating in
+  // the natural on-screen order once KP + Core groups are enabled.
+  const colBlock = appJs.body.match(/const KEYWORD_COL_DEFS = \[[\s\S]{0,8000}?\];/)?.[0] || '';
   const posOf = (needle) => colBlock.indexOf(needle);
-  assert(posOf("'opportunity_score'") < posOf("'keyword'"),        '20s.5 Score before Keyword');
-  assert(posOf("'kp_monthly_searches'") < posOf("'ad_rating'"),    '20s.6 Volume before AdRating');
-  assert(posOf("'buying_intent'") < posOf("'ad_rating'"),          '20s.7 Intent before AdRating');
-  assert(posOf("'keyword_relevance'") > 0,                         '20s.8 keyword_relevance column added');
-  assert(posOf("'visibility_pct'") > 0,                            '20s.9 visibility_pct column added');
-  assert(posOf("'dropy_is_seller'") > 0,                           '20s.10 dropy_is_seller column added');
+  assert(posOf("key: 'opportunity_score'") < posOf("key: 'keyword'"),        '20s.5 Score before Keyword');
+  assert(posOf("key: 'buying_intent'") < posOf("key: 'ad_rating'"),          '20s.7 Intent before AdRating');
+  assert(posOf("key: 'keyword_relevance'") > 0,                              '20s.8 keyword_relevance column added');
+  assert(posOf("key: 'visibility_pct'") > 0,                                 '20s.9 visibility_pct column added');
+  assert(posOf("key: 'dropy_is_seller'") > 0,                                '20s.10 dropy_is_seller column added');
+  // KP columns live in the 'kp' group; volume must be defined even if it
+  // isn't strictly-before ad_rating in the raw def list (they're in
+  // different groups now — visible order depends on group toggle order).
+  assert(posOf("key: 'kp_monthly_searches'") > 0,                            '20s.6 Volume column defined (KP group)');
 
   // Visual/data polish.
   assert(appJs.body.includes('function toNum'),                   '20s.15 toNum() defined — NaN-safe numeric coercion');
@@ -1099,6 +1104,24 @@ async function run() {
   assert(appJs.body.includes('anCopyKwBtn'),                      '20s.70 Copy top keywords wired');
   assert(appJs.body.includes('dq-badge'),                         '20s.71 DQ badge injected in SKU preview');
   assert(cssBody.includes('.dq-badge'),                           '20s.72 DQ badge CSS defined');
+  // Column-group toggles + full export-parity column set.
+  assert(appJs.body.includes('KEYWORD_COL_DEFS'),                 '20s.73 KEYWORD_COL_DEFS defined');
+  assert(appJs.body.includes('KEYWORD_COL_GROUPS'),               '20s.74 KEYWORD_COL_GROUPS defined');
+  assert(appJs.body.includes('renderColumnGroupStrip'),           '20s.75 column-group strip renderer wired');
+  assert(html.includes('id="anColGroups"'),                       '20s.76 col-group strip container in HTML');
+  assert(cssBody.includes('.col-group-strip'),                    '20s.77 col-group CSS defined');
+  // Every export field the file emits should have a column entry.
+  const mustHaveCols = ['opportunity_score','keyword','buying_intent','keyword_relevance','ad_rating','source',
+                        'kp_monthly_searches','kp_competition','kp_bid_low','kp_bid_high',
+                        'image_count','total_thumbs','visibility_pct','link_verified_count','match_confidence_max',
+                        'total_sellers','ads_on_serp','dropy_is_seller','dropy_on_serp','top_match_seller','top_match_price','frequency',
+                        'amazon_rank','amazon_price','amazon_rating','amazon_reviews','amazon_suggest_count','amazon_total_results',
+                        'topic','funnel','faq','parent_keyword'];
+  for (const k of mustHaveCols) {
+    assert(new RegExp(`key: '${k}'`).test(appJs.body), `20s.col.${k} column defined for export-parity`);
+  }
+  // Groups persist to localStorage.
+  assert(appJs.body.includes("localStorage.setItem('adbrainAnGroups'"), '20s.78 group visibility persisted');
 
   // Cache-buster: index.html served with mtime-versioned asset URLs so
   // browsers can't hold onto a stale app.js/styles.css after a deploy.

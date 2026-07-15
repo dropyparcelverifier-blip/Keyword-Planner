@@ -426,6 +426,12 @@
             <span class="card-sub" id="anTableCount">—</span>
           </div>
           <div class="card-body">
+            <!-- Column group toggles — mirror the CSV/XLSX export layout so
+                 analytics has feature-parity with the file. Core columns
+                 (score/keyword/intent/relevance/adrating/source) are always
+                 on. Users click a group chip to reveal its columns; state
+                 persists to localStorage. -->
+            <div id="anColGroups" class="col-group-strip"></div>
             <div class="row" style="margin-bottom: 10px;">
               <input type="text" id="anSearch" placeholder="Filter keywords…" style="flex: 1; min-width: 220px;" />
               <select id="anSource" style="min-width: 150px;">

@@ -422,6 +422,39 @@ button.small { padding: 4px 10px; font-size: 11px; }
 .tbl.compact td { padding: 3px 6px; }
 .tbl.compact td .chip { padding: 1px 6px; font-size: 9px; }
 
+/* Column-group toggle strip above the keyword table. Each chip flips a
+   whole group of columns (KP metrics / Image match / Sellers / Amazon /
+   Meta). The Core chip is locked-on. Selected state uses the accent
+   color; unselected reads as a de-emphasized outline. */
+.col-group-strip {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-1);
+  border-radius: 6px;
+  margin-bottom: 10px;
+}
+.col-group {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: var(--radius-pill);
+  font-size: 11px; font-weight: 600;
+  border: 1px solid var(--line-2); background: transparent;
+  color: var(--text-2); cursor: pointer;
+  transition: all 120ms;
+}
+.col-group:hover:not(.locked) { border-color: var(--accent); color: var(--text-1); }
+.col-group.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.col-group.on:hover:not(.locked) { filter: brightness(1.1); }
+.col-group.locked { opacity: .95; cursor: not-allowed; background: var(--success-soft); color: var(--success); border-color: var(--success); }
+.col-group-count {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 16px; padding: 0 5px;
+  border-radius: 8px; background: rgba(0,0,0,0.2);
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+}
+.col-group.on .col-group-count { background: rgba(255,255,255,0.25); }
+.col-group.locked .col-group-count { background: rgba(56, 195, 121, 0.25); }
+
 /* Data-quality badge — A/B/C/D grade shown in the SKU picker preview.
    Border is 1px of the tone color; background is a soft variant. */
 .dq-badge {
