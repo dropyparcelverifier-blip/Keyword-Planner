@@ -152,13 +152,26 @@ body { min-height: 100vh; display: flex; flex-direction: column; }
 .drop-zone .sub { color: var(--text-2); font-size: 12px; margin-top: 4px; }
 .drop-zone input[type=file] { display: none; }
 
-/* Collapsible card — click head to toggle body */
-.card.collapsible .card-head { cursor: pointer; user-select: none; }
-.card.collapsible .card-head::after {
-  content: '▾'; margin-left: 8px; color: var(--text-3); transition: transform 160ms;
+/* Collapsible card — click head to toggle body. Whole header is a hit
+   target; hover lifts the chevron color so users see it's clickable. */
+.card.collapsible .card-head {
+  cursor: pointer; user-select: none;
+  transition: background var(--dur-fast) var(--ease);
 }
+.card.collapsible .card-head:hover { background: var(--bg-hover); }
+.card.collapsible .card-head::after {
+  content: '▾'; margin-left: var(--space-2);
+  color: var(--text-3);
+  font-size: 12px;
+  transition: transform var(--dur) var(--ease), color var(--dur-fast) var(--ease);
+  display: inline-block;
+}
+.card.collapsible .card-head:hover::after { color: var(--accent); }
 .card.collapsible.collapsed .card-head::after { transform: rotate(-90deg); }
 .card.collapsible.collapsed .card-body { display: none; }
+/* Collapsed cards have no bottom border on their head — reads as a
+   pill instead of a card-with-empty-body. */
+.card.collapsible.collapsed .card-head { border-bottom: none; }
 
 /* Two-column layout helper — sidebar right on wide, stacks on narrow */
 .two-col { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
