@@ -174,7 +174,10 @@ body { min-height: 100vh; display: flex; flex-direction: column; }
 .card.collapsible.collapsed .card-head { border-bottom: none; }
 
 /* Two-column layout helper — sidebar right on wide, stacks on narrow */
-.two-col { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); align-items: start; }
+/* Legacy two-col with sidebar ratio — kept as .two-col-side for the few
+   places that actually want a 2:1 (main + sidebar) split. */
+.two-col-side { display: grid; grid-template-columns: 2fr 1fr; gap: var(--space-3); align-items: start; }
 @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
 
 /* Info list — small right-hand sidebar of quick facts */
@@ -364,7 +367,7 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .row.tight { gap: 6px; }
 .col { display: flex; flex-direction: column; gap: 10px; }
-.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); align-items: start; }
 @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
 
 /* Empty state */
