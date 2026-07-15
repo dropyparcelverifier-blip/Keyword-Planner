@@ -361,7 +361,7 @@ async function run() {
   assertEq(idx.status, 200, '19.1 / returns 200 (serves index.html)');
   assert(idx.contentType.includes('text/html'), '19.2 / content-type is text/html');
   assert(idx.body.includes('AdBrain Manager'), '19.3 / body is the web app HTML');
-  assert(idx.body.includes('type="module" src="/public/app.js"'), '19.4 / loads app.js as module');
+  assert(/type="module" src="\/public\/app\.js(\?v=\d+)?"/.test(idx.body), '19.4 / loads app.js as module');
 
   const appJs = await fetchStatic('/public/app.js');
   assertEq(appJs.status, 200, '19.5 /public/app.js returns 200');
@@ -1086,6 +1086,15 @@ async function run() {
   // Compact tiles + primary-source aggregation.
   assert(cssBody.includes('.tiles.compact-tiles'),               '20s.54 compact-tiles CSS defined');
   assert(appJs.body.includes('primarySrc'),                      '20s.55 primary-source aggregation replaces combo chips');
+  // Cache-buster: index.html served with mtime-versioned asset URLs so
+  // browsers can't hold onto a stale app.js/styles.css after a deploy.
+  const idxServed = await fetchNoAuth('/');
+  assertEq(idxServed.status, 200,                                 '20s.56 root serves index.html');
+  assert(/href="\/public\/styles\.css\?v=\d+"/.test(idxServed.body),  '20s.57 styles.css URL carries ?v= cache-buster');
+  assert(/src="\/public\/app\.js\?v=\d+"/.test(idxServed.body),      '20s.58 app.js URL carries ?v= cache-buster');
+  const srv = readFileSync(resolve(REPO, 'manager/server.js'), 'utf-8');
+  assert(srv.includes('function assetVersion'),                    '20s.59 assetVersion() defined in server');
+  assert(srv.includes('mtimeMs'),                                  '20s.60 assetVersion uses file mtime');
 
   // Discovery engine: caps raised so per-SKU output hits 100-300.
   const kdSrcCaps = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
