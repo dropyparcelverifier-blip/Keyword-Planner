@@ -82,6 +82,35 @@ function setResult(el, msg, kind = 'info') {
 }
 
 // ─────────── Toast notifications ───────────
+// Shared clipboard write with HTTP fallback. navigator.clipboard is
+// undefined in non-secure contexts (this manager runs on http://tailnet-
+// IP:8787, not https), so relying on it silently broke every "Copy"
+// button on the LAN. Falls back to a hidden-textarea + execCommand copy
+// which works on HTTP. Returns true on success.
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through to legacy path */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = String(text);
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed; left:-9999px; top:0; opacity:0;';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 // Non-blocking pop-ups in the top-right corner. Auto-dismiss after 4s
 // unless kind==='err' (7s so users can read the error). Click × to close.
 function toast(msg, kind = 'info', opts = {}) {
@@ -1767,18 +1796,30 @@ $('genSetupBtn').addEventListener('click', async () => {
   $('setupCodeWarn').style.display = managerToken ? '' : 'none';
 });
 $('copySetupBtn').addEventListener('click', async () => {
-  try { await navigator.clipboard.writeText(state.setupCode); $('copySetupBtn').textContent = '✓ Copied'; setTimeout(() => $('copySetupBtn').textContent = 'Copy', 1500); }
-  catch { alert('Clipboard blocked. Select the code above and Ctrl+C.'); }
+  if (await copyToClipboard(state.setupCode)) {
+    $('copySetupBtn').textContent = '✓ Copied';
+    setTimeout(() => $('copySetupBtn').textContent = 'Copy', 1500);
+  } else {
+    alert('Clipboard blocked. Select the code above and Ctrl+C.');
+  }
 });
 $('copyInstallBtn')?.addEventListener('click', async () => {
   const cmd = $('installOneLiner').textContent;
-  try { await navigator.clipboard.writeText(cmd); $('copyInstallBtn').textContent = '✓ Copied'; setTimeout(() => $('copyInstallBtn').textContent = 'Copy', 1500); }
-  catch { alert('Clipboard blocked. Select the command and Ctrl+C manually.'); }
+  if (await copyToClipboard(cmd)) {
+    $('copyInstallBtn').textContent = '✓ Copied';
+    setTimeout(() => $('copyInstallBtn').textContent = 'Copy', 1500);
+  } else {
+    alert('Clipboard blocked. Select the command and Ctrl+C manually.');
+  }
 });
 $('copyUninstallBtn')?.addEventListener('click', async () => {
   const cmd = $('uninstallOneLiner').textContent;
-  try { await navigator.clipboard.writeText(cmd); $('copyUninstallBtn').textContent = '✓ Copied'; setTimeout(() => $('copyUninstallBtn').textContent = 'Copy', 1500); }
-  catch { alert('Clipboard blocked. Select the command and Ctrl+C manually.'); }
+  if (await copyToClipboard(cmd)) {
+    $('copyUninstallBtn').textContent = '✓ Copied';
+    setTimeout(() => $('copyUninstallBtn').textContent = 'Copy', 1500);
+  } else {
+    alert('Clipboard blocked. Select the command and Ctrl+C manually.');
+  }
 });
 $('sendCmdBtn').addEventListener('click', async () => {
   const workerId = $('cmdWorker').value || null;
@@ -2202,54 +2243,184 @@ function buildClaudeListingPrompt(skuRows) {
     return parts.join(' | ');
   };
 
+  // High-intent + question-shaped keyword pools — feeds specific sections
+  // of the prompt so the model has raw material for TITLE (high-intent),
+  // FAQs (questions), and SEO keywords (top-scored).
+  const highIntentPool = scored.filter(r => String(r.buying_intent || '').toLowerCase() === 'high').slice(0, 15);
+  const dropySellerRows = scored.filter(r => String(r.dropy_is_seller || '').toLowerCase() === 'yes').length;
+  const imgMatchRows    = scored.filter(r => (toNum(r.image_count) || 0) > 0).length;
+
   const lines = [];
-  lines.push('You are an expert e-commerce content strategist writing a Shopify product listing for Dropy.in (India, ₹).');
+
+  // ── ROLE ─────────────────────────────────────────────────────────
+  lines.push('# ROLE');
+  lines.push('You are a senior e-commerce copywriter and SEO strategist for **Dropy.in**, a Shopify store selling to India (INR, pan-India shipping). You write conversion-optimized product listings that rank organically AND perform in Google Search Ads. You are precise about facts (never fabricated), disciplined about keyword usage (natural, not stuffed), and result-oriented (every section serves a measurable purpose: rank, CTR, conversion, AOV).');
   lines.push('');
+
+  // ── PRODUCT ──────────────────────────────────────────────────────
   lines.push('# PRODUCT');
-  lines.push(`Name:        ${productName}`);
-  if (sku)        lines.push(`SKU:         ${sku}`);
-  if (productUrl) lines.push(`URL:         ${productUrl}`);
-  if (productImg) lines.push(`Image:       ${productImg}`);
-  if (batchId)    lines.push(`Research batch: ${batchId}`);
+  lines.push(`- **Name**: ${productName}`);
+  if (sku)        lines.push(`- **SKU**: \`${sku}\``);
+  if (productUrl) lines.push(`- **Live URL**: ${productUrl}`);
+  if (productImg) lines.push(`- **Hero image**: ${productImg}`);
+  if (batchId)    lines.push(`- **Research batch**: \`${batchId}\``);
   lines.push('');
-  lines.push('# RESEARCH SUMMARY');
-  lines.push(`- ${scored.length} keywords collected across sources: ${Object.entries(bySource).map(([k, v]) => `${k}:${v}`).join(', ')}`);
-  lines.push(`- Buying-intent mix: ${Object.entries(byIntent).map(([k, v]) => `${k}:${v}`).join(', ')}`);
-  if (volStat)   lines.push(`- KP monthly searches (n=${volStat.n}): min ${volStat.min}, median ${volStat.med}, max ${volStat.max}`);
-  else           lines.push('- KP monthly-search data: not available for this SKU (rely on relative Score + Image-match signal for demand ranking)');
-  if (bidStat)   lines.push(`- KP top-of-page bid ₹ (n=${bidStat.n}): min ${bidStat.min}, median ${bidStat.med}, max ${bidStat.max}  ← use for ads budgeting`);
-  if (priceStat) lines.push(`- Amazon.in observed prices ₹ (n=${priceStat.n}): min ${priceStat.min}, median ${priceStat.med}, max ${priceStat.max}  ← competitive price benchmark`);
-  if (topCompetitors.length) lines.push(`- Top competitor domains on SERPs: ${topCompetitors.map(([d, n]) => `${d}(${n})`).join(', ')}`);
+
+  // ── DATA PROVENANCE ──────────────────────────────────────────────
+  lines.push('# DATA PROVENANCE');
+  lines.push('This brief is built from real crawler data collected against Google.in SERPs, Google Keyword Planner (KP), Google autosuggest, People-Also-Ask, and Amazon.in search + autosuggest. Every number below is a measurement, not an estimate. Trust the data over your general knowledge of the product category.');
   lines.push('');
-  lines.push(`# TOP ${topN.length} OPPORTUNITY KEYWORDS (highest opportunity score first)`);
-  topN.forEach((r, i) => lines.push(`${String(i + 1).padStart(2, ' ')}. ${kwLine(r)}`));
+  lines.push(`| Signal | Coverage | Notes |`);
+  lines.push(`|---|---|---|`);
+  lines.push(`| Keywords collected      | **${scored.length}** rows | Target range 100–300 per SKU. |`);
+  lines.push(`| KP monthly-volume rows  | ${volStat ? `${volStat.n} / ${scored.length}` : '0 / ' + scored.length} | ${volStat ? `Range ${volStat.min}–${volStat.max}, median ${volStat.med}` : 'No KP volume data available. Weight relevance + image-match signals instead of demand estimates.'} |`);
+  lines.push(`| KP top-of-page bid ₹    | ${bidStat ? `${bidStat.n} rows, range ₹${bidStat.min}–${bidStat.max}, median ₹${bidStat.med}` : 'not available'} | ${bidStat ? 'Use as ads-budget benchmark.' : 'Fall back to Amazon-price band for pricing signal.'} |`);
+  lines.push(`| Image match (visual SERP presence) | ${imgMatchRows} / ${scored.length} rows | Our product image was visually detected on ${imgMatchRows} SERPs — proven organic visibility. |`);
+  lines.push(`| dropy.in listed as seller | ${dropySellerRows} SERPs | Existing marketplace positions to defend. |`);
+  lines.push(`| Amazon.in observed prices ₹ | ${priceStat ? `${priceStat.n} rows, range ₹${priceStat.min}–${priceStat.max}, median ₹${priceStat.med}` : 'not available'} | ${priceStat ? 'Anchor MRP + strike-through pricing within this band.' : ''} |`);
   lines.push('');
-  if (faqCandidates.length) {
-    lines.push('# QUESTION-SHAPED QUERIES (raw material for FAQ section)');
-    faqCandidates.forEach(r => lines.push(`- ${r.keyword}`));
+  lines.push('**Discovery mix** (which channels found the keywords):');
+  Object.entries(bySource).sort((a, b) => b[1] - a[1]).forEach(([k, v]) => {
+    const pct = Math.round((v / scored.length) * 100);
+    lines.push(`- \`${k}\`: ${v} rows (${pct}%)`);
+  });
+  lines.push('');
+  lines.push('**Buying-intent distribution**:');
+  ['high', 'medium', 'low', 'informational', 'unclassified'].forEach(k => {
+    if (byIntent[k]) {
+      const pct = Math.round((byIntent[k] / scored.length) * 100);
+      lines.push(`- **${k}**: ${byIntent[k]} rows (${pct}%)`);
+    }
+  });
+  lines.push('');
+  if (topCompetitors.length) {
+    lines.push('**Top competitor domains on our SERPs** (reference only — do NOT name them in copy):');
+    topCompetitors.forEach(([d, n]) => lines.push(`- \`${d}\` — ${n} appearances`));
     lines.push('');
   }
+
+  // ── TOP OPPORTUNITY KEYWORDS ─────────────────────────────────────
+  lines.push(`# TOP ${topN.length} OPPORTUNITY KEYWORDS`);
+  lines.push('Ranked by opportunity score (blends volume, competition, relevance, image-match, buying intent). Use in this priority order for TITLE, meta, and headings.');
+  lines.push('');
+  lines.push('| # | Keyword | Score | Vol/mo | KP comp | Intent | Imgs |');
+  lines.push('|---|---|---|---|---|---|---|');
+  topN.forEach((r, i) => {
+    const vol = toNum(r.kp_monthly_searches);
+    lines.push(`| ${i + 1} | ${r.keyword} | **${r.__s.toFixed(1)}** | ${vol && vol > 0 ? vol.toLocaleString() : '—'} | ${r.kp_competition || '—'} | ${r.buying_intent || '—'} | ${r.image_count || 0} |`);
+  });
+  lines.push('');
+
+  // ── HIGH-INTENT POOL ─────────────────────────────────────────────
+  if (highIntentPool.length) {
+    lines.push('# HIGH-INTENT KEYWORDS (commercial / transactional)');
+    lines.push('Reserve these for TITLE, first H2, and Google Ads headlines — they convert.');
+    lines.push('');
+    highIntentPool.forEach((r, i) => lines.push(`${i + 1}. ${r.keyword}`));
+    lines.push('');
+  }
+
+  // ── FAQ SEED MATERIAL ────────────────────────────────────────────
+  if (faqCandidates.length) {
+    lines.push('# QUESTION-SHAPED QUERIES (seed material for FAQ block)');
+    lines.push('These are real questions users searched. Answer them in the FAQ section — 1:1 mapping where possible so the page ranks for the exact query.');
+    lines.push('');
+    faqCandidates.forEach((r, i) => lines.push(`${i + 1}. ${r.keyword}`));
+    lines.push('');
+  }
+
+  // ── DELIVERABLES ─────────────────────────────────────────────────
   lines.push('# DELIVERABLES');
-  lines.push('Produce a COMPLETE product-listing package in this exact order:');
+  lines.push('Produce all 13 sections below **in this exact order**, each under a level-2 markdown heading (`## 1. TITLE` etc.). Follow character limits strictly — they map to how Google, Shopify, and Amazon truncate.');
   lines.push('');
-  lines.push('1. **TITLE** — Shopify/Google-optimized, ≤70 characters. Include the primary keyword, brand, and category. No ALL CAPS.');
-  lines.push('2. **SUB-TITLE / SHORT DESCRIPTION** — ≤160 characters. One-line hook that combines the biggest pain-point + core benefit. Suitable for meta description.');
-  lines.push('3. **LONG DESCRIPTION** — 300–500 words. Structure: problem → solution → 4-6 benefit bullets → how it feels/looks/smells → who it\'s for → trust-cue closer. Use high-buying-intent keywords naturally (do not stuff).');
-  lines.push('4. **INGREDIENTS** — Bulleted list. For each hero ingredient, add a one-sentence "why it matters" note. Group actives vs supporting cast. If ingredients are unknown from the research data, mark them as "confirm on packaging" instead of inventing.');
-  lines.push('5. **HOW TO USE** — Numbered steps, morning/night if applicable. Include quantity, frequency, and one "pro tip".');
-  lines.push('6. **FAQs** — 8–12 Q&A pairs. Draw from the question-shaped queries above where possible; each answer 2–3 sentences.');
-  lines.push('7. **SEO KEYWORDS** — Comma-separated meta-keywords list. Longtail-first, India-first. Include the top 15 opportunity keywords verbatim.');
-  lines.push('8. **GOOGLE SEARCH AD** — 3 headline variants (≤30 chars each) + 2 description variants (≤90 chars each). Reflect high-intent phrases.');
-  lines.push('9. **AMAZON BULLETS** — 5 benefit-first bullets, keyword-rich, ≤200 chars each. Lead with the pay-off.');
-  lines.push('10. **META TITLE + META DESCRIPTION** — for the Shopify page. Title ≤60 chars, description ≤155 chars.');
-  lines.push('11. **HANDLE / URL SLUG** — Lowercase, kebab-case, ≤50 chars.');
+
+  lines.push('## 1. TITLE  *(≤70 chars, Shopify/Google-optimized)*');
+  lines.push('- Include the **#1 opportunity keyword** verbatim (or its closest natural form).');
+  lines.push('- Structure: `Brand · Product-Type · Key-Attribute · Pack/Size`.');
+  lines.push('- No ALL-CAPS, no emoji, no manufacturer trademark symbols.');
   lines.push('');
-  lines.push('# CONSTRAINTS');
-  lines.push('- India-first tone. Currency ₹. Reference "delivered pan-India" style cues where natural.');
-  lines.push('- Do NOT invent certifications, dermatologist claims, or "clinically proven" language unless the source data mentions them.');
-  lines.push('- Do NOT copy competitor domains listed above into the copy — use them only for tonal reference.');
-  lines.push('- Prefer high-buying-intent keywords in TITLE and Google Ad headlines. Reserve low-intent/informational keywords for the LONG DESCRIPTION and FAQs.');
-  lines.push('- Return each section under a clear markdown `##` heading in the same order as the list above.');
+
+  lines.push('## 2. SUB-TITLE / SHORT DESCRIPTION  *(≤160 chars — meta description)*');
+  lines.push('- One sentence, hook + core benefit + soft CTA.');
+  lines.push('- Include the #1 keyword or a near variant.');
+  lines.push('- End with a period, not an ellipsis.');
+  lines.push('');
+
+  lines.push('## 3. LONG DESCRIPTION  *(300–500 words)*');
+  lines.push('Structure exactly:');
+  lines.push('1. **Hook** (2–3 sentences): name the pain-point users described in the keyword data.');
+  lines.push('2. **Solution** (1 short paragraph): what the product does, in plain language.');
+  lines.push('3. **Benefits** (4–6 bullets): each starts with a verb, ends with the specific outcome.');
+  lines.push('4. **Sensory / usage feel** (1 paragraph): texture, smell, look, "how it feels to use it".');
+  lines.push('5. **Who it\'s for** (1 short paragraph): explicit audience segments.');
+  lines.push('6. **Trust closer** (1 line): shipping / returns / support cue.');
+  lines.push('- Weave the **top 5** opportunity keywords in naturally. No stuffing (no phrase should appear more than 3× total).');
+  lines.push('');
+
+  lines.push('## 4. INGREDIENTS  *(bulleted list, grouped)*');
+  lines.push('- **Actives**: hero ingredients + one-sentence "why it matters" per item.');
+  lines.push('- **Supporting cast**: everything else.');
+  lines.push('- If the research data does **not** name specific ingredients, list `To be confirmed on packaging.` in each group — **do not invent ingredients**.');
+  lines.push('');
+
+  lines.push('## 5. HOW TO USE  *(numbered steps)*');
+  lines.push('- Steps 1–N (typical 3–5). Quantify: "a pea-sized amount", "twice daily", etc.');
+  lines.push('- If morning + night differ, note both explicitly.');
+  lines.push('- Close with **Pro tip:** one line.');
+  lines.push('');
+
+  lines.push('## 6. FAQs  *(8–12 Q&A pairs)*');
+  lines.push('- Use the **QUESTION-SHAPED QUERIES** above verbatim where possible.');
+  lines.push('- 2–3 sentence answers. First sentence = direct answer. Second/third = supporting context.');
+  lines.push('- Mark answers you can\'t verify from provided data as `[Confirm before publishing.]` — do not guess.');
+  lines.push('');
+
+  lines.push('## 7. SEO KEYWORDS  *(meta keywords — comma-separated single line)*');
+  lines.push('- Include the **top 15** opportunity keywords verbatim.');
+  lines.push('- Longtail phrases first, single-word tokens last.');
+  lines.push('- India-first modifiers (e.g. "in india", "india price") where natural.');
+  lines.push('');
+
+  lines.push('## 8. GOOGLE SEARCH ADS  *(3 headlines + 2 descriptions)*');
+  lines.push('- **Headlines** (3 variants, each ≤30 chars): H1 leads with #1 keyword; H2 emphasizes offer/price; H3 emphasizes trust/quality.');
+  lines.push('- **Descriptions** (2 variants, each ≤90 chars): one benefit-led, one urgency-led.');
+  lines.push('- Include ₹ pricing if bid data suggests a reasonable price point.');
+  lines.push('- Every headline must contain at least one high-intent keyword from the pool above.');
+  lines.push('');
+
+  lines.push('## 9. AMAZON.IN LISTING BULLETS  *(exactly 5 bullets, ≤200 chars each)*');
+  lines.push('- Each bullet starts with a **BENEFIT IN CAPS** (2–4 words), then a colon, then the supporting detail.');
+  lines.push('- Weave in `chapstick`, size/pack, and target-user cues.');
+  lines.push('- Match Amazon.in style (spec-forward, keyword-rich, minimal fluff).');
+  lines.push('');
+
+  lines.push('## 10. META TITLE + META DESCRIPTION  *(for Shopify page \\<head\\>)*');
+  lines.push('- **Meta title** ≤60 chars — sharper than the on-page title; put brand at the end.');
+  lines.push('- **Meta description** ≤155 chars — different phrasing than the sub-title; include a CTA.');
+  lines.push('');
+
+  lines.push('## 11. HANDLE / URL SLUG  *(≤50 chars, kebab-case, all-lowercase)*');
+  lines.push('- Just the product identity — no promotional words, no ₹, no year.');
+  lines.push('');
+
+  lines.push('## 12. INTERNAL LINKING SUGGESTIONS  *(3–5)*');
+  lines.push('- For each: a **suggested anchor text** (from the keyword data) + a plausible **target-page slug** (blog / category / related-product).');
+  lines.push('- Prefer anchors from the informational + medium-intent buckets — high-intent stays on the product page.');
+  lines.push('');
+
+  lines.push('## 13. NEXT-STEP AUDIT  *(numbered checklist for the human reviewer)*');
+  lines.push('- Concrete pre-publish checks: ingredient verification, price competitiveness vs Amazon band, image alt-text alignment with title, Merchant Center feed sync, Google Ads geo-targeting.');
+  lines.push('- Each item begins with a verb. Under 15 items total.');
+  lines.push('');
+
+  // ── HARD CONSTRAINTS ─────────────────────────────────────────────
+  lines.push('# HARD CONSTRAINTS');
+  lines.push('- **India-first tone**. Currency ₹. Assume pan-India shipping.');
+  lines.push('- **No invented claims**. Do not add "clinically proven", "dermatologist tested", certifications, awards, or specific test results unless the research data mentions them. If a claim is category-standard but unverified for this SKU, wrap it: `[Confirm before publishing.]`');
+  lines.push('- **No competitor names in copy**. The competitor-domain list is for tonal reference only; never mention those brands in the listing text.');
+  lines.push('- **Keyword discipline**. High-intent keywords → TITLE + first paragraph + Ad headlines. Informational keywords → LONG DESCRIPTION + FAQs. No keyword should appear more than 3× total on the page.');
+  lines.push('- **Truncation math**. All character counts include spaces and punctuation. Overshoot = truncation on Google/Shopify/Amazon → do not exceed.');
+  lines.push('- **Return format**. Markdown only. Level-2 headings for each of the 13 sections, in numeric order. No preamble, no meta-commentary, no closing summary — jump straight into `## 1. TITLE`.');
   return lines.join('\n');
 }
 function openClaudePromptModal() {
@@ -2278,13 +2449,17 @@ $('anCopyKwBtn')?.addEventListener('click', async () => {
     .sort((a, b) => b.s - a.s)
     .slice(0, N);
   const text = scored.map(r => r.kw).join('\n');
-  try { await navigator.clipboard.writeText(text); toast(`${scored.length} top keyword(s) copied.`, 'ok', { title: 'Copied' }); }
-  catch { toast('Copy failed.', 'err'); }
+  if (await copyToClipboard(text)) toast(`${scored.length} top keyword(s) copied.`, 'ok', { title: 'Copied' });
+  else toast('Copy failed — select the text manually + Ctrl+C.', 'err');
 });
 $('claudeCopyBtn')?.addEventListener('click', async () => {
   const t = $('claudePromptText').value;
-  try { await navigator.clipboard.writeText(t); toast('Prompt copied — paste into Claude.', 'ok', { title: 'Copied' }); }
-  catch { $('claudePromptText').select(); toast('Copy failed — text is selected, press Ctrl+C.', 'warn'); }
+  if (await copyToClipboard(t)) {
+    toast('Prompt copied — paste into Claude.', 'ok', { title: 'Copied' });
+  } else {
+    $('claudePromptText').select();
+    toast('Copy failed — text is selected, press Ctrl+C.', 'warn');
+  }
 });
 $('claudeDownloadBtn')?.addEventListener('click', () => {
   const t = $('claudePromptText').value;
@@ -2298,7 +2473,7 @@ $('claudeDownloadBtn')?.addEventListener('click', () => {
 });
 $('claudeOpenBtn')?.addEventListener('click', async () => {
   const t = $('claudePromptText').value;
-  try { await navigator.clipboard.writeText(t); } catch {}
+  await copyToClipboard(t);
   toast('Opening Claude — paste the prompt into the chat box.', 'info', { title: 'Prompt copied' });
   window.open('https://claude.ai/new', '_blank', 'noopener');
 });
@@ -2979,8 +3154,8 @@ function renderContentGaps(rows) {
     </div>`;
   $('anGapCopyBtn')?.addEventListener('click', async () => {
     const text = topGaps.map(g => g.keyword).join('\n');
-    try { await navigator.clipboard.writeText(text); toast(`${topGaps.length} question(s) copied.`, 'ok'); }
-    catch { toast('Copy failed.', 'err'); }
+    if (await copyToClipboard(text)) toast(`${topGaps.length} question(s) copied.`, 'ok');
+    else toast('Copy failed — select the list and Ctrl+C manually.', 'err');
   });
   if (sub) sub.textContent = `${topGaps.length} gap(s) · top ${Math.min(20, topGaps.length)} shown`;
 }
@@ -3025,7 +3200,7 @@ function renderAnalyticsHero(rows) {
     <div class="an-hp-name" title="${esc(productName)}">${esc(productName)}</div>
     ${sku ? `<span class="an-hp-sku">${esc(sku)}</span>` : ''}
     <span class="an-hp-badge" style="background:${grade.c}20; color:${grade.c}; border-color:${grade.c};" title="Data quality: ${esc(grade.t)}">DQ ${grade.l}</span>
-    ${productUrl ? `<a href="${esc(productUrl)}" target="_blank" rel="noopener" class="an-hp-link">📦 Open product →</a>` : ''}
+    ${productUrl ? `<a href="${esc(productUrl)}" target="_blank" rel="noopener" class="an-hp-link">Open product ↗</a>` : ''}
   `;
 
   // Data-quality banner — prominent, actionable warnings for the specific
@@ -3261,29 +3436,13 @@ function renderAnalyticsInsights(sourceRows, filteredRows) {
       </div>`;
   }
 
-  // ── Score-tier histogram ────────────────────────────────────────
-  // Groups every row by its opportunity-score tier so the user can see the
-  // shape of the batch at a glance (mostly-low vs a fat middle vs a few gems).
+  // ── Score-tier counts ─────────────────────────────────────────
+  // The prior version rendered a 4-bar histogram — but score-tier is
+  // already color-coded on every row in the Deep-dive table (green/blue/
+  // amber/grey left border), so a whole SVG chart was showing the same
+  // information twice. Kept as inline counts in the .tier-strip below.
   const tiers = { excellent: 0, good: 0, ok: 0, low: 0 };
   for (const r of scored) tiers[scoreTier(r.__s).tier]++;
-  const tierMax = Math.max(tiers.excellent, tiers.good, tiers.ok, tiers.low, 1);
-  const tierColor = { excellent: 'var(--success)', good: 'var(--accent)', ok: 'var(--warn)', low: 'var(--text-3)' };
-  const tierLabel = { excellent: '≥12  ·  Excellent', good: '7–12  ·  Good', ok: '3–7  ·  OK', low: '<3  ·  Weak' };
-  const histBars = ['excellent', 'good', 'ok', 'low'].map(t => {
-    const n = tiers[t];
-    const pct = Math.round((n / tierMax) * 100);
-    const sel = xfHas('tiers', t);
-    return `
-      <div class="clickable-x" data-xf-kind="tiers" data-xf-v="${t}" title="Click to filter dashboard to ${tierLabel[t]} keywords only."
-        style="display:grid; grid-template-columns: 120px 1fr 40px; gap:8px; align-items:center; padding: 3px 6px; border-radius: 4px;
-               ${sel ? 'background: var(--info-soft); outline: 1px solid var(--info);' : ''}">
-        <div style="font-size:11px; color:${tierColor[t]};">${tierLabel[t]}${sel ? ' ✓' : ''}</div>
-        <div style="background:var(--bg-input); border-radius:3px; height:10px; overflow:hidden;">
-          <div style="height:100%; width:${pct}%; background:${tierColor[t]};"></div>
-        </div>
-        <div style="font-family:var(--mono); font-size:11px; text-align:right; color:${tierColor[t]}; font-weight:600;">${n}</div>
-      </div>`;
-  }).join('');
 
   // Render. The KP-coverage + image-match tiles that used to live here
   // are now in the hero — showing them again in Insights was pure
@@ -3305,13 +3464,13 @@ function renderAnalyticsInsights(sourceRows, filteredRows) {
       ${skuCoverageBlock}
     </div>
 
-    <div class="card" style="margin-bottom: 10px; background: var(--bg-2);">
-      <div class="card-body" style="padding: 10px 14px;">
-        <div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px;">📊 Score distribution across ${total.toLocaleString()} keyword(s)</div>
-        ${histBars}
-      </div>
+    <div class="tier-strip">
+      <span style="color:var(--success);"><strong>${tiers.excellent}</strong> excellent</span>
+      <span style="color:var(--accent);"><strong>${tiers.good}</strong> good</span>
+      <span style="color:var(--warn);"><strong>${tiers.ok}</strong> ok</span>
+      <span style="color:var(--text-3);"><strong>${tiers.low}</strong> weak</span>
+      <span class="hint" style="margin-left:auto;">${total.toLocaleString()} keywords · tier by opportunity score</span>
     </div>
-
   `;
   // Removed: Top-3 opportunities (Top-10 bar chart owns this in Prioritize),
   // Best-performing sources (Source donut owns this in Distribution),
