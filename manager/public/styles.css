@@ -422,6 +422,87 @@ button.small { padding: 4px 10px; font-size: 11px; }
 .tbl.compact td { padding: 3px 6px; }
 .tbl.compact td .chip { padding: 1px 6px; font-size: 9px; }
 
+/* Analytics section layers — 4 clean bands (Executive / Prioritize /
+   Distribute / Content / Deep-dive). Each layer gets a subtle header
+   so the flow reads as a top-down narrative instead of a mass of cards. */
+.an-layer { margin: 18px 0 8px; }
+.an-layer-head {
+  font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase;
+  color: var(--text-2); padding: 4px 2px 8px;
+  border-bottom: 1px solid var(--line-1);
+  margin-bottom: 10px;
+}
+.an-layer-hint {
+  font-size: 10px; font-weight: 500; letter-spacing: .5px; text-transform: none;
+  color: var(--text-3); margin-left: 8px;
+}
+
+/* Score × Volume scatter plot — the quick-wins quadrant. */
+.scatter { position: relative; width: 100%; height: 320px; }
+.scatter svg { width: 100%; height: 100%; }
+.scatter .quad-label {
+  fill: var(--text-3); font-size: 10px; font-family: var(--mono);
+  text-transform: uppercase; letter-spacing: .5px;
+}
+.scatter .axis-label { fill: var(--text-3); font-size: 10px; font-family: var(--mono); }
+.scatter .quad-line  { stroke: var(--line-2); stroke-dasharray: 3 3; stroke-width: 1; }
+.scatter .grid-line  { stroke: var(--line-1); stroke-width: 0.5; }
+.scatter circle      { cursor: pointer; transition: r 120ms, stroke-width 120ms; }
+.scatter circle:hover { stroke-width: 2; stroke: #fff; }
+.scatter-legend { display: flex; gap: 12px; font-size: 10px; color: var(--text-2); margin-top: 8px; flex-wrap: wrap; }
+.scatter-legend .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+.scatter .quick-wins-badge {
+  fill: var(--success); font-size: 10px; font-family: var(--mono);
+  font-weight: 700; text-transform: uppercase; letter-spacing: 1px;
+}
+
+/* Coverage gauge — progress bar toward the 100-300 kw/SKU target. */
+.gauge { padding: 8px 4px; }
+.gauge-track {
+  position: relative; height: 40px; border-radius: 6px;
+  background: linear-gradient(to right,
+    var(--danger-soft) 0%, var(--danger-soft) 20%,
+    var(--warn-soft) 20%, var(--warn-soft) 33.3%,
+    var(--success-soft) 33.3%, var(--success-soft) 100%);
+  border: 1px solid var(--line-2);
+  overflow: hidden;
+}
+.gauge-marker {
+  position: absolute; top: -4px; bottom: -4px; width: 3px;
+  background: var(--text-0); border-radius: 2px;
+  box-shadow: 0 0 8px rgba(255,255,255,0.4);
+}
+.gauge-marker::after {
+  content: attr(data-val); position: absolute; top: -18px; left: 50%;
+  transform: translateX(-50%); font-family: var(--mono); font-size: 11px;
+  font-weight: 700; color: var(--text-0); white-space: nowrap;
+}
+.gauge-labels {
+  display: flex; justify-content: space-between; font-family: var(--mono);
+  font-size: 10px; color: var(--text-3); margin-top: 12px; padding: 0 2px;
+}
+.gauge-verdict { margin-top: 10px; font-size: 12px; padding: 8px 12px; border-radius: 4px; }
+
+/* Donut chart — SVG-based source distribution. Legend on the right. */
+.donut { display: grid; grid-template-columns: 140px 1fr; gap: 16px; align-items: center; }
+.donut svg { width: 140px; height: 140px; }
+.donut-legend { font-size: 11px; }
+.donut-legend .lg-row {
+  display: grid; grid-template-columns: 12px 1fr 60px;
+  align-items: center; gap: 8px; padding: 3px 0;
+  border-bottom: 1px solid var(--line-1);
+}
+.donut-legend .lg-row:last-child { border-bottom: none; }
+.donut-legend .lg-swatch { width: 10px; height: 10px; border-radius: 2px; }
+.donut-legend .lg-count { font-family: var(--mono); text-align: right; color: var(--text-2); }
+.donut-legend .lg-name { color: var(--text-1); }
+.donut-center {
+  position: absolute; top: 50%; left: 70px; transform: translate(-50%, -50%);
+  text-align: center; pointer-events: none;
+}
+.donut-center .big { font-size: 22px; font-weight: 700; color: var(--text-0); }
+.donut-center .lbl { font-size: 9px; color: var(--text-3); text-transform: uppercase; letter-spacing: .5px; }
+
 /* Column-group toggle strip above the keyword table. Each chip flips a
    whole group of columns (KP metrics / Image match / Sellers / Amazon /
    Meta). The Core chip is locked-on. Selected state uses the accent

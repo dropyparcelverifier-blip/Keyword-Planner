@@ -2172,22 +2172,235 @@ function filterAndRenderAnalytics() {
   renderExecutiveSummary(source, filtered);
   renderAnalyticsSummary(source);
   renderAnalyticsInsights(source, filtered);
+  renderScatter(source);
+  renderSourceDonut(source);
+  renderCoverageGauge(source);
   renderThemesCard(source);
   renderContentGaps(source);
   renderAnalyticsTopChart(filtered);
   renderAnalyticsTable(filtered);
 
-  $('anExecCard').style.display     = source.length > 0 ? '' : 'none';
-  $('anTableCard').style.display    = source.length > 0 ? '' : 'none';
-  $('anTopChartCard').style.display = source.length > 0 ? '' : 'none';
-  $('anInsightsCard').style.display = source.length > 0 ? '' : 'none';
-  $('anThemesCard').style.display   = source.length > 0 ? '' : 'none';
-  $('anGapCard').style.display      = source.length > 0 ? '' : 'none';
+  const show = source.length > 0 ? '' : 'none';
+  ['anLayerExec', 'anLayerPrioritize', 'anLayerDistribute', 'anLayerContent', 'anLayerDeepDive',
+   'anTableCard', 'anTopChartCard'].forEach(id => {
+    const el = $(id); if (el) el.style.display = show;
+  });
   $('anExportBtn').disabled = filtered.length === 0;
   const claudeBtn = $('anClaudeBtn');
   if (claudeBtn) claudeBtn.disabled = source.length === 0;
   const copyKwBtn = $('anCopyKwBtn');
   if (copyKwBtn) copyKwBtn.disabled = source.length === 0;
+}
+
+// ─────────── Score × demand scatter plot ───────────
+// The canonical keyword-prioritization visual. X-axis is demand (KP volume
+// preferred, AdRating as fallback when no volume data), Y-axis is our
+// opportunity score, dot color = buying intent, dot size = image match
+// count. Median lines split the plane into quadrants — top-right is the
+// "quick wins" area (high demand + our best fit).
+function renderScatter(rows) {
+  const el = $('anScatter');
+  const title = $('anScatterTitle');
+  const sub = $('anScatterSub');
+  if (!el) return;
+  if (!rows || rows.length === 0) { el.innerHTML = ''; if (sub) sub.textContent = '—'; return; }
+
+  const scored = rows.map(r => ({
+    kw: r.keyword,
+    score: opportunityScore(r),
+    vol: toNum(r.kp_monthly_searches) || 0,
+    rating: toNum(r.ad_rating) || 0,
+    intent: String(r.buying_intent || '').toLowerCase(),
+    imgs: toNum(r.image_count) || 0,
+    href: r.serp_url || `https://www.google.com/search?q=${encodeURIComponent(r.keyword)}&gl=in`,
+  })).filter(r => r.score > 0);
+
+  if (scored.length === 0) { el.innerHTML = `<div class="hint">No scored keywords yet.</div>`; if (sub) sub.textContent = '—'; return; }
+
+  // Prefer real KP volume if we have coverage; otherwise fall back to
+  // AdRating so the chart is still useful when KP data is missing.
+  const hasVol = scored.filter(r => r.vol > 0).length >= Math.min(5, scored.length * 0.1);
+  const xVal = (r) => hasVol ? r.vol : r.rating;
+  const xLabel = hasVol ? 'KP monthly searches (log scale)' : 'AdRating (KP volume unavailable — fallback)';
+  if (title) title.textContent = hasVol ? 'Score × Volume — quick-wins quadrant' : 'Score × Relevance — quick-wins quadrant';
+  if (sub) sub.textContent = hasVol ? `${scored.length} scored keyword(s) · ${scored.filter(r => r.vol > 0).length} with KP volume` : `${scored.length} scored · KP volume missing, using AdRating for X-axis`;
+
+  // Log-scale for volume so a 3-keyword outlier at 500k doesn't crush the
+  // interesting mid-band. Linear for AdRating fallback.
+  const xScale = hasVol ? (v) => v > 0 ? Math.log10(v + 1) : 0 : (v) => v;
+  const xs = scored.map(r => xScale(xVal(r)));
+  const ys = scored.map(r => r.score);
+  const xMin = 0, xMax = Math.max(...xs, 1);
+  const yMin = 0, yMax = Math.max(...ys, 1);
+  const median = (arr) => { const s = [...arr].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+  const xMed = median(xs);
+  const yMed = median(ys);
+
+  const W = 600, H = 300, pad = { l: 40, r: 20, t: 24, b: 30 };
+  const plotW = W - pad.l - pad.r, plotH = H - pad.t - pad.b;
+  const sx = (x) => pad.l + (x / xMax) * plotW;
+  const sy = (y) => H - pad.b - (y / yMax) * plotH;
+
+  const intentColor = { high: '#22c55e', medium: '#f59e0b', low: '#64748b', informational: '#8b5cf6' };
+  const colorFor = (r) => intentColor[r.intent] || '#3b82f6';
+  const radiusFor = (r) => 3 + Math.min(6, Math.log2((r.imgs || 0) + 1) * 1.5);
+
+  // Grid lines every 25% of Y-axis, subtle.
+  const grid = [0.25, 0.5, 0.75].map(f => {
+    const y = pad.t + f * plotH;
+    return `<line class="grid-line" x1="${pad.l}" y1="${y}" x2="${pad.l + plotW}" y2="${y}"/>`;
+  }).join('');
+
+  // Points — click opens the SERP for that keyword.
+  const points = scored.map(r => {
+    const cx = sx(xScale(xVal(r)));
+    const cy = sy(r.score);
+    const rr = radiusFor(r);
+    const c = colorFor(r);
+    const title = `${r.kw}\nScore ${r.score.toFixed(1)}${r.vol ? ` · vol ${r.vol.toLocaleString()}` : ''}${r.imgs ? ` · ${r.imgs} imgs` : ''}${r.intent ? ` · ${r.intent} intent` : ''}`;
+    return `<a xlink:href="${esc(r.href)}" target="_blank"><circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${rr.toFixed(1)}" fill="${c}" fill-opacity="0.65" stroke="${c}" stroke-width="1"><title>${esc(title)}</title></circle></a>`;
+  }).join('');
+
+  // Quadrant lines + labels — median splits.
+  const quadX = sx(xMed);
+  const quadY = sy(yMed);
+  const quadLines = `
+    <line class="quad-line" x1="${quadX}" y1="${pad.t}" x2="${quadX}" y2="${H - pad.b}"/>
+    <line class="quad-line" x1="${pad.l}" y1="${quadY}" x2="${pad.l + plotW}" y2="${quadY}"/>`;
+  const quadLabels = `
+    <text class="quick-wins-badge" x="${pad.l + plotW - 6}" y="${pad.t + 12}" text-anchor="end">★ QUICK WINS</text>
+    <text class="quad-label" x="${pad.l + 6}" y="${pad.t + 12}">Low demand · High score</text>
+    <text class="quad-label" x="${pad.l + plotW - 6}" y="${H - pad.b - 6}" text-anchor="end">High demand · Low score</text>
+    <text class="quad-label" x="${pad.l + 6}" y="${H - pad.b - 6}">Low demand · Low score</text>`;
+  const axisLabels = `
+    <text class="axis-label" x="${pad.l - 6}" y="${pad.t + 8}" text-anchor="end">${yMax.toFixed(0)}</text>
+    <text class="axis-label" x="${pad.l - 6}" y="${H - pad.b}" text-anchor="end">0</text>
+    <text class="axis-label" x="${pad.l - 6}" y="${(pad.t + H - pad.b) / 2}" text-anchor="end" transform="rotate(-90 ${pad.l - 20} ${(pad.t + H - pad.b) / 2})">SCORE</text>
+    <text class="axis-label" x="${pad.l + plotW / 2}" y="${H - 8}" text-anchor="middle">${esc(xLabel)}</text>`;
+
+  el.innerHTML = `
+    <div class="scatter">
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+        ${grid}
+        ${quadLines}
+        ${points}
+        ${quadLabels}
+        ${axisLabels}
+      </svg>
+    </div>
+    <div class="scatter-legend">
+      <span><strong>Intent:</strong></span>
+      <span><span class="dot" style="background:${intentColor.high};"></span>high</span>
+      <span><span class="dot" style="background:${intentColor.medium};"></span>medium</span>
+      <span><span class="dot" style="background:${intentColor.low};"></span>low</span>
+      <span><span class="dot" style="background:${intentColor.informational};"></span>informational</span>
+      <span style="margin-left: 12px;"><strong>Dot size:</strong> image-match count · <strong>Click any point</strong> to open its SERP.</span>
+    </div>`;
+}
+
+// ─────────── Source distribution donut chart ───────────
+// Replaces the noisy chip row with a compact SVG donut + legend. Aggregates
+// by PRIMARY source (first token before comma) so a keyword found via
+// multiple channels doesn't get double-counted.
+function renderSourceDonut(rows) {
+  const el = $('anDonut');
+  const sub = $('anDonutSub');
+  if (!el) return;
+  if (!rows || rows.length === 0) { el.innerHTML = ''; if (sub) sub.textContent = '—'; return; }
+
+  const bySrc = {};
+  for (const r of rows) {
+    const k = String(r.source || '—').split(',')[0].trim().toUpperCase() || '—';
+    bySrc[k] = (bySrc[k] || 0) + 1;
+  }
+  const total = rows.length;
+  const entries = Object.entries(bySrc).sort((a, b) => b[1] - a[1]);
+  // Color palette aligned with source-chip classes for visual consistency.
+  const colorFor = (k) => {
+    const s = String(k).toLowerCase();
+    if (s.startsWith('kp')) return '#3b82f6';
+    if (s.startsWith('autosuggest')) return '#f59e0b';
+    if (s.startsWith('serp')) return '#06b6d4';
+    if (s.startsWith('paa')) return '#8b5cf6';
+    if (s.startsWith('related')) return '#ec4899';
+    if (s.startsWith('amazon')) return '#f97316';
+    return '#64748b';
+  };
+
+  const cx = 70, cy = 70, rOuter = 60, rInner = 40;
+  let angle = -Math.PI / 2;   // start at top
+  const arcs = entries.map(([k, v]) => {
+    const frac = v / total;
+    const a0 = angle;
+    const a1 = angle + frac * Math.PI * 2;
+    angle = a1;
+    const large = frac > 0.5 ? 1 : 0;
+    const x0 = cx + rOuter * Math.cos(a0);
+    const y0 = cy + rOuter * Math.sin(a0);
+    const x1 = cx + rOuter * Math.cos(a1);
+    const y1 = cy + rOuter * Math.sin(a1);
+    const x0i = cx + rInner * Math.cos(a1);
+    const y0i = cy + rInner * Math.sin(a1);
+    const x1i = cx + rInner * Math.cos(a0);
+    const y1i = cy + rInner * Math.sin(a0);
+    const d = `M ${x0.toFixed(2)} ${y0.toFixed(2)}
+               A ${rOuter} ${rOuter} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}
+               L ${x0i.toFixed(2)} ${y0i.toFixed(2)}
+               A ${rInner} ${rInner} 0 ${large} 0 ${x1i.toFixed(2)} ${y1i.toFixed(2)}
+               Z`;
+    return `<path d="${d}" fill="${colorFor(k)}"><title>${esc(k)}: ${v} (${Math.round(frac * 100)}%)</title></path>`;
+  }).join('');
+
+  const legend = entries.map(([k, v]) => {
+    const pct = Math.round((v / total) * 100);
+    return `<div class="lg-row">
+      <span class="lg-swatch" style="background:${colorFor(k)};"></span>
+      <span class="lg-name">${esc(k)}</span>
+      <span class="lg-count">${v} · ${pct}%</span>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div class="donut" style="position:relative;">
+      <div style="position:relative;">
+        <svg viewBox="0 0 140 140">${arcs}</svg>
+        <div class="donut-center">
+          <div class="big">${entries.length}</div>
+          <div class="lbl">sources</div>
+        </div>
+      </div>
+      <div class="donut-legend">${legend}</div>
+    </div>`;
+  if (sub) sub.textContent = `${entries.length} distinct source(s) · ${total.toLocaleString()} keyword(s)`;
+}
+
+// ─────────── Coverage gauge (100-300 target) ───────────
+function renderCoverageGauge(rows) {
+  const el = $('anGauge');
+  const sub = $('anGaugeSub');
+  if (!el) return;
+  if (!rows || rows.length === 0) { el.innerHTML = ''; if (sub) sub.textContent = '—'; return; }
+  const n = rows.length;
+  // Track spans 0 → 500 (anything above 500 stays pinned to 100%).
+  const scaleMax = 500;
+  const pct = Math.min(100, (n / scaleMax) * 100);
+  const verdict = n < 100
+    ? { text: `⚠ Below target (${n} of 100 minimum). Broaden autosuggest depth or add more KP seeds.`, tone: 'warn' }
+    : n <= 300
+    ? { text: `✓ In target range (${n} keywords) — this SKU has healthy coverage.`, tone: 'success' }
+    : { text: `Above 300 (${n}). Consider tightening filters — you may be spending effort on low-relevance long tail.`, tone: 'info' };
+  const toneClass = { warn: 'warn', success: 'ok', info: 'info' }[verdict.tone];
+  el.innerHTML = `
+    <div class="gauge">
+      <div class="gauge-track">
+        <div class="gauge-marker" style="left: ${pct.toFixed(1)}%;" data-val="${n}"></div>
+      </div>
+      <div class="gauge-labels">
+        <span>0</span><span style="color:var(--warn);">100</span><span style="color:var(--success);">300</span><span>${scaleMax}+</span>
+      </div>
+      <div class="gauge-verdict banner ${toneClass}" style="margin-top: 14px;">${verdict.text}</div>
+    </div>`;
+  if (sub) sub.textContent = `${n.toLocaleString()} keyword(s) collected`;
 }
 
 // ─────────── Keyword theme clustering ───────────
