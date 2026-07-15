@@ -278,6 +278,10 @@ const coldStart = (async () => {
             adbrainWorkerArmed:  true,
             adbrainWorkerId:     workerId,
             adbrainUserStoppedArm: false,
+            // MAC + hostname captured by the installer. Heartbeat carries
+            // these to the manager so it can Wake-on-LAN this PC later.
+            adbrainWorkerMac:      String(cfg.mac || '').trim(),
+            adbrainWorkerHostname: String(cfg.hostname || '').trim(),
           };
           await chrome.storage.local.set(updates);
           state.workerArmed = true;
@@ -603,8 +607,14 @@ async function workerAutoPollTick() {
     // Fire the worker roster heartbeat FIRST — before any of the early
     // returns below. Even armed-idle workers must show as online in the
     // manager fleet; without this, workers that never claim (empty
-    // queue) appear as offline forever.
-    sendWorkerHeartbeat(state.workerId).catch(() => {});
+    // queue) appear as offline forever. MAC + hostname come along so
+    // the manager can Wake-on-LAN this PC later.
+    (async () => {
+      try {
+        const d = await chrome.storage.local.get(['adbrainWorkerMac', 'adbrainWorkerHostname']);
+        sendWorkerHeartbeat(state.workerId, { mac: d.adbrainWorkerMac || '', hostname: d.adbrainWorkerHostname || '' }).catch(() => {});
+      } catch { sendWorkerHeartbeat(state.workerId).catch(() => {}); }
+    })();
     if (state.running) return;
     if (state.starting) return;
     if (state.resumeInFlight) return;

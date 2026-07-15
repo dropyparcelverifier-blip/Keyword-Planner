@@ -23,6 +23,35 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
+const dgram = require('dgram');
+
+// Wake-on-LAN — send a magic packet to the given MAC. The magic packet
+// is: 6 bytes of 0xFF followed by 16 repetitions of the target MAC.
+// Broadcast on UDP port 9 (BOOTP/DHCP client port used by convention).
+// Requires the target's NIC + BIOS to have WOL enabled AND requires
+// this manager to be on the SAME physical LAN as the target (WOL works
+// at Layer 2 — Tailscale, being Layer 3, does not tunnel it).
+function sendWolPacket(macStr) {
+  const mac = String(macStr).replace(/[^0-9a-fA-F]/g, '');
+  if (mac.length !== 12) return { ok: false, error: `invalid MAC "${macStr}" — expected 12 hex chars (with or without separators)` };
+  const macBytes = Buffer.from(mac, 'hex');
+  const packet = Buffer.alloc(6 + 16 * 6);
+  packet.fill(0xff, 0, 6);
+  for (let i = 0; i < 16; i++) macBytes.copy(packet, 6 + i * 6);
+  return new Promise((resolve) => {
+    const sock = dgram.createSocket('udp4');
+    sock.once('error', (e) => { try { sock.close(); } catch {} resolve({ ok: false, error: e.message }); });
+    sock.bind(() => {
+      try { sock.setBroadcast(true); } catch {}
+      // Send to broadcast address on port 9 (also try 7 as backup — some
+      // NICs listen on either).
+      let done = 0;
+      const finish = () => { if (++done === 2) { try { sock.close(); } catch {} resolve({ ok: true, mac: macStr, sent: 2 }); } };
+      sock.send(packet, 9, '255.255.255.255', () => finish());
+      sock.send(packet, 7, '255.255.255.255', () => finish());
+    });
+  });
+}
 
 const PORT  = parseInt(process.env.PORT || '8787', 10);
 const HOST  = process.env.HOST || '0.0.0.0';
@@ -88,8 +117,12 @@ CREATE INDEX IF NOT EXISTS activity_batch_ts_idx ON activity_log (batch_id, ts D
 CREATE TABLE IF NOT EXISTS workers (
   worker_id  TEXT PRIMARY KEY,
   first_seen INTEGER DEFAULT (strftime('%s','now')*1000),
-  last_seen  INTEGER DEFAULT (strftime('%s','now')*1000)
+  last_seen  INTEGER DEFAULT (strftime('%s','now')*1000),
+  mac_address TEXT,
+  hostname   TEXT
 );
+-- Additive migration for existing DBs that pre-date the mac/hostname cols.
+-- Duplicate-column ADD is caught by node:sqlite and logged; we swallow it.
 
 CREATE TABLE IF NOT EXISTS worker_commands (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,6 +140,10 @@ CREATE TABLE IF NOT EXISTS worker_config (
 );
 INSERT OR IGNORE INTO worker_config (id, config, active_batch_id) VALUES (1, '{}', NULL);
 `);
+
+// Additive migration for older DBs (workers table exists without the new cols).
+try { db.exec(`ALTER TABLE workers ADD COLUMN mac_address TEXT`); } catch {}
+try { db.exec(`ALTER TABLE workers ADD COLUMN hostname TEXT`); } catch {}
 
 const now = () => Date.now();
 
@@ -241,7 +278,14 @@ const Q = {
   // they've never claimed anything yet).
   upsertWorker: db.prepare(`INSERT INTO workers (worker_id, first_seen, last_seen) VALUES (?, ?, ?)
     ON CONFLICT(worker_id) DO UPDATE SET last_seen=excluded.last_seen`),
-  listWorkers: db.prepare(`SELECT worker_id, first_seen, last_seen FROM workers ORDER BY last_seen DESC`),
+  // Same as upsertWorker but also stores MAC + hostname when heartbeat carries them
+  // (only set on cold start via worker-config.json). Never overwrites a MAC once set.
+  upsertWorkerFull: db.prepare(`INSERT INTO workers (worker_id, first_seen, last_seen, mac_address, hostname) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(worker_id) DO UPDATE SET last_seen=excluded.last_seen,
+      mac_address=COALESCE(NULLIF(excluded.mac_address, ''), workers.mac_address),
+      hostname=COALESCE(NULLIF(excluded.hostname, ''), workers.hostname)`),
+  listWorkers: db.prepare(`SELECT worker_id, first_seen, last_seen, mac_address, hostname FROM workers ORDER BY last_seen DESC`),
+  getWorker:   db.prepare(`SELECT * FROM workers WHERE worker_id = ?`),
   newestPendingBatch: db.prepare(`SELECT batch_id FROM jobs WHERE status='pending' GROUP BY batch_id ORDER BY MAX(created_at) DESC LIMIT 1`),
   batchHasPending: db.prepare(`SELECT 1 FROM jobs WHERE batch_id=? AND status='pending' LIMIT 1`),
   existsActiveUrl: db.prepare(`SELECT 1 FROM jobs WHERE product_url=? AND batch_id<>? AND status IN ('pending','claimed','done') LIMIT 1`),
@@ -433,14 +477,27 @@ if ($failed.Count -eq 0) {
 # Bake the manager URL, token, and KP URL into a worker-config.json inside
 # the extension folder. background.js reads this on cold start and, IF the
 # extension's chrome.storage doesn't already have these values, auto-populates
-# them and arms the worker — no setup-code paste needed.
+# them and arms the worker — no setup-code paste needed. Also captures this
+# PC's MAC address + hostname so the manager can Wake-on-LAN this PC later.
+$primaryMac = ''
+try {
+  $adapter = Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
+             Where-Object { $_.Status -eq 'Up' -and $_.MacAddress } |
+             Select-Object -First 1
+  if ($adapter) { $primaryMac = $adapter.MacAddress -replace '-', ':' }
+} catch {}
 $workerCfg = @{
   managerUrl   = '${psEscape(managerBase)}'
   managerToken = '${psEscape(currentToken)}'
   kpUrl        = '${psEscape(currentKpUrl)}'
   role         = 'worker'
+  mac          = $primaryMac
+  hostname     = $env:COMPUTERNAME
 } | ConvertTo-Json -Compress
 Set-Content -Path (Join-Path $extDir 'worker-config.json') -Value $workerCfg -Encoding UTF8
+if ($primaryMac) {
+  Write-Host ("[AdBrain] Captured MAC for Wake-on-LAN: {0} ({1})" -f $primaryMac, $env:COMPUTERNAME) -ForegroundColor Green
+}
 Write-Host "[AdBrain] Wrote worker-config.json — extension will self-arm on first load" -ForegroundColor Green
 
 # Locate chrome.exe
@@ -707,8 +764,49 @@ const server = http.createServer(async (req, res) => {
       const wid = String(b.workerId || '').trim();
       if (!wid) return send(res, 400, { ok: false, error: 'workerId required' });
       const t = now();
-      Q.upsertWorker.run(wid, t, t);
+      // MAC + hostname arrive only from workers whose installer captured
+      // them (post-WOL feature). Fall back to bare upsert if absent so
+      // older workers keep working.
+      const mac  = String(b.mac || '').trim();
+      const host = String(b.hostname || '').trim();
+      if (mac || host) Q.upsertWorkerFull.run(wid, t, t, mac, host);
+      else             Q.upsertWorker.run(wid, t, t);
       return send(res, 200, { ok: true });
+    }
+    // Wake-on-LAN — send a magic packet to the worker's stored MAC.
+    // Requires the worker + manager be on the same physical LAN (WOL
+    // works at Layer 2; Tailscale doesn't tunnel it). If they are on
+    // different LANs, this silently fails at the target.
+    if (m === 'POST' && p === '/api/workers/wol') {
+      const b = await readJson(req);
+      const wid = String(b.workerId || '').trim();
+      let mac  = String(b.mac || '').trim();
+      if (!mac && wid) {
+        const w = Q.getWorker.get(wid);
+        if (w?.mac_address) mac = w.mac_address;
+      }
+      if (!mac) return send(res, 400, { ok: false, error: 'no MAC available for this worker — install the extension with the current installer so it captures the MAC, or POST {mac: "AA:BB:CC:DD:EE:FF"}' });
+      const r = await sendWolPacket(mac);
+      if (!r.ok) {
+        // Invalid MAC = 400 (client error); anything else = 500 (server side).
+        const code = /invalid MAC/i.test(r.error) ? 400 : 500;
+        return send(res, code, r);
+      }
+      return send(res, 200, r);
+    }
+    // Manually store a MAC for a worker (used if the worker was installed
+    // before the auto-capture feature). POST {workerId, mac}.
+    if (m === 'POST' && p === '/api/workers/set-mac') {
+      const b = await readJson(req);
+      const wid = String(b.workerId || '').trim();
+      const mac = String(b.mac || '').trim();
+      if (!wid || !mac) return send(res, 400, { ok: false, error: 'workerId + mac required' });
+      const cleaned = mac.replace(/[^0-9a-fA-F]/g, '');
+      if (cleaned.length !== 12) return send(res, 400, { ok: false, error: 'MAC must be 12 hex chars' });
+      // Preserve the existing hostname if any.
+      const cur = Q.getWorker.get(wid);
+      Q.upsertWorkerFull.run(wid, cur?.first_seen || now(), cur?.last_seen || now(), cleaned, cur?.hostname || '');
+      return send(res, 200, { ok: true, mac: cleaned });
     }
     if (m === 'GET' && p === '/api/workers/list') return send(res, 200, { ok: true, workers: Q.listWorkers.all() });
     // Quiesce broadcast — send 'pause' to every worker. Returns the current

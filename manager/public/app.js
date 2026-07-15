@@ -914,6 +914,7 @@ function renderWorkerFleet() {
             <button data-worker="${esc(w.worker_id)}" data-cmd="pause"  title="Pause after current SKU">⏸</button>
             <button data-worker="${esc(w.worker_id)}" data-cmd="release_claims" class="danger-btn" title="Release claims back to queue">↻</button>
             <button data-worker="${esc(w.worker_id)}" data-cmd="stop"   class="danger-btn" title="Stop and disarm">■</button>
+            <button data-worker="${esc(w.worker_id)}" data-wol="1" title="Wake-on-LAN — send magic packet to this PC's NIC (only works if this manager PC is on the same physical LAN as the target)" style="color: var(--info); border-color: var(--info);">🔌</button>
           </div>
         </td>
       </tr>`;
@@ -933,7 +934,7 @@ function renderWorkerFleet() {
     });
   });
   // Wire per-worker action buttons.
-  el.querySelectorAll('.worker-actions button[data-worker]').forEach(btn => {
+  el.querySelectorAll('.worker-actions button[data-worker][data-cmd]').forEach(btn => {
     btn.addEventListener('click', async () => {
       const workerId = btn.dataset.worker;
       const cmd = btn.dataset.cmd;
@@ -941,6 +942,29 @@ function renderWorkerFleet() {
       if (cmd === 'stop' && !confirm(`Stop worker ${workerId} and disarm it? They will not claim more work until you send Wake.`)) return;
       try { await api.commandsSend(workerId, cmd); toast(`${cmdLabel} → ${workerId}`, 'ok'); }
       catch (e) { toast(e.message, 'err', { title: 'Command failed' }); }
+    });
+  });
+  // Wire the Wake-on-LAN button — separate flow because it uses its
+  // own endpoint (dgram UDP magic packet, not the worker_commands DB).
+  el.querySelectorAll('.worker-actions button[data-wol]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const workerId = btn.dataset.worker;
+      try {
+        const r = await api.wakeOnLan(workerId);
+        toast(`Magic packet sent to ${r.mac}. PC should wake in 10-30s if WOL enabled in BIOS.`, 'ok', { title: 'WOL sent' });
+      } catch (e) {
+        if (e.status === 400 && /no MAC available/.test(e.message)) {
+          const mac = prompt(`No MAC stored for ${workerId}. Enter the MAC (e.g. AA:BB:CC:DD:EE:FF):\n\n(Find it on the worker PC with:  ipconfig /all)`);
+          if (!mac) return;
+          try {
+            await api.setWorkerMac(workerId, mac);
+            const r2 = await api.wakeOnLan(workerId);
+            toast(`MAC saved + WOL sent (${r2.mac})`, 'ok', { title: 'WOL sent' });
+          } catch (e2) { toast(e2.message, 'err', { title: 'WOL failed' }); }
+        } else {
+          toast(e.message, 'err', { title: 'WOL failed' });
+        }
+      }
     });
   });
 }

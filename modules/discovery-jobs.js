@@ -257,10 +257,13 @@ export function workerConfigToRunOpts(cfg) {
 // alarm regardless of claim outcome so the manager can distinguish
 // 'armed and alive but no work' from 'gone'. Silent on error — the
 // manager will just miss a heartbeat, not the end of the world.
-export async function sendWorkerHeartbeat(workerId) {
+export async function sendWorkerHeartbeat(workerId, extras = {}) {
   if (!workerId) return { ok: false };
   try {
-    return await _post('/api/workers/heartbeat', { workerId });
+    const body = { workerId };
+    if (extras.mac)      body.mac = extras.mac;
+    if (extras.hostname) body.hostname = extras.hostname;
+    return await _post('/api/workers/heartbeat', body);
   } catch { return { ok: false }; }
 }
 
