@@ -1049,7 +1049,7 @@ async function run() {
   assert(appJs.body.includes('class="tier-${rowTier.tier}'), '20s.17 rows tagged with tier class for CSS');
   assert(appJs.body.includes("kind: 'kw'"),                       '20s.18 keyword column uses clickable kw kind');
   assert(appJs.body.includes('google.com/search?q='),             '20s.19 keyword cells open Google SERP');
-  assert(appJs.body.includes('Score distribution across'),        '20s.20 insights card has score-distribution histogram');
+  assert(appJs.body.includes('tier-strip') && appJs.body.includes('excellent'), '20s.20 insights shows tier counts inline (histogram removed as redundant)');
   const cssBody = readFileSync(resolve(REPO, 'manager/public/styles.css'), 'utf-8');
   assert(cssBody.includes('.tier-excellent'),                     '20s.21 CSS styles tier-excellent rows');
   assert(cssBody.includes('.tbl a'),                              '20s.22 CSS styles table links for clickable keywords');
@@ -1067,7 +1067,7 @@ async function run() {
   assert(appJs.body.includes('HOW TO USE'),    '20s.31 prompt requests HOW TO USE');
   assert(appJs.body.includes('FAQs'),          '20s.32 prompt requests FAQs');
   assert(appJs.body.includes('SEO KEYWORDS'),  '20s.33 prompt requests SEO KEYWORDS');
-  assert(appJs.body.includes('AMAZON BULLETS'),'20s.34 prompt requests AMAZON BULLETS');
+  assert(appJs.body.includes('AMAZON.IN LISTING BULLETS'),'20s.34 prompt requests Amazon.in listing bullets');
   // Keyword detail modal + quick-links.
   assert(appJs.body.includes('function openKeywordDetail'),         '20s.35 keyword detail modal defined');
   assert(appJs.body.includes('Quick links'),                        '20s.36 detail modal has quick-links block');
@@ -1256,6 +1256,19 @@ async function run() {
   assert(appFull.includes('actAgo > 5 * 60 * 1000 && inFlight > 0'),   'DS.74 frozen detection uses 5min activity-stale threshold');
   assert(appFull.includes('reconnectAllFrozenBtn'),                    'DS.75 reconnect-all-frozen banner button wired');
   assert(appFull.includes('🥶'),                                        'DS.76 frozen state has a distinct visual icon');
+  // Copy fix: HTTP-safe clipboard helper + rewiring.
+  assert(appFull.includes('function copyToClipboard'),                'DS.77 shared copyToClipboard helper defined');
+  assert(appFull.includes("document.execCommand('copy')"),            'DS.78 legacy fallback for HTTP contexts');
+  assert(!/navigator\.clipboard\.writeText/.test(appFull.replace(/\/\/[^\n]*navigator\.clipboard[^\n]*/g, '')) || appFull.split('navigator.clipboard.writeText').length <= 2, 'DS.79 direct navigator.clipboard calls reduced (helper takes over)');
+  // Claude prompt rewrite: structured, professional, result-oriented.
+  assert(appFull.includes('# ROLE') && appFull.includes('# DATA PROVENANCE'), 'DS.80 prompt has explicit ROLE + PROVENANCE sections');
+  assert(appFull.includes('INTERNAL LINKING SUGGESTIONS'),             'DS.81 prompt requests internal linking suggestions (new)');
+  assert(appFull.includes('NEXT-STEP AUDIT'),                          'DS.82 prompt requests pre-publish audit checklist (new)');
+  assert(appFull.includes('HARD CONSTRAINTS'),                         'DS.83 prompt uses HARD CONSTRAINTS heading');
+  // Visual polish: emoji off, layer-hint hidden, tier-strip replaces histogram.
+  assert(cssFull.includes('.card-icon { display: none'),               'DS.84 card-icons hidden by default (unless .show applied)');
+  assert(cssFull.includes('.an-layer-hint { display: none'),           'DS.85 layer-hint subtitles hidden');
+  assert(cssFull.includes('.tier-strip'),                              'DS.86 inline tier-strip styling defined');
   assert(cssFull.includes('.scatter-full'),                        'DS.26 full-width scatter variant defined');
   assert(htmlFull.includes('scatter-full'),                        'DS.27 scatter uses full-width layout');
   assert(/\.card-title\s*\{[\s\S]{0,120}font-size:\s*var\(--text-md\)/.test(cssFull), 'DS.28 unified card-title sizing');
