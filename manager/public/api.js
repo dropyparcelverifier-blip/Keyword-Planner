@@ -29,7 +29,15 @@ async function _fetch(path, { method = 'GET', body } = {}) {
   let data = null;
   try { data = await resp.json(); } catch {}
   if (!resp.ok) {
-    const err = new Error(`HTTP ${resp.status}: ${data?.error || 'request failed'}`);
+    // Special-case 404 on POST endpoints — this usually means the client
+    // has a newer feature than the running manager (someone updated the
+    // repo but forgot to restart `node manager/server.js`). Give a much
+    // clearer error than the raw HTTP message.
+    let msg = data?.error || 'request failed';
+    if (resp.status === 404 && method === 'POST') {
+      msg = `${msg} — the manager may be running an older version. Restart it: stop the current 'node manager/server.js' process and start it again.`;
+    }
+    const err = new Error(`HTTP ${resp.status}: ${msg}`);
     err.status = resp.status;
     err.data = data;
     throw err;

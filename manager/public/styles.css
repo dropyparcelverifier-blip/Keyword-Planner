@@ -486,6 +486,118 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
 /* Executive summary bullets — one card = one plain-English takeaway.
    Colored left border encodes tone (success/info/warn/neutral) without
    needing an icon per row. */
+/* ═════════════════════════════════════════════════════════════════════
+   Analytics tree layout — left rail with batch→SKU tree, right pane
+   with content. Rail is sticky + scrolls independently; pane fills
+   remaining width.
+   ═════════════════════════════════════════════════════════════════════ */
+.an-layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: var(--space-3);
+  align-items: start;
+}
+.an-rail {
+  position: sticky; top: 0;
+  max-height: calc(100vh - 120px);
+  display: flex; flex-direction: column;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.an-rail-head {
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--line-1);
+  background: var(--bg-1);
+}
+.an-rail-head input[type="text"] {
+  width: 100%; font-size: var(--text-sm); padding: 5px 8px;
+}
+.an-rail-tree {
+  flex: 1; overflow-y: auto;
+  padding: var(--space-2) 0;
+}
+.an-pane {
+  min-width: 0;   /* allow flex/grid child to shrink below content width */
+}
+
+/* Tree nodes — batch (parent) + SKU (child). */
+.tree-batch {
+  display: flex; align-items: center; gap: var(--space-1);
+  padding: 6px 10px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: background var(--dur-fast) var(--ease);
+  user-select: none;
+}
+.tree-batch:hover { background: var(--bg-3); }
+.tree-batch.active {
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
+}
+.tree-batch .tree-caret {
+  display: inline-block; width: 14px; text-align: center;
+  color: var(--text-3); font-size: 10px; transition: transform var(--dur) var(--ease);
+}
+.tree-batch.expanded .tree-caret { transform: rotate(90deg); }
+.tree-batch .tree-name {
+  flex: 1;
+  font-size: var(--text-sm); color: var(--text-1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tree-batch .tree-count {
+  font-family: var(--mono); font-size: 10px; color: var(--text-3);
+  padding-left: var(--space-1);
+}
+.tree-skus {
+  display: none;
+  padding-left: 22px;
+  border-left: 1px solid var(--line-1);
+  margin-left: 14px;
+}
+.tree-batch.expanded + .tree-skus { display: block; }
+.tree-sku {
+  display: flex; align-items: baseline; gap: var(--space-2);
+  padding: 4px 10px 4px 6px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  margin-left: -1px;
+  transition: background var(--dur-fast) var(--ease);
+  user-select: none;
+}
+.tree-sku:hover { background: var(--bg-3); }
+.tree-sku.active {
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
+}
+.tree-sku .tree-sku-name {
+  flex: 1;
+  font-size: var(--text-xs); color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tree-sku.active .tree-sku-name { color: var(--text-0); font-weight: 600; }
+.tree-sku .tree-sku-count { font-family: var(--mono); font-size: 10px; color: var(--text-3); }
+.tree-empty { padding: var(--space-3); color: var(--text-3); font-size: var(--text-sm); text-align: center; }
+
+/* Right-pane action bar — sticky-ish row with Claude / Copy / Export
+   plus a status hint on the left. Replaces the old top actions area. */
+.an-actionbar {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-2);
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-3);
+}
+.an-actionbar-hint { font-size: var(--text-sm); color: var(--text-2); }
+
+/* Mobile: tree stacks above the pane. */
+@media (max-width: 900px) {
+  .an-layout { grid-template-columns: 1fr; }
+  .an-rail { position: static; max-height: 260px; }
+}
+
 /* Queue manager modal — status counts strip above the CRUD table. */
 .qm-strip {
   display: flex; gap: var(--space-4); align-items: center;

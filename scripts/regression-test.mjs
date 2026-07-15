@@ -1178,7 +1178,8 @@ async function run() {
   assert(cssFull.includes('.is-loading'),      'DS.13 skeleton loading state defined');
   const htmlFull = readFileSync(resolve(REPO, 'manager/public/index.html'), 'utf-8');
   assert(htmlFull.includes('id="dashHero"'),                  'DS.14 dashboard hero container in HTML');
-  assert(htmlFull.includes('picker-bar sticky'),              'DS.15 analytics picker marked sticky');
+  // DS.15 obsolete: picker-bar replaced by tree rail (see TREE.* tests).
+  assert(htmlFull.includes('id="anRail"'),                    'DS.15 analytics uses tree rail (picker removed)');
   const appFull = readFileSync(resolve(REPO, 'manager/public/app.js'), 'utf-8');
   assert(appFull.includes('function renderDashHero'),         'DS.16 renderDashHero wired');
   assert(appFull.includes('renderDashHero(timeline)'),        'DS.17 hero renderer called in refresh loop');
@@ -1374,6 +1375,19 @@ async function run() {
   // Claude "Open in Claude" now uses anchor click (preserves session cookies).
   assert(appFull.includes("a.href = 'https://claude.ai/new'"),         'CRUD.35 Open-in-Claude uses anchor click (session preserved)');
   assert(!appFull.includes("window.open('https://claude.ai/new'"),      'CRUD.36 window.open path removed');
+
+  // Analytics tree structure.
+  assert(htmlFull.includes('id="anRail"') && htmlFull.includes('id="anRailTree"'), 'TREE.1 tree rail container in HTML');
+  assert(htmlFull.includes('id="anRailSearch"'),                       'TREE.2 tree search input in HTML');
+  assert(appFull.includes('function renderAnalyticsTree'),             'TREE.3 renderAnalyticsTree defined');
+  assert(appFull.includes('adbrainAnTreeExpanded'),                    'TREE.4 tree-expanded state persisted');
+  assert(cssFull.includes('.an-layout'),                               'TREE.5 two-column layout CSS');
+  assert(cssFull.includes('.tree-batch') && cssFull.includes('.tree-sku'), 'TREE.6 tree node CSS');
+  assert(cssFull.includes('.an-rail'),                                 'TREE.7 rail CSS');
+  assert(htmlFull.includes('id="anActionHint"'),                       'TREE.8 pane action-bar hint');
+  // Improved 404 error message on POST → hints at manager-restart.
+  const apiSrc = readFileSync(resolve(REPO, 'manager/public/api.js'), 'utf-8');
+  assert(apiSrc.includes("Restart it: stop the current 'node manager/server.js'"), 'TREE.9 clearer 404 error for outdated manager');
   assert(cssFull.includes('.scatter-full'),                        'DS.26 full-width scatter variant defined');
   assert(htmlFull.includes('scatter-full'),                        'DS.27 scatter uses full-width layout');
   assert(/\.card-title\s*\{[\s\S]{0,120}font-size:\s*var\(--text-md\)/.test(cssFull), 'DS.28 unified card-title sizing');
