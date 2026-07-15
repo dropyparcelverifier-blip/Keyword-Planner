@@ -738,6 +738,7 @@ async function refreshDashboard() {
     // refresh. Skipped on the very first refresh so we don't blast the
     // user with "welcome, here are 47 things that already happened".
     detectAndToastEvents(state.batches, state.workers, activity.events || []);
+    renderDashHero(timeline);
     renderBatchOverview();
     renderWorkerFleet();
     // Keep the activity-log worker filter dropdown in sync with the fleet.
@@ -809,6 +810,54 @@ function populateBatchSelects() {
     el.innerHTML = `<option value="">— none —</option>${jobsOpts}`;
     if (cur && Array.from(el.options).some(o => o.value === cur)) el.value = cur;
   }
+}
+
+// Dashboard hero cards — the 30-second read at the top of the tab. Same
+// data as the stats bar but larger, tone-colored, with a trend hint from
+// the timeline buckets (comparing today vs yesterday's throughput).
+function renderDashHero(timeline) {
+  const el = $('dashHero');
+  if (!el) return;
+  const totals = state.batches.reduce((a, b) => ({
+    total:   a.total   + (b.total   || 0),
+    done:    a.done    + (b.done    || 0),
+    claimed: a.claimed + (b.claimed || 0),
+    failed:  a.failed  + (b.failed  || 0),
+    pending: a.pending + (b.pending || 0),
+  }), { total: 0, done: 0, claimed: 0, failed: 0, pending: 0 });
+  const now = Date.now();
+  const workersOnline = state.workers.filter(w => w.last_heartbeat && (now - w.last_heartbeat) < 3 * 60 * 1000).length;
+  const workersTotal  = state.workers.length;
+  const batches = state.batches.length;
+  const donePct = totals.total ? Math.round((totals.done / totals.total) * 100) : 0;
+  // Throughput trend: sum of last-6-hour buckets vs the prior 6-hour window.
+  const buckets = (timeline && timeline.buckets) || [];
+  const last6 = buckets.slice(-6).reduce((s, b) => s + (b.count || 0), 0);
+  const prev6 = buckets.slice(-12, -6).reduce((s, b) => s + (b.count || 0), 0);
+  const trend = prev6 === 0 ? (last6 > 0 ? '↑' : '·')
+              : last6 > prev6 * 1.1 ? '↑'
+              : last6 < prev6 * 0.9 ? '↓'
+              : '→';
+  const trendCls = trend === '↑' ? 'hero-trend-up' : trend === '↓' ? 'hero-trend-down' : 'hero-trend-flat';
+  const last24h = buckets.reduce((s, b) => s + (b.count || 0), 0);
+  const workerDot = workersOnline > 0 ? '<span class="pulse-dot"></span>'
+                  : workersTotal > 0  ? '<span class="pulse-dot idle"></span>'
+                  : '<span class="pulse-dot danger"></span>';
+  const cards = [
+    { tone: batches > 0 ? 'info' : 'neutral', icon: '📦', label: 'Batches', value: batches, sub: `${totals.total.toLocaleString()} SKU(s) tracked` },
+    { tone: workersOnline > 0 ? 'success' : workersTotal > 0 ? 'warn' : 'danger', icon: '🖥️', label: 'Workers online', value: `${workersOnline}<span style="font-size:14px; color:var(--text-3); font-weight:500;"> / ${workersTotal}</span>`, sub: `${workerDot} ${workersOnline > 0 ? 'processing' : workersTotal > 0 ? 'all idle' : 'no workers'}` },
+    { tone: last24h > 0 ? 'success' : 'neutral', icon: '📈', label: 'Rows landed (24h)', value: last24h.toLocaleString(), sub: `<span class="${trendCls}">${trend}</span> vs prior 6h (${last6.toLocaleString()} → ${prev6.toLocaleString()})` },
+    { tone: totals.claimed > 0 ? 'info' : 'neutral', icon: '⚙️', label: 'In flight', value: totals.claimed, sub: `${totals.pending.toLocaleString()} pending queue` },
+    { tone: donePct >= 90 ? 'success' : donePct >= 30 ? 'info' : 'neutral', icon: '✓', label: 'Completed', value: `${totals.done}<span style="font-size:14px; color:var(--text-3); font-weight:500;"> · ${donePct}%</span>`, sub: totals.total ? `${totals.total - totals.done} remaining` : 'nothing queued' },
+    { tone: totals.failed > 0 ? 'danger' : 'neutral', icon: '⚠', label: 'Failed', value: totals.failed, sub: totals.failed > 0 ? 'check the failed-jobs card' : 'no failures' },
+  ];
+  el.innerHTML = cards.map(c => `
+    <div class="hero-card tone-${c.tone}">
+      <div class="hero-icon">${c.icon}</div>
+      <div class="hero-label">${esc(c.label)}</div>
+      <div class="hero-value">${c.value}</div>
+      <div class="hero-sub">${c.sub}</div>
+    </div>`).join('');
 }
 
 function renderBatchOverview() {

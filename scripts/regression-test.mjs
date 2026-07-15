@@ -1155,6 +1155,28 @@ async function run() {
   assert(cssBody.includes('.scatter-tt'),                        '20s.104 scatter tooltip CSS defined');
   assert(appJs.body.includes("addEventListener('mouseenter'"),   '20s.105 scatter dots wire mouseenter');
 
+  // ===== DESIGN SYSTEM: tokens, hero, responsive, interactive =====
+  const cssFull = readFileSync(resolve(REPO, 'manager/public/styles.css'), 'utf-8');
+  assert(cssFull.includes('--space-1:'),       'DS.1 spacing tokens defined');
+  assert(cssFull.includes('--text-xs:'),       'DS.2 typography tokens defined');
+  assert(cssFull.includes('--dur-fast:'),      'DS.3 motion tokens defined');
+  assert(cssFull.includes(':focus-visible'),   'DS.4 keyboard focus-visible rings defined');
+  assert(cssFull.includes('@media (max-width: 1200px)'), 'DS.5 tablet breakpoint present');
+  assert(cssFull.includes('@media (max-width: 768px)'),  'DS.6 mobile breakpoint present');
+  assert(cssFull.includes('@media (max-width: 480px)'),  'DS.7 small-mobile breakpoint present');
+  assert(cssFull.includes('@media (prefers-reduced-motion'), 'DS.8 respects reduced-motion');
+  assert(cssFull.includes('@media print'),     'DS.9 print stylesheet present');
+  assert(cssFull.includes('.hero-card'),       'DS.10 hero-card styles defined');
+  assert(cssFull.includes('.pulse-dot'),       'DS.11 pulse-dot indicator defined');
+  assert(cssFull.includes('.picker-bar.sticky'),'DS.12 sticky picker style defined');
+  assert(cssFull.includes('.is-loading'),      'DS.13 skeleton loading state defined');
+  const htmlFull = readFileSync(resolve(REPO, 'manager/public/index.html'), 'utf-8');
+  assert(htmlFull.includes('id="dashHero"'),                  'DS.14 dashboard hero container in HTML');
+  assert(htmlFull.includes('picker-bar sticky'),              'DS.15 analytics picker marked sticky');
+  const appFull = readFileSync(resolve(REPO, 'manager/public/app.js'), 'utf-8');
+  assert(appFull.includes('function renderDashHero'),         'DS.16 renderDashHero wired');
+  assert(appFull.includes('renderDashHero(timeline)'),        'DS.17 hero renderer called in refresh loop');
+
   // ===== FLEET FIXES: quota, stale claims, per-SKU flush, co-brand =====
   const mfFleet = readFileSync(resolve(REPO, 'manifest.json'), 'utf-8');
   assert(/"unlimitedStorage"/.test(mfFleet), 'FLEET.1 manifest declares unlimitedStorage');

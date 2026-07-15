@@ -5,6 +5,7 @@
   --bg-2:       #161e35;
   --bg-3:       #1d2742;
   --bg-input:   #0e1424;
+  --bg-hover:   #202c4a;
   --line-1:     #1f2942;
   --line-2:     #2a3658;
   --line-3:     #3a4775;
@@ -29,7 +30,46 @@
   --radius-pill: 999px;
   --shadow-sm:  0 2px 6px rgba(0,0,0,0.35);
   --shadow-md:  0 4px 14px rgba(0,0,0,0.45);
+  --shadow-lg:  0 8px 24px rgba(0,0,0,0.55);
+  --shadow-focus: 0 0 0 3px rgba(90,140,255,0.35);
   --mono: 'JetBrains Mono','Fira Code',Consolas,monospace;
+
+  /* Spacing scale — every gap/padding/margin should use one of these.
+     4/8/12/16/24/32/48 covers UI density needs without an explosion of
+     one-off values. If you need something else, prefer combinations
+     (e.g. --space-3 + --space-1). */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  /* Typography scale */
+  --text-xs:   10px;
+  --text-sm:   11px;
+  --text-base: 12px;
+  --text-md:   13px;
+  --text-lg:   14px;
+  --text-xl:   18px;
+  --text-2xl:  22px;
+  --text-3xl:  28px;
+  --text-4xl:  36px;
+
+  /* Motion — hand-tuned easing + short durations so interactions feel
+     snappy, not draggy. Anything over 250ms feels laggy for a dashboard. */
+  --ease:       cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in:    cubic-bezier(0.4, 0, 1, 1);
+  --dur-fast:   120ms;
+  --dur:        180ms;
+  --dur-slow:   240ms;
+
+  /* Container widths + breakpoint values (used in JS for consistency
+     with @media queries below). */
+  --bp-tablet:  768px;
+  --bp-desktop: 1200px;
+  --bp-wide:    1600px;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: var(--bg-0); color: var(--text-1); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 14px; line-height: 1.55; }
@@ -180,19 +220,44 @@ input:focus, textarea:focus, select:focus { outline: none; border-color: var(--a
 textarea { font-family: var(--mono); font-size: 12px; resize: vertical; min-height: 60px; }
 .hint { color: var(--text-3); font-size: 11px; margin-top: 4px; }
 
-/* Buttons */
+/* Buttons — full interactive-state model: default → hover (bg shift) →
+   active (press-in translate) → focus-visible (ring, keyboard nav) →
+   disabled (dimmed + no pointer). */
 button, .btn {
   padding: 8px 14px; background: var(--accent); color: white;
   border: none; border-radius: var(--radius-sm); font-size: 13px; font-weight: 600;
-  cursor: pointer; transition: background 140ms; font-family: inherit;
+  cursor: pointer; transition: background var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+  font-family: inherit; user-select: none;
 }
 button:hover:not(:disabled), .btn:hover { background: var(--accent-2); }
+button:active:not(:disabled) { transform: translateY(1px); }
+button:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 button.secondary { background: var(--bg-3); color: var(--text-1); border: 1px solid var(--line-2); }
-button.secondary:hover:not(:disabled) { background: var(--line-2); }
+button.secondary:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--line-3); }
 button.danger { background: var(--danger); }
 button.danger:hover:not(:disabled) { background: #d94040; }
 button.small { padding: 4px 10px; font-size: 11px; }
+button.tiny { padding: 2px 6px; font-size: 10px; }
+button.ghost { background: transparent; color: var(--text-2); border: 1px solid transparent; }
+button.ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-1); }
+
+/* Focus visibility for links + form controls — keyboard-nav accessibility. */
+a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: none; box-shadow: var(--shadow-focus); border-color: var(--accent);
+}
+
+/* Card interactive polish — subtle lift on hover for cards that behave
+   like buttons (worker rows, batch rows, keyword theme rows, etc.).
+   Cards WITHOUT the .interactive class stay static. */
+.card.interactive, .interactive {
+  transition: transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease),
+    background var(--dur) var(--ease);
+}
+.card.interactive:hover, .interactive:hover {
+  transform: translateY(-1px); box-shadow: var(--shadow-md);
+}
 
 /* Tables */
 .tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -795,4 +860,179 @@ button.small { padding: 4px 10px; font-size: 11px; }
   background: var(--bg-input); border: 1px solid var(--line-2); border-radius: var(--radius-sm);
   font-family: var(--mono); font-size: 11px; padding: 8px 10px; word-break: break-all;
   color: var(--text-1); user-select: all;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Dashboard hero — the top-of-page stat block. Larger metrics with a
+   trend/status line so the operator sees state in <1 second.
+   ═══════════════════════════════════════════════════════════════════ */
+.hero {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.hero-card {
+  background: linear-gradient(135deg, var(--bg-2) 0%, var(--bg-3) 100%);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: var(--space-4) var(--space-5);
+  position: relative;
+  overflow: hidden;
+  transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.hero-card:hover { border-color: var(--line-3); transform: translateY(-1px); }
+.hero-card .hero-icon {
+  position: absolute; top: var(--space-3); right: var(--space-3);
+  font-size: 28px; opacity: 0.15;
+}
+.hero-card .hero-label {
+  font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 1px;
+  color: var(--text-3); font-weight: 700;
+}
+.hero-card .hero-value {
+  font-size: var(--text-3xl); font-weight: 800;
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  color: var(--text-0); line-height: 1.1; margin: var(--space-1) 0;
+}
+.hero-card .hero-sub {
+  font-size: var(--text-sm); color: var(--text-2); display: flex;
+  align-items: center; gap: var(--space-2);
+}
+.hero-card.tone-success { border-left: 3px solid var(--success); }
+.hero-card.tone-info    { border-left: 3px solid var(--info); }
+.hero-card.tone-warn    { border-left: 3px solid var(--warn); }
+.hero-card.tone-danger  { border-left: 3px solid var(--danger); }
+.hero-card.tone-neutral { border-left: 3px solid var(--line-3); }
+.hero-card.tone-success .hero-value { color: var(--success); }
+.hero-card.tone-warn    .hero-value { color: var(--warn); }
+.hero-card.tone-danger  .hero-value { color: var(--danger); }
+.hero-card.tone-info    .hero-value { color: var(--info); }
+.hero-trend-up   { color: var(--success); }
+.hero-trend-down { color: var(--danger); }
+.hero-trend-flat { color: var(--text-3); }
+
+/* Live pulse dot — used on worker cards, live-status indicators. */
+.pulse-dot {
+  display: inline-block; width: 8px; height: 8px;
+  border-radius: 50%; background: var(--success);
+  box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.6);
+  animation: pulse 2s var(--ease) infinite;
+}
+.pulse-dot.warn   { background: var(--warn);   box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.6); }
+.pulse-dot.danger { background: var(--danger); box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.6); }
+.pulse-dot.idle   { background: var(--text-3); animation: none; box-shadow: none; }
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.5); }
+  70%  { box-shadow: 0 0 0 10px rgba(52, 211, 153, 0);   }
+  100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0);      }
+}
+
+/* Sticky picker header for Analytics — stays anchored at top when
+   scrolling deep into the layers below. Uses backdrop-blur so cards
+   underneath faintly show through, giving the "hovering" affordance. */
+.picker-bar.sticky {
+  position: sticky; top: 0; z-index: 10;
+  background: rgba(15, 22, 49, 0.92);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+/* Card head hover accent — subtle indicator that a card body will
+   respond to interaction (collapse, filter, etc.) */
+.card:not(.collapsible) .card-head { position: relative; }
+.card .card-title { color: var(--text-0); font-size: var(--text-lg); }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Responsive breakpoints
+   Mobile-first isn't feasible for a dashboard, so this is desktop-down.
+   Grid columns collapse; picker becomes single-column below tablet.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Wide desktop (default): everything as designed. */
+
+/* Desktop → Tablet (<1200px): two-col grids remain, tighter padding. */
+@media (max-width: 1200px) {
+  main { padding: var(--space-3) var(--space-4); }
+  .card { margin-bottom: var(--space-3); }
+  .card-body { padding: var(--space-3) var(--space-4); }
+  .hero-card { padding: var(--space-3) var(--space-4); }
+  .hero-card .hero-value { font-size: var(--text-2xl); }
+  .topbar { padding: var(--space-2) var(--space-3); gap: var(--space-2); }
+  .topbar .brand { font-size: var(--text-md); }
+  .statsbar { padding: var(--space-2) var(--space-3); }
+  .stat { padding: var(--space-1) var(--space-3); }
+  .tabs { padding: var(--space-1) var(--space-3) 0; }
+}
+
+/* Tablet → Mobile (<768px): stack everything, hide non-critical UI. */
+@media (max-width: 768px) {
+  main { padding: var(--space-2); }
+  .panel { max-width: 100%; }
+  .two-col { grid-template-columns: 1fr !important; }
+  .grid-2 { grid-template-columns: 1fr !important; }
+  .row { flex-wrap: wrap; gap: var(--space-2); }
+  .hero { grid-template-columns: repeat(2, 1fr); gap: var(--space-2); }
+  .hero-card { padding: var(--space-3); }
+  .hero-card .hero-value { font-size: var(--text-xl); }
+  .hero-card .hero-icon { font-size: 20px; }
+  .picker-bar { grid-template-columns: 1fr; }
+  .picker-actions { flex-direction: row; flex-wrap: wrap; }
+  .topbar input.token { width: 120px; }
+  .stat { padding: var(--space-1) var(--space-2); }
+  .stat .stat-value { font-size: var(--text-md); }
+  .stat .stat-label { font-size: 9px; }
+  .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tab { padding: var(--space-2) var(--space-3); font-size: var(--text-base); flex-shrink: 0; }
+  .tbl { font-size: var(--text-sm); }
+  .tbl th, .tbl td { padding: var(--space-1) var(--space-2); }
+  .modal-card { max-width: 100%; margin: var(--space-2); }
+  /* Layer headers still visible but tighter. */
+  .an-layer-head { font-size: var(--text-sm); padding: var(--space-1) 0 var(--space-2); }
+  /* Hide the layer-hint subtitles on mobile — space is precious. */
+  .an-layer-hint { display: none; }
+}
+
+/* Very small mobile (<480px): single-column hero, hide stats bar. */
+@media (max-width: 480px) {
+  .hero { grid-template-columns: 1fr; }
+  .statsbar { display: none; }
+  .card-head { padding: var(--space-2) var(--space-3); }
+  .card-title { font-size: var(--text-md); }
+}
+
+/* Print — used by the "print stakeholder brief" flow. Strips
+   interactive chrome (tabs, buttons, active filters) so the exec
+   summary + insights + top-10 print cleanly on paper. */
+@media print {
+  .topbar, .tabs, .statsbar, .picker-bar, .af-bar,
+  .col-group-strip, .an-layer-hint, button, .picker-chips { display: none !important; }
+  body { background: white !important; color: black !important; }
+  .card { border: 1px solid #ccc !important; box-shadow: none !important; background: white !important; }
+  .card-title, .card-body, .hero-value, .hero-label, .hero-sub { color: black !important; }
+  .tbl th { background: #eee !important; color: black !important; }
+  .an-layer-head { color: black !important; border-color: #ccc !important; }
+}
+
+/* Skeleton loading state — apply .is-loading to any card and its
+   .card-body content dims and gets a shimmer overlay. Useful while
+   analytics fetches. */
+.is-loading { position: relative; pointer-events: none; }
+.is-loading::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.04) 50%, transparent 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s var(--ease-in) infinite;
+  border-radius: inherit;
+}
+
+/* Motion-reduced users — respect the OS setting. Kills animation, keeps
+   layout / color transitions instant. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

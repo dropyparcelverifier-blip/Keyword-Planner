@@ -126,6 +126,12 @@
 
     <!-- ================= DASHBOARD ================= -->
     <section class="panel" id="panel-dashboard">
+      <!-- Hero metric row — the 30-second read of fleet health. Values
+           are populated by refreshDashboard() from the same summary /
+           worker-stats data the older stats bar uses; this is the same
+           data, presented larger + with tone-colored borders + trend hints. -->
+      <div class="hero" id="dashHero"></div>
+
       <div class="row" style="margin-bottom: 12px;">
         <label style="display:flex; align-items:center; gap:8px;">
           <span class="lbl" style="margin:0;">Batch:</span>
@@ -243,8 +249,9 @@
     <section class="panel" id="panel-analytics">
       <!-- Rich batch+SKU picker. Designed to scale to many batches / hundreds
            of SKUs: searchable, previews of key stats, quick-jump chips for
-           the most-productive batches, keyboard support (/ focuses search). -->
-      <div class="picker-bar" id="anPickerBar">
+           the most-productive batches, keyboard support (/ focuses search).
+           .sticky lifts it above the layers when scrolling deep into the tab. -->
+      <div class="picker-bar sticky" id="anPickerBar">
         <div class="picker-col">
           <div class="picker-head">
             <span>Batch</span>
