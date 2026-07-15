@@ -2226,6 +2226,114 @@ function opportunityScore(r) {
   return s;
 }
 
+// ─────────── Analytics tree (left rail) ───────────
+// Persists which batches are expanded across reloads. SKUs are lazy-
+// loaded per batch — we cache the SKU list under state._treeSkuCache
+// so re-expanding a batch doesn't re-fetch its keyword rows.
+const _TREE_EXPANDED_KEY = 'adbrainAnTreeExpanded';
+function _loadExpanded() {
+  try { return new Set(JSON.parse(localStorage.getItem(_TREE_EXPANDED_KEY) || '[]')); }
+  catch { return new Set(); }
+}
+function _saveExpanded(set) {
+  try { localStorage.setItem(_TREE_EXPANDED_KEY, JSON.stringify(Array.from(set))); } catch {}
+}
+async function renderAnalyticsTree() {
+  const el = $('anRailTree');
+  if (!el) return;
+  const expanded = _loadExpanded();
+  // Batches with jobs first, then orphan keyword-batches.
+  const jobsBatchIds = new Set(state.batches.map(b => b.batch_id));
+  const items = [
+    ...state.batches.map(b => ({ id: b.batch_id, total: b.total || 0, done: b.done || 0, kind: 'jobs' })),
+    ...(state.keywordBatches || []).filter(b => !jobsBatchIds.has(b.batch_id))
+       .map(b => ({ id: b.batch_id, total: b.row_count || 0, kind: 'orphan' })),
+  ];
+  if (items.length === 0) {
+    el.innerHTML = `<div class="tree-empty">No batches yet.<br>Upload some products to get started.</div>`;
+    return;
+  }
+  // Apply search filter (case-insensitive, matches label + id).
+  const q = ($('anRailSearch')?.value || '').toLowerCase().trim();
+  const displayed = q ? items.filter(it => batchLabel(it.id).toLowerCase().includes(q) || it.id.toLowerCase().includes(q)) : items;
+  el.innerHTML = displayed.map(it => {
+    const isExp    = expanded.has(it.id);
+    const isActive = it.id === analytics.batchId;
+    const label    = batchLabel(it.id).split('  (')[0];  // strip "(id-tail)" if named
+    const suffix   = it.kind === 'orphan' ? ' (orphan)' : '';
+    return `
+      <div class="tree-batch${isExp ? ' expanded' : ''}${isActive ? ' active' : ''}" data-batch="${esc(it.id)}">
+        <span class="tree-caret">▶</span>
+        <span class="tree-name" title="${esc(it.id)}">${esc(label)}${suffix}</span>
+        <span class="tree-count">${it.total}</span>
+      </div>
+      <div class="tree-skus" data-skus-for="${esc(it.id)}">
+        ${isExp ? _renderTreeSkusCached(it.id) : ''}
+      </div>`;
+  }).join('');
+  // Wire batch clicks — toggle expand + select as active batch.
+  el.querySelectorAll('.tree-batch').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const bid = btn.dataset.batch;
+      const expNow = _loadExpanded();
+      const wasActive = bid === analytics.batchId;
+      // First click on an inactive batch → select it (don't toggle expand).
+      // Subsequent click on the active batch → toggle expand.
+      if (!wasActive) {
+        analytics.batchId = bid;
+        analytics.sku = '';
+        $('anBatchSelect').value = bid;
+        // Auto-expand on select if not already expanded.
+        if (!expNow.has(bid)) { expNow.add(bid); _saveExpanded(expNow); }
+        await loadAnalyticsBatch(bid);
+        await renderAnalyticsTree();
+      } else {
+        // Toggle expand.
+        if (expNow.has(bid)) expNow.delete(bid); else expNow.add(bid);
+        _saveExpanded(expNow);
+        renderAnalyticsTree();
+      }
+    });
+  });
+  // Wire SKU clicks — select this SKU.
+  el.querySelectorAll('.tree-sku').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const sku = btn.dataset.sku;
+      analytics.sku = sku;
+      const sel = $('anSkuSelect'); if (sel) sel.value = sku;
+      filterAndRenderAnalytics();
+      renderAnalyticsTree();
+    });
+  });
+}
+function _renderTreeSkusCached(batchId) {
+  // Only render SKUs if we've loaded them into analytics.allRows already.
+  // Otherwise return a placeholder — loadAnalyticsBatch() populates it,
+  // and the next renderAnalyticsTree() call picks it up.
+  if (analytics.batchId !== batchId || !analytics.allRows.length) {
+    return `<div class="tree-empty" style="padding: 6px 8px; font-size: 10px;">Select this batch to load its SKUs.</div>`;
+  }
+  // Group allRows by SKU key.
+  const bySku = new Map();
+  for (const r of analytics.allRows) {
+    const key = r.sku || r.product_url || 'unknown';
+    if (!bySku.has(key)) bySku.set(key, { key, name: r.product_name || '', count: 0 });
+    bySku.get(key).count++;
+  }
+  const skus = Array.from(bySku.values()).sort((a, b) => b.count - a.count);
+  if (skus.length === 0) return `<div class="tree-empty" style="padding:6px 8px; font-size:10px;">No SKUs.</div>`;
+  return skus.map(s => {
+    const isActive = s.key === analytics.sku;
+    const display = s.name || s.key;
+    return `
+      <div class="tree-sku${isActive ? ' active' : ''}" data-sku="${esc(s.key)}" title="${esc(display)}">
+        <span class="tree-sku-name">${esc(display)}</span>
+        <span class="tree-sku-count">${s.count}</span>
+      </div>`;
+  }).join('');
+}
+
 async function refreshAnalyticsTab() {
   // Populate batch dropdown from current summary + orphan keyword batches.
   try {
@@ -2247,9 +2355,14 @@ async function refreshAnalyticsTab() {
       analytics.batchId = state.batches[0].batch_id;
       if ($('anBatchSelect')) $('anBatchSelect').value = analytics.batchId;
     }
+    await renderAnalyticsTree();
   } catch {}
-  if (analytics.batchId) await loadAnalyticsBatch(analytics.batchId);
+  if (analytics.batchId) { await loadAnalyticsBatch(analytics.batchId); renderAnalyticsTree(); }
 }
+// Rail search — re-render tree on every keystroke.
+document.addEventListener('DOMContentLoaded', () => {
+  $('anRailSearch')?.addEventListener('input', renderAnalyticsTree);
+});
 
 // Picker hint updater — keeps the "N batches available" label live.
 // Previously we had two more preview blocks here (batch-stats preview +
@@ -2881,6 +2994,17 @@ function filterAndRenderAnalytics() {
   if (claudeBtn) claudeBtn.disabled = source.length === 0;
   const copyKwBtn = $('anCopyKwBtn');
   if (copyKwBtn) copyKwBtn.disabled = source.length === 0;
+  // Action-bar hint tracks selection state.
+  const hint = $('anActionHint');
+  if (hint) {
+    if (source.length === 0) hint.textContent = 'Pick a batch to begin.';
+    else if (analytics.sku) {
+      const ctx = source.find(r => r.product_name) || source[0];
+      hint.textContent = `${ctx.product_name || analytics.sku} · ${source.length} kw`;
+    } else {
+      hint.textContent = `All SKUs in batch · ${source.length} kw`;
+    }
+  }
 }
 
 // ─────────── Score × demand scatter plot ───────────

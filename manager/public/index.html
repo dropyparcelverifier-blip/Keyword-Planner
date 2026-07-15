@@ -249,35 +249,39 @@
 
     <!-- ================= ANALYTICS ================= -->
     <section class="panel" id="panel-analytics">
-      <!-- Rich batch+SKU picker. Designed to scale to many batches / hundreds
-           of SKUs: searchable, previews of key stats, quick-jump chips for
-           the most-productive batches, keyboard support (/ focuses search).
-           .sticky lifts it above the layers when scrolling deep into the tab. -->
-      <div class="picker-bar sticky" id="anPickerBar">
-        <div class="picker-col">
-          <div class="picker-head">
-            <span>Batch</span>
-            <span class="picker-hint" id="anBatchHint">—</span>
+      <!-- Two-column layout: left rail = navigation tree (Batch→SKU),
+           right pane = content. The old top picker bar is folded into
+           the tree — clicking a batch or SKU node updates the selection
+           and drives the same filter pipeline the picker did. The old
+           picker's hidden <select> elements are kept in the DOM (also
+           inside the tree rail) because the existing filter/analytics
+           code reads their .value; the tree updates them programmatically.
+           Actions (Claude / Copy / Export) live in the right pane's
+           sticky action bar so they scroll with content. -->
+      <div class="an-layout">
+        <aside class="an-rail" id="anRail">
+          <div class="an-rail-head">
+            <input type="text" id="anRailSearch" placeholder="Search batches or SKUs…" autocomplete="off" />
           </div>
-          <input type="text" id="anBatchSearch" placeholder="🔍 Search batches (type name or id, Enter to pick)…" autocomplete="off" />
-          <select id="anBatchSelect" size="1"></select>
-        </div>
-        <div class="picker-col">
-          <div class="picker-head">
-            <span>SKU</span>
-            <span class="picker-hint" id="anSkuHint">— pick a batch first —</span>
+          <div class="an-rail-tree" id="anRailTree"></div>
+          <!-- Hidden legacy controls the filter pipeline still reads. -->
+          <div style="display:none;">
+            <input type="text" id="anBatchSearch" />
+            <input type="text" id="anSkuSearch" />
+            <select id="anBatchSelect"></select>
+            <select id="anSkuSelect"><option value="">—</option></select>
+            <span id="anBatchHint">—</span>
+            <span id="anSkuHint">—</span>
           </div>
-          <input type="text" id="anSkuSearch" placeholder="🔍 Search SKUs in this batch…" autocomplete="off" disabled />
-          <select id="anSkuSelect" size="1">
-            <option value="">— pick a batch first —</option>
-          </select>
-        </div>
-        <div class="picker-actions">
-          <button class="small" id="anClaudeBtn" disabled title="Assemble a Claude prompt from this SKU's keyword research (title, subtitle, description, ingredients, how-to-use, FAQs, SEO, ad copy).">🤖 Claude listing brief</button>
-          <button class="small secondary" id="anCopyKwBtn" disabled title="Copy the top-scoring keywords to clipboard (one per line). Handy for meta-keywords, ad-group seeds, or dropping into another tool.">📋 Copy top keywords</button>
-          <button class="small secondary" id="anExportBtn" disabled>📥 Export this SKU as CSV</button>
-        </div>
-      </div>
+        </aside>
+        <main class="an-pane" id="anPane">
+          <div class="an-actionbar">
+            <div class="an-actionbar-hint" id="anActionHint">Pick a batch to begin.</div>
+            <span class="spacer" style="flex:1;"></span>
+            <button class="small" id="anClaudeBtn" disabled title="Assemble a Claude prompt from this SKU's keyword research (title, subtitle, description, ingredients, how-to-use, FAQs, SEO, ad copy).">Claude brief</button>
+            <button class="small secondary" id="anCopyKwBtn" disabled title="Copy top-25 keywords by opportunity score to clipboard (one per line).">Copy top keywords</button>
+            <button class="small secondary" id="anExportBtn" disabled>Export CSV</button>
+          </div>
 
       <!-- Claude prompt preview modal — shown when 🤖 button is clicked. -->
       <div id="claudeModal" class="modal-root" style="display:none;">
@@ -550,6 +554,8 @@
             </div>
           </div>
         </div>
+      </div>
+        </main>
       </div>
     </section>
 
