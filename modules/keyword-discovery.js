@@ -108,14 +108,32 @@ async function getCachedKp(seed) {
     return null;
   }
 }
+// LRU-ish cap on the KP cache so it can't grow unbounded. Prior to this,
+// every KP seed added an entry with (up to) kpMaxPerProduct = 5000 keyword
+// strings — a few hundred seeds and the cache alone could exceed Chrome's
+// 10 MB storage.local quota (which we've also lifted via unlimitedStorage,
+// but a bloated cache still slows every set() and clogs the SW).
+const KP_CACHE_MAX_ENTRIES = 300;
+const KP_CACHE_MAX_KEYWORDS_PER_ENTRY = 2000;
 async function setCachedKp(seed, keywords) {
   if (!seed || !Array.isArray(keywords) || keywords.length === 0) return;
   const key = seed.toLowerCase().trim();
   try {
     const data = await chrome.storage.local.get([STORAGE_KEY_KP_CACHE]);
     const cache = data[STORAGE_KEY_KP_CACHE] || {};
-    cache[key] = { keywords, ts: Date.now() };
-    await chrome.storage.local.set({ [STORAGE_KEY_KP_CACHE]: cache });
+    // Cap the per-entry keyword count — one huge seed shouldn't eat MBs.
+    const capped = keywords.length > KP_CACHE_MAX_KEYWORDS_PER_ENTRY
+      ? keywords.slice(0, KP_CACHE_MAX_KEYWORDS_PER_ENTRY) : keywords;
+    cache[key] = { keywords: capped, ts: Date.now() };
+    // Evict least-recently-used entries if the cache balloons past cap.
+    const entries = Object.entries(cache);
+    if (entries.length > KP_CACHE_MAX_ENTRIES) {
+      entries.sort((a, b) => (b[1]?.ts || 0) - (a[1]?.ts || 0));
+      const kept = Object.fromEntries(entries.slice(0, KP_CACHE_MAX_ENTRIES));
+      await chrome.storage.local.set({ [STORAGE_KEY_KP_CACHE]: kept });
+    } else {
+      await chrome.storage.local.set({ [STORAGE_KEY_KP_CACHE]: cache });
+    }
   } catch {}
 }
 

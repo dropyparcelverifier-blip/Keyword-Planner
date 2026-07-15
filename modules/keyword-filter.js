@@ -742,6 +742,24 @@ export function buildProductContext(productName, handles, detectedCategory, expl
       brandAliases.add(brandName.split(/\s+/)[0]);
     }
   }
+  // Co-branded product handling: if the product name itself contains a
+  // "competitor" brand token (e.g. "Eucerin Aquaphor Healing Ointment"),
+  // treat that brand as ALSO ours for this product. Otherwise the KP
+  // filter rejects every "Eucerin ..." KP idea as `competitor_brand:eucerin`
+  // even though the product IS an Eucerin+Aquaphor co-brand. This was
+  // the root cause of the "yield low (~10-30 kw)" log on Aquaphor batches.
+  {
+    const hay = ` ${String(productName || '').toLowerCase()} `;
+    for (const b of _KNOWN_COMPETITOR_BRANDS) {
+      // Require a full-word occurrence so "cerave" doesn't sneak in via
+      // "cerave-inspired" text; also skip already-added brands.
+      const needle = ` ${b} `;
+      if (hay.includes(needle) && !brandAliases.has(b)) {
+        brandAliases.add(b);
+        brandAliases.add(b.replace(/\s+/g, ''));
+      }
+    }
+  }
 
   const category = detectedCategory || detectCategory(productType, productName);
   // Form factor must come from the RAW product name — `simplifyForKP`
