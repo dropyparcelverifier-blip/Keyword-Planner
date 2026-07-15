@@ -223,6 +223,13 @@ const Q = {
   // Every batch that has keyword rows — used by the UI to surface orphan
   // batches (keywords landed after their jobs were wiped by reset-all).
   keywordsBatchList:     db.prepare(`SELECT batch_id, COUNT(*) AS row_count, MIN(created_at) AS first_at, MAX(created_at) AS last_at FROM keywords GROUP BY batch_id ORDER BY last_at DESC`),
+  // Orphan detection + cleanup — keyword rows whose batch_id has no matching
+  // jobs. Happens when reset-all wipes jobs while workers are mid-push.
+  countOrphanKeywords:   db.prepare(`SELECT COUNT(*) AS n, COUNT(DISTINCT batch_id) AS batches FROM keywords WHERE batch_id NOT IN (SELECT DISTINCT batch_id FROM jobs)`),
+  deleteOrphanKeywords:  db.prepare(`DELETE FROM keywords WHERE batch_id NOT IN (SELECT DISTINCT batch_id FROM jobs)`),
+  // Pre-reset check — how many jobs are actively claimed right now? Used
+  // to warn the user before reset wipes work-in-progress.
+  claimedNowCount:       db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE status = 'claimed'`),
   // Worker roster — upsert on heartbeat + list. Lets us surface armed-
   // but-idle workers (which the jobs-derived workerStats can't see because
   // they've never claimed anything yet).
@@ -659,6 +666,33 @@ const server = http.createServer(async (req, res) => {
     }
     if (m === 'GET' && p === '/api/keywords/batches') {
       return send(res, 200, { ok: true, batches: Q.keywordsBatchList.all() });
+    }
+    // Count orphan keyword rows — rows whose batch_id no longer has any
+    // jobs. Cheap read; used by the Config-tab cleanup card + the reset
+    // preflight to warn about work-in-progress.
+    if (m === 'GET' && p === '/api/keywords/orphans') {
+      const r = Q.countOrphanKeywords.get();
+      const claimed = Q.claimedNowCount.get();
+      // Also enumerate active workers for the reset warning UI.
+      const workers = Q.listWorkers.all();
+      const nowT = now();
+      const activeWorkerCount = workers.filter(w => (nowT - Number(w.last_seen)) < 3 * 60 * 1000).length;
+      return send(res, 200, {
+        ok: true,
+        orphanRows: r?.n || 0,
+        orphanBatches: r?.batches || 0,
+        claimedNow: claimed?.n || 0,
+        activeWorkers: activeWorkerCount,
+      });
+    }
+    // Deletes orphan keyword rows in a single transaction. Returns the
+    // number of rows removed. Same safety pattern as reset-all: requires
+    // an explicit confirm string so a stray fetch can't nuke data.
+    if (m === 'POST' && p === '/api/keywords/cleanup-orphans') {
+      const b = await readJson(req);
+      if (b.confirm !== 'CLEAN_ORPHANS') return send(res, 400, { ok: false, error: "safety: send {confirm:'CLEAN_ORPHANS'} to proceed" });
+      const info = Q.deleteOrphanKeywords.run();
+      return send(res, 200, { ok: true, deleted: info.changes });
     }
     if (m === 'GET' && p === '/api/keywords/timeline') {
       // 24h throughput (rows-per-hour). Optional ?batchId= scope.
