@@ -220,6 +220,9 @@ const Q = {
   // rounded down to hour). Two variants — all batches and batch-scoped.
   keywordsPerHourAll:    db.prepare(`SELECT (created_at / 3600000) * 3600000 AS bucket, COUNT(*) AS n FROM keywords WHERE created_at >= ? GROUP BY bucket ORDER BY bucket ASC`),
   keywordsPerHourBatch:  db.prepare(`SELECT (created_at / 3600000) * 3600000 AS bucket, COUNT(*) AS n FROM keywords WHERE created_at >= ? AND batch_id = ? GROUP BY bucket ORDER BY bucket ASC`),
+  // Every batch that has keyword rows — used by the UI to surface orphan
+  // batches (keywords landed after their jobs were wiped by reset-all).
+  keywordsBatchList:     db.prepare(`SELECT batch_id, COUNT(*) AS row_count, MIN(created_at) AS first_at, MAX(created_at) AS last_at FROM keywords GROUP BY batch_id ORDER BY last_at DESC`),
   // Worker roster — upsert on heartbeat + list. Lets us surface armed-
   // but-idle workers (which the jobs-derived workerStats can't see because
   // they've never claimed anything yet).
@@ -653,6 +656,9 @@ const server = http.createServer(async (req, res) => {
       const bId = String(b.batchId || '').trim();
       const info = bId ? Q.requeueBatchFailed.run(bId) : Q.requeueAllFailed.run();
       return send(res, 200, { ok: true, updated: info.changes });
+    }
+    if (m === 'GET' && p === '/api/keywords/batches') {
+      return send(res, 200, { ok: true, batches: Q.keywordsBatchList.all() });
     }
     if (m === 'GET' && p === '/api/keywords/timeline') {
       // 24h throughput (rows-per-hour). Optional ?batchId= scope.
