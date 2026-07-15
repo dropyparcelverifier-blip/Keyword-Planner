@@ -257,10 +257,8 @@
             <span>Batch</span>
             <span class="picker-hint" id="anBatchHint">—</span>
           </div>
-          <input type="text" id="anBatchSearch" placeholder="🔍 Search batches (type name or id, ↑↓ to move, Enter to pick)…" autocomplete="off" />
+          <input type="text" id="anBatchSearch" placeholder="🔍 Search batches (type name or id, Enter to pick)…" autocomplete="off" />
           <select id="anBatchSelect" size="1"></select>
-          <div id="anBatchChips" class="picker-chips"></div>
-          <div id="anBatchPreview" class="picker-preview"></div>
         </div>
         <div class="picker-col">
           <div class="picker-head">
@@ -271,7 +269,6 @@
           <select id="anSkuSelect" size="1">
             <option value="">— pick a batch first —</option>
           </select>
-          <div id="anSkuPreview" class="picker-preview"></div>
         </div>
         <div class="picker-actions">
           <button class="small" id="anClaudeBtn" disabled title="Assemble a Claude prompt from this SKU's keyword research (title, subtitle, description, ingredients, how-to-use, FAQs, SEO, ad copy).">🤖 Claude listing brief</button>
@@ -364,7 +361,7 @@
           </div>
         </div>
         <div id="anInsightsCard">
-          <div class="card">
+          <div class="card collapsible">
             <div class="card-head">
               <span class="card-icon">💡</span>
               <span class="card-title">Insights &amp; signals</span>
@@ -378,34 +375,6 @@
       </div>
 
       <!-- ─── LAYER: CONTENT PLAN — what to write ──────────────────── -->
-      <div id="anLayerContent" class="an-layer" style="display:none;">
-        <div class="an-layer-head">📝 Content plan <span class="an-layer-hint">what to write next</span></div>
-        <div id="anThemesCard">
-          <div class="card">
-            <div class="card-head">
-              <span class="card-icon">🎨</span>
-              <span class="card-title">Keyword themes</span>
-              <span class="card-sub" id="anThemesSub">—</span>
-            </div>
-            <div class="card-body">
-              <div id="anThemes"></div>
-            </div>
-          </div>
-        </div>
-        <div id="anGapCard">
-          <div class="card">
-            <div class="card-head">
-              <span class="card-icon">🕳️</span>
-              <span class="card-title">Content gaps — questions to answer on the page</span>
-              <span class="card-sub" id="anGapSub">—</span>
-            </div>
-            <div class="card-body">
-              <div id="anGap"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-
       <!-- ─── LAYER: PRIORITIZE — what to act on first ─────────────── -->
       <!-- Scatter is the visual centerpiece: full-width, tall, so users
            can actually see the quick-wins quadrant. Top-10 bar chart
@@ -423,7 +392,7 @@
           </div>
         </div>
         <div id="anTopChartCard" style="display:none;">
-          <div class="card">
+          <div class="card collapsible">
             <div class="card-head">
               <span class="card-icon">🏆</span>
               <span class="card-title">Top 10 by opportunity score</span>
@@ -440,7 +409,7 @@
       <div id="anLayerDistribute" class="an-layer" style="display:none;">
         <div class="an-layer-head">📊 Distribution <span class="an-layer-hint">where the keywords live</span></div>
         <div class="two-col">
-          <div class="card">
+          <div class="card collapsible">
             <div class="card-head">
               <span class="card-icon">🥯</span>
               <span class="card-title">Source distribution</span>
@@ -450,7 +419,7 @@
               <div id="anDonut"></div>
             </div>
           </div>
-          <div class="card">
+          <div class="card collapsible">
             <div class="card-head">
               <span class="card-icon">🎚️</span>
               <span class="card-title">Coverage vs 100–300 target</span>
@@ -463,12 +432,40 @@
         </div>
       </div>
 
+      <div id="anLayerContent" class="an-layer" style="display:none;">
+        <div class="an-layer-head">📝 Content plan <span class="an-layer-hint">what to write next</span></div>
+        <div id="anThemesCard">
+          <div class="card collapsible">
+            <div class="card-head">
+              <span class="card-icon">🎨</span>
+              <span class="card-title">Keyword themes</span>
+              <span class="card-sub" id="anThemesSub">—</span>
+            </div>
+            <div class="card-body">
+              <div id="anThemes"></div>
+            </div>
+          </div>
+        </div>
+        <div id="anGapCard">
+          <div class="card collapsible">
+            <div class="card-head">
+              <span class="card-icon">🕳️</span>
+              <span class="card-title">Content gaps — questions to answer on the page</span>
+              <span class="card-sub" id="anGapSub">—</span>
+            </div>
+            <div class="card-body">
+              <div id="anGap"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- ─── LAYER: DEEP DIVE — the full sortable/filterable table ──── -->
       <div id="anLayerDeepDive" class="an-layer" style="display:none;">
         <div class="an-layer-head">🔎 Deep dive <span class="an-layer-hint">every row, every column, sortable</span></div>
       </div>
       <div id="anTableCard" style="display:none;">
-        <div class="card">
+        <div class="card collapsible">
           <div class="card-head">
             <span class="card-icon">🔍</span>
             <span class="card-title">Keywords</span>

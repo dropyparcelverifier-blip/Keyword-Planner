@@ -553,7 +553,7 @@ async function run() {
   assert(cssR.body.includes('.chip.src-kp'), '20f.11 source-color CSS for KP');
   assert(cssR.body.includes('.chip.src-autosuggest'), '20f.12 source-color CSS for autosuggest');
   assert(cssR.body.includes('.chip.src-serp'), '20f.13 source-color CSS for SERP');
-  assert(appJs.body.includes('srcClassFor'), '20f.14 source-color mapper in analytics');
+  assert(appJs.body.includes('src-autosuggest') && appJs.body.includes('src-related'), '20f.14 source-color chips styled in analytics');
 
   assert(appJs.body.includes('worker-actions'), '20f.15 per-worker action buttons wired');
   assert(appJs.body.includes("data-cmd=\"release_claims\""), '20f.16 release-claims per-worker action');
@@ -1071,9 +1071,11 @@ async function run() {
   assert(appJs.body.includes('ads.google.com/aw/keywordplanner'),   '20s.38 detail links include Google KP deep-link');
   assert(appJs.body.includes('dropy.in/search'),                    '20s.39 detail links include dropy.in search');
   // Rich picker.
-  assert(appJs.body.includes('renderPickerBatchChips'),             '20s.40 batch quick-chips wired');
-  assert(appJs.body.includes('renderBatchPreview'),                 '20s.41 batch preview wired');
-  assert(appJs.body.includes('renderSkuPreview'),                   '20s.42 SKU preview wired');
+  // 20s.40-42 removed: quick-chips + batch/SKU previews deleted as
+  // unwanted duplicates (hero + dropdown already carry that info).
+  assert(appJs.body.includes('updatePickerHints'),                  '20s.40 picker hints still wired');
+  assert(!appJs.body.includes('function renderPickerBatchChips'),   '20s.41 dead renderPickerBatchChips removed');
+  assert(!appJs.body.includes('function renderSkuPreview'),         '20s.42 dead renderSkuPreview removed');
   assert(appJs.body.includes('wirePickerSearch'),                   '20s.43 picker search-as-you-type wired');
   assert(cssBody.includes('.picker-bar'),                           '20s.44 picker CSS defined');
   assert(cssBody.includes('.tbl.compact'),                          '20s.45 compact table density defined');
@@ -1185,7 +1187,13 @@ async function run() {
   assert(cssFull.includes('@keyframes cardIn'),               'DS.23 card entry animation defined');
   // Dedup pass: old summary tiles no longer called; slim SKU preview.
   assert(!/^\s*renderAnalyticsSummary\(source\);/m.test(appFull), 'DS.24 renderAnalyticsSummary not called in main pipeline (dedup with hero)');
-  assert(appFull.includes('Full stats appear in the hero below'), 'DS.25 slim SKU preview when SKU picked (hero owns identity)');
+  assert(!appFull.includes('function renderSkuPreview'), 'DS.25 SKU preview function removed — hero owns identity');
+  // Collapsible cards + persistence.
+  assert(htmlFull.includes('<div id="anInsightsCard">\n          <div class="card collapsible">'), 'DS.29 Insights card collapsible');
+  assert(htmlFull.includes('<div id="anThemesCard">\n          <div class="card collapsible">'),   'DS.30 Themes card collapsible');
+  assert(htmlFull.includes('<div id="anGapCard">\n          <div class="card collapsible">'),       'DS.31 Gap card collapsible');
+  assert(htmlFull.includes('<div id="anTableCard" style="display:none;">\n        <div class="card collapsible">'), 'DS.32 Deep-dive keyword table collapsible');
+  assert(appFull.includes('adbrainCollapsedCards'), 'DS.33 collapsed state persisted to localStorage');
   assert(cssFull.includes('.scatter-full'),                        'DS.26 full-width scatter variant defined');
   assert(htmlFull.includes('scatter-full'),                        'DS.27 scatter uses full-width layout');
   assert(/\.card-title\s*\{[\s\S]{0,120}font-size:\s*var\(--text-md\)/.test(cssFull), 'DS.28 unified card-title sizing');

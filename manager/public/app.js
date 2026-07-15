@@ -400,10 +400,40 @@ setInterval(refreshStatsBar, 15000);
 
 // ─────────── Collapsible cards ───────────
 // Delegated click handler — any .card.collapsible .card-head toggles.
+// State is persisted per-card-id under adbrainCollapsedCards so a
+// user's "hide the noisy Content plan card" preference survives reloads.
+const _COLLAPSED_KEY = 'adbrainCollapsedCards';
+function _loadCollapsed() {
+  try { return new Set(JSON.parse(localStorage.getItem(_COLLAPSED_KEY) || '[]')); }
+  catch { return new Set(); }
+}
+function _saveCollapsed(set) {
+  try { localStorage.setItem(_COLLAPSED_KEY, JSON.stringify(Array.from(set))); } catch {}
+}
 document.addEventListener('click', (e) => {
   const head = e.target.closest('.card.collapsible .card-head');
   if (head && !e.target.closest('button, input, select, a')) {
-    head.parentElement.classList.toggle('collapsed');
+    const card = head.parentElement;
+    card.classList.toggle('collapsed');
+    // Persist by the nearest [id] ancestor (usually the card wrapper).
+    const idHost = card.id ? card : card.closest('[id]');
+    if (idHost?.id) {
+      const set = _loadCollapsed();
+      if (card.classList.contains('collapsed')) set.add(idHost.id);
+      else set.delete(idHost.id);
+      _saveCollapsed(set);
+    }
+  }
+});
+// Apply persisted collapsed state on page load — restore what the user
+// left hidden last time they viewed this page.
+document.addEventListener('DOMContentLoaded', () => {
+  const set = _loadCollapsed();
+  for (const id of set) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const card = el.classList?.contains('card') ? el : el.querySelector('.card.collapsible');
+    if (card) card.classList.add('collapsed');
   }
 });
 
@@ -1769,7 +1799,7 @@ async function refreshAnalyticsTab() {
     state.keywordBatches = kwB.batches || [];
     state.batchNames = new Map((names.names || []).map(n => [n.batch_id, n]));
     populateBatchSelects();
-    renderPickerBatchChips();
+    updatePickerHints();
     if (analytics.batchId && $('anBatchSelect')) $('anBatchSelect').value = analytics.batchId;
     // Auto-select: if there's exactly one batch and none is chosen yet,
     // pick it. Removes the confusing "Waiting for input" empty state
@@ -1778,75 +1808,20 @@ async function refreshAnalyticsTab() {
       analytics.batchId = state.batches[0].batch_id;
       if ($('anBatchSelect')) $('anBatchSelect').value = analytics.batchId;
     }
-    renderBatchPreview();
   } catch {}
   if (analytics.batchId) await loadAnalyticsBatch(analytics.batchId);
 }
 
-// ─────────── Picker: batch chips (quick-jump to top-N recent batches) ───
-function renderPickerBatchChips() {
-  const el = $('anBatchChips');
-  if (!el) return;
-  // Batches WITH jobs, sorted by most recent (assumes batch_id contains
-  // an epoch-ms timestamp; sorting the string suffix desc is close enough).
-  const withJobs = [...state.batches].sort((a, b) => String(b.batch_id).localeCompare(String(a.batch_id))).slice(0, 6);
-  el.innerHTML = withJobs.map(b => {
-    const active = b.batch_id === analytics.batchId ? 'active' : '';
-    const label = batchLabel(b.batch_id).split('  (')[0];  // strip the "(id-tail)" suffix
-    return `<button class="quick-batch ${active}" data-batch="${esc(b.batch_id)}" title="${esc(b.batch_id)} — ${b.total} SKUs">${esc(label)} · ${b.total}</button>`;
-  }).join('');
-  el.querySelectorAll('button[data-batch]').forEach(btn => btn.addEventListener('click', async () => {
-    const id = btn.dataset.batch;
-    analytics.batchId = id;
-    analytics.sku = '';
-    $('anBatchSelect').value = id;
-    renderPickerBatchChips();
-    renderBatchPreview();
-    await loadAnalyticsBatch(id);
-  }));
-  updatePickerHints();
-}
-
+// Picker hint updater — keeps the "N batches available" label live.
+// Previously we had two more preview blocks here (batch-stats preview +
+// SKU-preview) and a quick-batch chip row; all deleted as unwanted
+// duplicates of what the hero + batch dropdown already show.
 function updatePickerHints() {
   const bh = $('anBatchHint');
   if (bh) {
     const n = state.batches.length + (state.keywordBatches || []).filter(b => !state.batches.find(j => j.batch_id === b.batch_id)).length;
     bh.textContent = n === 0 ? 'no batches yet' : `${n} batch${n === 1 ? '' : 'es'} available`;
   }
-}
-
-function renderBatchPreview() {
-  const el = $('anBatchPreview');
-  if (!el) return;
-  const id = analytics.batchId;
-  if (!id) { el.innerHTML = `<span style="color:var(--text-3);">Pick a batch to see coverage stats here.</span>`; return; }
-  const jobsBatch = state.batches.find(b => b.batch_id === id);
-  const kwBatch   = (state.keywordBatches || []).find(b => b.batch_id === id);
-  const name      = state.batchNames.get(id)?.display_name;
-  const parts = [];
-  if (name) parts.push(`<span class="stat">📛 <b>${esc(name)}</b></span>`);
-  parts.push(`<span class="stat" title="${esc(id)}"><code style="font-size:10px;">${esc(id.slice(-10))}</code></span>`);
-  if (jobsBatch) {
-    parts.push(`<span class="stat">SKUs: <b>${jobsBatch.total}</b></span>`);
-    if (jobsBatch.done != null)    parts.push(`<span class="stat" style="color:var(--success);">done: <b>${jobsBatch.done}</b></span>`);
-    if (jobsBatch.claimed != null) parts.push(`<span class="stat" style="color:var(--accent);">in-flight: <b>${jobsBatch.claimed}</b></span>`);
-    if (jobsBatch.pending != null) parts.push(`<span class="stat">pending: <b>${jobsBatch.pending}</b></span>`);
-    if (jobsBatch.failed  != null && jobsBatch.failed > 0)  parts.push(`<span class="stat" style="color:var(--danger);">failed: <b>${jobsBatch.failed}</b></span>`);
-  }
-  if (kwBatch) parts.push(`<span class="stat">keywords: <b>${(kwBatch.row_count || 0).toLocaleString()}</b></span>`);
-  el.innerHTML = `<div class="row-mini">${parts.join('')}</div>`;
-}
-
-function renderSkuPreview() {
-  const el = $('anSkuPreview');
-  if (!el) return;
-  // Product identity + DQ grade + open-product all live in the hero now
-  // (see renderAnalyticsHero). Keep this slot short so it just confirms
-  // the selection and doesn't compete for attention. When no SKU is
-  // picked, still nudge the user; when a SKU IS loaded, we hide the
-  // preview entirely to remove visual noise from the picker.
-  if (!analytics.sku) { el.style.display = ''; el.innerHTML = `<span style="color:var(--text-3);">Pick a SKU (or leave blank for all-batch view). Full stats appear in the hero below.</span>`; return; }
-  el.style.display = 'none';
 }
 
 // Search-as-you-type filters both dropdowns without shuffling the DOM tree
@@ -1887,13 +1862,11 @@ wirePickerSearch();
 $('anBatchSelect').addEventListener('change', async () => {
   analytics.batchId = $('anBatchSelect').value;
   analytics.sku = '';
-  renderPickerBatchChips();
-  renderBatchPreview();
+  updatePickerHints();
   await loadAnalyticsBatch(analytics.batchId);
 });
 $('anSkuSelect').addEventListener('change', () => {
   analytics.sku = $('anSkuSelect').value;
-  renderSkuPreview();
   filterAndRenderAnalytics();
 });
 ['anSearch', 'anSource', 'anIntent', 'anMinRating', 'anOnlyImgMatches'].forEach(id => {
@@ -2141,7 +2114,6 @@ async function loadAnalyticsBatch(batchId) {
     // Enable SKU search + update the SKU hint now that data has loaded.
     const ss = $('anSkuSearch'); if (ss) ss.disabled = false;
     const sh = $('anSkuHint'); if (sh) sh.textContent = `${skuList.length} SKU(s) in this batch`;
-    renderSkuPreview();
   } catch (e) {
     summary.innerHTML = `<div class="banner err">Failed to load: ${esc(e.message)}</div>`;
     return;
@@ -2936,76 +2908,6 @@ function renderExecutiveSummary(sourceRows, filteredRows) {
   if (sub) sub.textContent = `${scored.length.toLocaleString()} keyword(s) analysed`;
 }
 
-function renderAnalyticsSummary(rows) {
-  const el = $('anSummary');
-  if (rows.length === 0) {
-    el.innerHTML = `<div class="empty"><div class="empty-icon">📭</div>${analytics.sku ? 'No keywords for this SKU yet.' : 'No keywords in this batch yet.'}</div>`;
-    return;
-  }
-  // Compact stat row — used to live above as 5 large tiles + a whole card
-  // for sources + intent. Merged into a single dense strip so the Executive
-  // Summary + Insights below get the vertical space instead. The multi-
-  // source combo chips ("KP_IDEA, AUTOSUGGEST, RELATED_SEARCH") that
-  // read as noise are gone; we aggregate by PRIMARY source instead.
-  const withImg = rows.filter(r => (toNum(r.image_count) || 0) > 0).length;
-  const totalImg = rows.reduce((s, r) => s + (toNum(r.image_count) || 0), 0);
-  const withVol = rows.filter(r => (toNum(r.kp_monthly_searches) || 0) > 0).length;
-  const avgScore = rows.reduce((s, r) => s + (Number(r.opportunity_score) || 0), 0) / rows.length;
-
-  const primarySrc = {};
-  for (const r of rows) {
-    const k = String(r.source || '—').split(',')[0].trim().toUpperCase() || '—';
-    primarySrc[k] = (primarySrc[k] || 0) + 1;
-  }
-  const srcClassFor = (k) => {
-    const s = String(k).toLowerCase();
-    if (s.startsWith('kp')) return 'src-kp';
-    if (s.startsWith('autosuggest')) return 'src-autosuggest';
-    if (s.startsWith('serp')) return 'src-serp';
-    if (s.startsWith('paa')) return 'src-paa';
-    if (s.startsWith('related')) return 'src-related';
-    if (s.startsWith('amazon')) return 'src-amazon';
-    return 'pending';
-  };
-  const srcIcon = (k) => {
-    const s = String(k).toLowerCase();
-    if (s.startsWith('kp')) return '📊';
-    if (s.startsWith('autosuggest')) return '⌨️';
-    if (s.startsWith('serp')) return '🔎';
-    if (s.startsWith('paa')) return '❓';
-    if (s.startsWith('related')) return '🔗';
-    if (s.startsWith('amazon')) return '🛒';
-    return '·';
-  };
-  const totalRows = rows.length;
-  const srcChips = Object.entries(primarySrc).sort((a, b) => b[1] - a[1]).map(([k, v]) => {
-    const pct = Math.round((v / totalRows) * 100);
-    const sel = xfHas('sources', k) ? ' selected' : '';
-    return `<span class="chip clickable-x ${srcClassFor(k)}${sel}" data-xf-kind="sources" data-xf-v="${esc(k)}" title="Click to filter to ${esc(k)} only. Click again to clear.">${srcIcon(k)} <strong>${esc(k)}</strong> · ${v}<span style="opacity:.65;"> · ${pct}%</span></span>`;
-  }).join(' ');
-
-  const byIntent = { high: 0, medium: 0, low: 0, informational: 0 };
-  for (const r of rows) { const k = String(r.buying_intent || '').toLowerCase(); if (byIntent[k] != null) byIntent[k]++; }
-  const intentChips = ['high', 'medium', 'low', 'informational'].filter(k => byIntent[k] > 0).map(k => {
-    const cls = k === 'high' ? 'done' : k === 'medium' ? 'claimed' : 'pending';
-    const pct = Math.round((byIntent[k] / totalRows) * 100);
-    const sel = xfHas('intents', k) ? ' selected' : '';
-    return `<span class="chip clickable-x ${cls}${sel}" data-xf-kind="intents" data-xf-v="${esc(k)}" title="Click to filter to ${esc(k)}-intent keywords only.">
-      <strong>${k}</strong>: ${byIntent[k]}<span style="opacity:.65;"> · ${pct}%</span></span>`;
-  }).join(' ');
-
-  el.innerHTML = `
-    <div class="tiles compact-tiles">
-      <div class="tile success"><div class="lbl">Keywords</div><div class="val">${totalRows.toLocaleString()}</div></div>
-      <div class="tile info"><div class="lbl">Image matches</div><div class="val">${withImg}<span class="sub"> · ${totalImg} hits</span></div></div>
-      <div class="tile ${avgScore >= 7 ? 'success' : ''}"><div class="lbl">Avg opportunity</div><div class="val">${avgScore.toFixed(1)}</div></div>
-      <div class="tile ${withVol > 0 ? '' : 'warn'}"><div class="lbl">KP volume rows</div><div class="val">${withVol}<span class="sub"> / ${totalRows}</span></div></div>
-    </div>
-    <div class="row tight" style="margin: 6px 0;">${srcChips || ''}</div>
-    ${intentChips ? `<div class="row tight" style="margin-bottom: 6px;">${intentChips}</div>` : ''}
-  `;
-}
-
 // Auto-generated recommendations from the current batch/SKU. Users glance
 // at this instead of scanning the whole table.
 function renderAnalyticsInsights(sourceRows, filteredRows) {
@@ -3018,41 +2920,12 @@ function renderAnalyticsInsights(sourceRows, filteredRows) {
     return;
   }
 
-  // Attach scores to every row up-front so the ranking here matches the table.
+  // Attach scores so the histogram + actionable tiles are computed from
+  // the same ordering the rest of the tab uses.
   const scored = sourceRows.map(r => ({ ...r, __s: opportunityScore(r) }));
 
-  // ── Top 3 opportunities ─────────────────────────────────────────
-  const top = [...scored].sort((a, b) => b.__s - a.__s).slice(0, 3);
-
-  // ── Buying-intent breakdown ─────────────────────────────────────
-  const byIntent = { high: 0, medium: 0, low: 0, informational: 0, other: 0 };
-  for (const r of scored) {
-    const k = String(r.buying_intent || 'other').toLowerCase();
-    byIntent[k] != null ? byIntent[k]++ : byIntent.other++;
-  }
-
-  // ── Best-performing source (by average opportunity score) ───────
-  const sourceStats = new Map();
-  for (const r of scored) {
-    const key = String(r.source || '—').split(',')[0].trim().toUpperCase();
-    const cur = sourceStats.get(key) || { count: 0, scoreSum: 0, imgs: 0 };
-    cur.count++;
-    cur.scoreSum += r.__s;
-    if ((r.image_count || 0) > 0) cur.imgs++;
-    sourceStats.set(key, cur);
-  }
-  const bestSources = Array.from(sourceStats.entries())
-    .filter(([, s]) => s.count >= 3)
-    .map(([k, s]) => ({ source: k, avg: s.scoreSum / s.count, count: s.count, imgs: s.imgs }))
-    .sort((a, b) => b.avg - a.avg)
-    .slice(0, 3);
-
-  // ── Coverage checks ─────────────────────────────────────────────
+  // Actionable tiles.
   const total = scored.length;
-  const kpMetric = scored.filter(r => (r.kp_monthly_searches || 0) > 0).length;
-  const kpCoveragePct = total > 0 ? Math.round((kpMetric / total) * 100) : 0;
-  const withImg = scored.filter(r => (r.image_count || 0) > 0).length;
-  const imgCoveragePct = total > 0 ? Math.round((withImg / total) * 100) : 0;
   const dropySellerRows = scored.filter(r => String(r.dropy_is_seller || '').toLowerCase() === 'yes').length;
   const lowCompHighVol = scored.filter(r => String(r.kp_competition || '').toLowerCase() === 'low' && (r.kp_monthly_searches || 0) >= 500).length;
 
@@ -3130,72 +3003,11 @@ function renderAnalyticsInsights(sourceRows, filteredRows) {
       </div>
     </div>
 
-    <div class="two-col" style="gap: 10px;">
-      <div>
-        <div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px;">🎯 Top 3 opportunities</div>
-        ${top.length === 0 ? '<div class="hint">No scored rows yet.</div>' : top.map((r, i) => {
-          const vol = toNum(r.kp_monthly_searches);
-          const rating = toNum(r.ad_rating);
-          const imgs = toNum(r.image_count) ?? 0;
-          const kw = String(r.keyword || '—');
-          const href = r.serp_url || `https://www.google.com/search?q=${encodeURIComponent(kw)}`;
-          const tier = scoreTier(r.__s);
-          return `
-          <div style="padding: 8px 10px; border: 1px solid var(--line-1); border-left: 3px solid ${tier.color}; border-radius: 6px; margin-bottom: 6px; background: var(--bg-2);">
-            <div style="display:flex; justify-content:space-between; align-items:baseline; gap:8px;">
-              <div style="font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1;" title="${esc(kw)}">
-                <span style="color:var(--accent);">#${i + 1}</span>&nbsp;
-                <a href="${esc(href)}" target="_blank" rel="noopener">${esc(kw)}</a>
-              </div>
-              <div style="font-family: var(--mono); color:${tier.color}; font-weight:700; font-size:14px;">${r.__s.toFixed(1)}</div>
-            </div>
-            <div style="font-size:11px; color:var(--text-2); margin-top:4px;">
-              ${vol != null && vol > 0 ? `📊 ${vol.toLocaleString()} vol` : '📊 —'}
-              &nbsp;·&nbsp;
-              ${r.kp_competition ? `🎯 ${esc(r.kp_competition)} comp` : '🎯 —'}
-              &nbsp;·&nbsp;
-              ⭐ ${rating != null ? rating.toFixed(1) : '—'}
-              &nbsp;·&nbsp;
-              ${imgs > 0 ? `📷 ${imgs}` : '📷 —'}
-              ${r.buying_intent ? `&nbsp;·&nbsp;<span class="chip ${r.buying_intent === 'high' ? 'done' : r.buying_intent === 'medium' ? 'claimed' : 'pending'}" style="font-size:10px;">${esc(r.buying_intent)}</span>` : ''}
-            </div>
-          </div>`;
-        }).join('')}
-      </div>
-
-      <div>
-        <div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px;">🏆 Best-performing sources</div>
-        ${bestSources.length === 0 ? '<div class="hint">Need more rows to compare sources.</div>' : `
-          <table class="tbl" style="font-size: 12px;">
-            <thead><tr><th>Source</th><th class="num">Avg score</th><th class="num">Rows</th><th class="num">With imgs</th></tr></thead>
-            <tbody>${bestSources.map(s => `
-              <tr>
-                <td><span class="chip ${
-                  s.source.includes('KP') ? 'src-kp' :
-                  s.source.includes('AUTOSUGGEST') ? 'src-autosuggest' :
-                  s.source.includes('SERP') ? 'src-serp' :
-                  s.source.includes('PAA') ? 'src-paa' :
-                  s.source.includes('RELATED') ? 'src-related' :
-                  s.source.includes('AMAZON') ? 'src-amazon' : 'pending'
-                }">${esc(s.source)}</span></td>
-                <td class="num" style="color:var(--accent); font-weight:600;">${s.avg.toFixed(1)}</td>
-                <td class="num">${s.count}</td>
-                <td class="num" style="color: ${s.imgs > 0 ? 'var(--success)' : 'var(--text-3)'};">${s.imgs}</td>
-              </tr>`).join('')}
-            </tbody>
-          </table>`}
-
-        <div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-top:12px; margin-bottom:6px;">🧭 Buying intent mix</div>
-        <div class="row tight">
-          ${byIntent.high        > 0 ? `<span class="chip done">high: ${byIntent.high}</span>` : ''}
-          ${byIntent.medium      > 0 ? `<span class="chip claimed">medium: ${byIntent.medium}</span>` : ''}
-          ${byIntent.low         > 0 ? `<span class="chip pending">low: ${byIntent.low}</span>` : ''}
-          ${byIntent.informational > 0 ? `<span class="chip pending">informational: ${byIntent.informational}</span>` : ''}
-          ${byIntent.other       > 0 ? `<span class="chip pending">unclassified: ${byIntent.other}</span>` : ''}
-        </div>
-      </div>
-    </div>
   `;
+  // Removed: Top-3 opportunities (Top-10 bar chart owns this in Prioritize),
+  // Best-performing sources (Source donut owns this in Distribution),
+  // Buying-intent mix (scatter color-encodes intent + Deep-dive Intent
+  // column). Three duplicated views became one histogram.
   if (sub) sub.textContent = `${filteredRows.length.toLocaleString()} row(s) · scoring live`;
 }
 
