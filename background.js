@@ -912,7 +912,9 @@ async function pollWorkerCommands() {
           state.continuousClaim = false;
           await chrome.storage.local.set({ adbrainContinuousClaim: false }).catch(() => {});
           await setRunIntent(false);
-          bufferActivity({ level: 'warn', source: 'cmd', message: `Stop command received from manager — halting after current product.` });
+          // Release any not-yet-processed claims so other workers can pick
+          // them up immediately (don't wait for the 10-min stale timer).
+          await releaseThisWorkerClaims('Manager Stop command');
         } else if (c.command === 'pause') {
           // Graceful halt after the current SKU. Unlike stop, we keep
           // workerArmed=true and don't set userStoppedArm, so a Resume
@@ -1004,16 +1006,25 @@ async function pollWorkerCommands() {
           bufferActivity({ level: 'warn', source: 'cmd', message: `reset_local: manager reset detected — cleared local job/run state (worker id + config kept).` });
           pushLog(`Manager reset detected — cleared local run state. Worker stays armed and will claim from the next batch you upload.`, 'ok');
         } else if (c.command === 'release_claims') {
-          // Release this worker's claims back to pending.
-          await releaseStaleJobs(0).catch(() => {});
-          state.claimedJobs = [];
-          await chrome.storage.local.set({ [STORAGE_KEY_CLAIMED_JOBS]: [] }).catch(() => {});
-          bufferActivity({ level: 'warn', source: 'cmd', message: `Release-claims command received — claims back to queue.` });
+          await releaseThisWorkerClaims('release-claims command');
         }
         await acknowledgeCommand(c.id, state.workerId);
       } catch {}
     }
   } catch {}
+}
+
+// Shared claim-release path — used by the 'release_claims' command AND by
+// both Stop paths (local Stop button + remote 'stop' command). Before this
+// helper existed, a user-stop cleared local state but left the claims held
+// on the manager for up to 10 min (until the stale-release timer). That
+// left 'stopped' workers showing '6 in-flight' on the dashboard and
+// blocked those SKUs from being picked up by an active worker.
+async function releaseThisWorkerClaims(reasonForLog) {
+  await releaseStaleJobs(0).catch(() => {});
+  state.claimedJobs = [];
+  await chrome.storage.local.set({ [STORAGE_KEY_CLAIMED_JOBS]: [] }).catch(() => {});
+  bufferActivity({ level: 'warn', source: 'cmd', message: `${reasonForLog} — released claims back to queue.` });
 }
 
 async function tickHeartbeat() {
@@ -1360,6 +1371,27 @@ async function _handleStartInner(msg) {
                       state.report.length
                     );
                     await persistPushed();
+                    // FLUSH this SKU's rows from local memory + storage now
+                    // that the manager has the authoritative copy. Without
+                    // this the local report grows unbounded across the batch
+                    // and blows chrome.storage.local's quota (each row has
+                    // matched_thumbnails / seller lists / etc. — a 20-SKU
+                    // batch @ 300 kw/SKU × ~5 KB/row ≈ 30 MB local footprint).
+                    // Reliability: only flush AFTER a fully-successful push
+                    // (r.failed === 0 branch); on partial or exception we
+                    // keep the rows locally so retries still have data.
+                    for (const row of productRows) {
+                      const kw = String(row.keyword || '').toLowerCase().trim();
+                      const pu = String(row.productUrl || '').trim();
+                      if (!kw) continue;
+                      reportMap.delete(pu ? `${pu}|${kw}` : kw);
+                    }
+                    state.report = Array.from(reportMap.values());
+                    await persistReport();
+                    emitProgress({
+                      currentAction: `Flushed ${productRows.length} row(s) from local memory — local report now ${state.report.length} row(s).`,
+                      logKind: 'ok',
+                    });
                   }
                 } catch (e) {
                   // Network/auth failure on the whole push. Queue for
@@ -1668,6 +1700,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       adbrainWorkerArmed: false,
       adbrainUserStoppedArm: true,
     }).catch(() => {});
+    // Release any not-yet-processed claims back to pending so the dashboard
+    // doesn't show '6 in-flight' after a Stop, and other workers can grab
+    // those SKUs immediately. Fire-and-forget — Stop already resolved.
+    releaseThisWorkerClaims('Local Stop button').catch(() => {});
     sendResponse({ ok: true });
     return false;
   }

@@ -5,6 +5,7 @@
   "description": "Per product: Keyword Planner -> keyword discovery + CLIP image matching on Google SERPs.",
   "permissions": [
     "storage",
+    "unlimitedStorage",
     "scripting",
     "activeTab",
     "downloads",

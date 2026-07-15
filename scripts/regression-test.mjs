@@ -1155,6 +1155,21 @@ async function run() {
   assert(cssBody.includes('.scatter-tt'),                        '20s.104 scatter tooltip CSS defined');
   assert(appJs.body.includes("addEventListener('mouseenter'"),   '20s.105 scatter dots wire mouseenter');
 
+  // ===== FLEET FIXES: quota, stale claims, per-SKU flush, co-brand =====
+  const mfFleet = readFileSync(resolve(REPO, 'manifest.json'), 'utf-8');
+  assert(/"unlimitedStorage"/.test(mfFleet), 'FLEET.1 manifest declares unlimitedStorage');
+  const bgFleet = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
+  assert(bgFleet.includes('releaseThisWorkerClaims'),                                 'FLEET.2 releaseThisWorkerClaims helper defined');
+  assert(bgFleet.includes("releaseThisWorkerClaims('Local Stop button')"),            'FLEET.3 local Stop releases claims');
+  assert(bgFleet.includes("releaseThisWorkerClaims('Manager Stop command')"),         'FLEET.4 remote Stop releases claims');
+  assert(bgFleet.includes('Flushed ') && bgFleet.includes('reportMap.delete'),        'FLEET.5 per-SKU flush drops rows after successful push');
+  const kdFleet = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+  assert(kdFleet.includes('KP_CACHE_MAX_ENTRIES'),                                    'FLEET.6 KP-cache LRU cap defined');
+  assert(kdFleet.includes('KP_CACHE_MAX_KEYWORDS_PER_ENTRY'),                         'FLEET.7 KP-cache per-entry cap defined');
+  const kfFleet = readFileSync(resolve(REPO, 'modules/keyword-filter.js'), 'utf-8');
+  assert(kfFleet.includes('Co-branded product handling'),                             'FLEET.8 co-brand alias expansion in buildProductContext');
+  assert(/for \(const b of _KNOWN_COMPETITOR_BRANDS\)/.test(kfFleet),                 'FLEET.9 iterates competitor brands for aliases');
+
   // Cache-buster: index.html served with mtime-versioned asset URLs so
   // browsers can't hold onto a stale app.js/styles.css after a deploy.
   const idxServed = await fetchNoAuth('/');
