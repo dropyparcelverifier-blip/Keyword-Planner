@@ -1605,6 +1605,15 @@ const analytics = {
   // Which column groups (see KEYWORD_COL_DEFS) are visible. 'core' is
   // always on. Persisted to localStorage across reloads. Restored below.
   visibleGroups: new Set(['kp', 'image', 'sellers']),
+  // Cross-filter state — any chip/slice/row click adds a filter here and
+  // the whole dashboard re-renders against the narrowed set. Cleared via
+  // the active-filters bar or the "Clear all" button.
+  xFilter: {
+    sources: new Set(),   // primary-source names (uppercase): {'KP_IDEA', 'AUTOSUGGEST', ...}
+    intents: new Set(),   // 'high' | 'medium' | 'low' | 'informational'
+    tiers:   new Set(),   // 'excellent' | 'good' | 'ok' | 'low'
+    themes:  new Set(),   // theme keys from KW_THEMES
+  },
 };
 // Restore group visibility from localStorage.
 try {
@@ -2132,13 +2141,117 @@ async function loadAnalyticsBatch(batchId) {
   filterAndRenderAnalytics();
 }
 
+// Global click delegation for cross-filter chips — one listener handles
+// every clickable-x chip / slice / row on the analytics tab. Listens on
+// the analytics panel so we don't fire on unrelated clicks.
+document.addEventListener('click', (e) => {
+  // Anchor tags inside a data-xf-kind element are pass-throughs — we
+  // don't want clicking "listerine breath strips" (a SERP link) to
+  // also trigger the row's theme filter.
+  if (e.target.closest('a')) return;
+  const target = e.target.closest('[data-xf-kind]');
+  if (!target) return;
+  const kind = target.dataset.xfKind;
+  const v = target.dataset.xfV;
+  if (!kind || v == null) return;
+  e.preventDefault();
+  xfToggle(kind, v);
+});
+
+// ─────────── Cross-filter helpers ───────────
+// Every clickable chip / slice / row calls one of these. They toggle the
+// selection (click again to remove) and trigger a full re-render — cards
+// and table both react to the same filter set.
+function xfToggle(kind, value) {
+  const set = analytics.xFilter[kind];
+  if (!set) return;
+  const key = String(value);
+  if (set.has(key)) set.delete(key); else set.add(key);
+  filterAndRenderAnalytics();
+  renderActiveFiltersBar();
+}
+function xfClear(kind, value) {
+  if (kind === '*') {
+    analytics.xFilter = { sources: new Set(), intents: new Set(), tiers: new Set(), themes: new Set() };
+  } else if (analytics.xFilter[kind]) {
+    if (value === undefined) analytics.xFilter[kind].clear();
+    else analytics.xFilter[kind].delete(String(value));
+  }
+  filterAndRenderAnalytics();
+  renderActiveFiltersBar();
+}
+function xfHas(kind, value) {
+  return !!analytics.xFilter[kind]?.has(String(value));
+}
+function xfCount() {
+  const x = analytics.xFilter;
+  return x.sources.size + x.intents.size + x.tiers.size + x.themes.size;
+}
+// Applies the cross-filter set to a row list. Used inside
+// filterAndRenderAnalytics before the search/dropdown filters run.
+function applyCrossFilter(rows) {
+  const x = analytics.xFilter;
+  if (xfCount() === 0) return rows;
+  return rows.filter(r => {
+    if (x.sources.size > 0) {
+      const primary = String(r.source || '').split(',')[0].trim().toUpperCase();
+      if (!x.sources.has(primary)) return false;
+    }
+    if (x.intents.size > 0) {
+      const intent = String(r.buying_intent || '').toLowerCase();
+      if (!x.intents.has(intent)) return false;
+    }
+    if (x.tiers.size > 0) {
+      const tier = scoreTier(opportunityScore(r)).tier;
+      if (!x.tiers.has(tier)) return false;
+    }
+    if (x.themes.size > 0) {
+      const kw = String(r.keyword || '').toLowerCase();
+      const productName = String(r.product_name || '').toLowerCase();
+      let hit = 'other';
+      for (const th of KW_THEMES) { if (th.test(kw, productName)) { hit = th.key; break; } }
+      if (!x.themes.has(hit)) return false;
+    }
+    return true;
+  });
+}
+// Active-filters bar — chip per selection, X to remove, one "Clear all"
+// button. Only visible when at least one filter is active.
+function renderActiveFiltersBar() {
+  const el = $('anActiveFilters');
+  if (!el) return;
+  const x = analytics.xFilter;
+  if (xfCount() === 0) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = 'flex';
+  const chips = [];
+  for (const s of x.sources) chips.push({ kind: 'sources', v: s, icon: '📊', label: s });
+  for (const s of x.intents) chips.push({ kind: 'intents', v: s, icon: '🎯', label: `${s} intent` });
+  for (const s of x.tiers)   chips.push({ kind: 'tiers',   v: s, icon: '⭐', label: `${s} tier` });
+  for (const s of x.themes) {
+    const th = KW_THEMES.find(t => t.key === s);
+    chips.push({ kind: 'themes', v: s, icon: th?.icon || '🎨', label: th?.label || s });
+  }
+  el.innerHTML = `
+    <span class="af-lbl">Filtering by:</span>
+    ${chips.map(c => `<button class="af-chip" data-kind="${c.kind}" data-v="${esc(c.v)}" title="Click to remove this filter.">${c.icon} ${esc(c.label)} <span class="af-x">×</span></button>`).join('')}
+    <button class="af-clear" data-clear-all="1">Clear all</button>`;
+  el.querySelectorAll('button.af-chip').forEach(btn =>
+    btn.addEventListener('click', () => xfClear(btn.dataset.kind, btn.dataset.v))
+  );
+  el.querySelector('button.af-clear')?.addEventListener('click', () => xfClear('*'));
+}
+
 function filterAndRenderAnalytics() {
   // Pick working set: selected SKU or all-in-batch.
-  const source = analytics.sku
+  const rawSource = analytics.sku
     ? analytics.allRows.filter(r => (r.sku || r.product_url) === analytics.sku)
     : analytics.allRows;
 
-  // Apply filters.
+  // Cross-filter (clicks on chips/slices/rows). Applied to `source` before
+  // downstream cards so every card reflects the same narrowed set.
+  const source = applyCrossFilter(rawSource);
+
+  // Apply UI-control filters (search box + dropdowns) on top of cross-filter.
   const q = ($('anSearch').value || '').trim().toLowerCase();
   const src = $('anSource').value;
   const intent = $('anIntent').value;
@@ -2146,7 +2259,12 @@ function filterAndRenderAnalytics() {
   const onlyImg = $('anOnlyImgMatches').checked;
   const filtered = source.filter(r => {
     if (q && !String(r.keyword || '').toLowerCase().includes(q)) return false;
-    if (src && String(r.source || '').toLowerCase() !== src.toLowerCase()) return false;
+    // Source match is CONTAINS not equals — multi-source rows like
+    // "AUTOSUGGEST, RELATED_SEARCH" must pass when filtering by either.
+    if (src) {
+      const parts = String(r.source || '').toLowerCase().split(',').map(s => s.trim());
+      if (!parts.some(p => p.includes(src.toLowerCase()))) return false;
+    }
     if (intent && String(r.buying_intent || '').toLowerCase() !== intent.toLowerCase()) return false;
     if ((r.ad_rating || 0) < minRating) return false;
     if (onlyImg && !((r.image_count || 0) > 0)) return false;
@@ -2169,6 +2287,7 @@ function filterAndRenderAnalytics() {
   });
 
   analytics.skuRows = filtered;
+  renderActiveFiltersBar();
   renderExecutiveSummary(source, filtered);
   renderAnalyticsSummary(source);
   renderAnalyticsInsights(source, filtered);
@@ -2251,14 +2370,19 @@ function renderScatter(rows) {
     return `<line class="grid-line" x1="${pad.l}" y1="${y}" x2="${pad.l + plotW}" y2="${y}"/>`;
   }).join('');
 
-  // Points — click opens the SERP for that keyword.
-  const points = scored.map(r => {
+  // Points — click opens the SERP for that keyword. Data attributes carry
+  // everything the floating tooltip needs (no SVG <title> fallback since
+  // it flashes and blocks the CSS hover UX we want).
+  const points = scored.map((r, i) => {
     const cx = sx(xScale(xVal(r)));
     const cy = sy(r.score);
     const rr = radiusFor(r);
     const c = colorFor(r);
-    const title = `${r.kw}\nScore ${r.score.toFixed(1)}${r.vol ? ` · vol ${r.vol.toLocaleString()}` : ''}${r.imgs ? ` · ${r.imgs} imgs` : ''}${r.intent ? ` · ${r.intent} intent` : ''}`;
-    return `<a xlink:href="${esc(r.href)}" target="_blank"><circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${rr.toFixed(1)}" fill="${c}" fill-opacity="0.65" stroke="${c}" stroke-width="1"><title>${esc(title)}</title></circle></a>`;
+    return `<a xlink:href="${esc(r.href)}" target="_blank"><circle
+      cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${rr.toFixed(1)}"
+      fill="${c}" fill-opacity="0.65" stroke="${c}" stroke-width="1"
+      class="scatter-dot"
+      data-idx="${i}"></circle></a>`;
   }).join('');
 
   // Quadrant lines + labels — median splits.
@@ -2279,7 +2403,7 @@ function renderScatter(rows) {
     <text class="axis-label" x="${pad.l + plotW / 2}" y="${H - 8}" text-anchor="middle">${esc(xLabel)}</text>`;
 
   el.innerHTML = `
-    <div class="scatter">
+    <div class="scatter" id="anScatterBox">
       <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
         ${grid}
         ${quadLines}
@@ -2287,6 +2411,7 @@ function renderScatter(rows) {
         ${quadLabels}
         ${axisLabels}
       </svg>
+      <div class="scatter-tt" id="anScatterTip" style="display:none;"></div>
     </div>
     <div class="scatter-legend">
       <span><strong>Intent:</strong></span>
@@ -2294,8 +2419,45 @@ function renderScatter(rows) {
       <span><span class="dot" style="background:${intentColor.medium};"></span>medium</span>
       <span><span class="dot" style="background:${intentColor.low};"></span>low</span>
       <span><span class="dot" style="background:${intentColor.informational};"></span>informational</span>
-      <span style="margin-left: 12px;"><strong>Dot size:</strong> image-match count · <strong>Click any point</strong> to open its SERP.</span>
+      <span style="margin-left: 12px;"><strong>Dot size:</strong> image-match count · <strong>Click any point</strong> to open its SERP · <strong>Hover</strong> for details.</span>
     </div>`;
+
+  // Floating rich tooltip — activates on mouseenter of each dot, tracks
+  // the cursor, disappears on mouseleave. Chose absolute-positioned div
+  // over SVG <foreignObject> so we can style it with the existing CSS.
+  const tip = $('anScatterTip');
+  const box = $('anScatterBox');
+  const dots = el.querySelectorAll('.scatter-dot');
+  dots.forEach(dot => {
+    dot.addEventListener('mouseenter', (e) => {
+      const idx = parseInt(dot.dataset.idx, 10);
+      const r = scored[idx];
+      if (!r || !tip) return;
+      const bits = [];
+      bits.push(`<div class="tt-kw">${esc(r.kw)}</div>`);
+      bits.push(`<div class="tt-score" style="color:${scoreTier(r.score).color};">Score ${r.score.toFixed(1)} <span style="opacity:.7;">·</span> ${scoreTier(r.score).tier.toUpperCase()}</div>`);
+      const rowBits = [];
+      if (r.vol > 0) rowBits.push(`📊 ${r.vol.toLocaleString()} vol`);
+      if (r.rating) rowBits.push(`⭐ ${r.rating.toFixed(1)} AdRating`);
+      if (r.imgs > 0) rowBits.push(`📷 ${r.imgs} imgs`);
+      if (r.intent) rowBits.push(`🎯 ${r.intent} intent`);
+      if (rowBits.length) bits.push(`<div class="tt-meta">${rowBits.join(' · ')}</div>`);
+      bits.push(`<div class="tt-hint">Click to open the Google SERP →</div>`);
+      tip.innerHTML = bits.join('');
+      tip.style.display = 'block';
+    });
+    dot.addEventListener('mousemove', (e) => {
+      if (!tip || !box) return;
+      const rect = box.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      // Keep tooltip on-screen: flip to the left of cursor near right edge.
+      const flip = x > rect.width - 240;
+      tip.style.left = flip ? (x - 240) + 'px' : (x + 12) + 'px';
+      tip.style.top  = Math.max(0, y - 60) + 'px';
+    });
+    dot.addEventListener('mouseleave', () => { if (tip) tip.style.display = 'none'; });
+  });
 }
 
 // ─────────── Source distribution donut chart ───────────
@@ -2348,14 +2510,18 @@ function renderSourceDonut(rows) {
                L ${x0i.toFixed(2)} ${y0i.toFixed(2)}
                A ${rInner} ${rInner} 0 ${large} 0 ${x1i.toFixed(2)} ${y1i.toFixed(2)}
                Z`;
-    return `<path d="${d}" fill="${colorFor(k)}"><title>${esc(k)}: ${v} (${Math.round(frac * 100)}%)</title></path>`;
+    const isSelected = xfHas('sources', k);
+    const opacity = xfCount() > 0 && !isSelected ? '0.35' : '1';
+    const stroke = isSelected ? 'stroke="#fff" stroke-width="2"' : '';
+    return `<path d="${d}" fill="${colorFor(k)}" fill-opacity="${opacity}" style="cursor:pointer;" data-xf-kind="sources" data-xf-v="${esc(k)}" ${stroke}><title>Click to filter → ${esc(k)}: ${v} (${Math.round(frac * 100)}%)</title></path>`;
   }).join('');
 
   const legend = entries.map(([k, v]) => {
     const pct = Math.round((v / total) * 100);
-    return `<div class="lg-row">
+    const sel = xfHas('sources', k) ? ' style="background:var(--info-soft);"' : '';
+    return `<div class="lg-row clickable-x" data-xf-kind="sources" data-xf-v="${esc(k)}"${sel} title="Click to filter dashboard to ${esc(k)} only.">
       <span class="lg-swatch" style="background:${colorFor(k)};"></span>
-      <span class="lg-name">${esc(k)}</span>
+      <span class="lg-name">${esc(k)}${xfHas('sources', k) ? ' ✓' : ''}</span>
       <span class="lg-count">${v} · ${pct}%</span>
     </div>`;
   }).join('');
@@ -2476,10 +2642,11 @@ function renderThemesCard(rows) {
     const topKw = top ? top.keyword : '';
     const href = top ? (top.serp_url || `https://www.google.com/search?q=${encodeURIComponent(topKw)}&gl=in`) : '#';
     const avgImg = c.rows.reduce((s, r) => s + (toNum(r.image_count) || 0), 0) / c.rows.length;
+    const sel = xfHas('themes', c.theme.key);
     return `
-      <div class="theme-row" data-theme="${c.theme.key}">
+      <div class="theme-row clickable-x${sel ? ' selected' : ''}" data-xf-kind="themes" data-xf-v="${esc(c.theme.key)}" title="Click to filter dashboard to ${esc(c.theme.label)} keywords only." style="${sel ? 'background: var(--info-soft);' : ''}">
         <div class="theme-name" style="color:${c.theme.color};">
-          <span style="font-size:14px;">${c.theme.icon}</span>&nbsp;<strong>${esc(c.theme.label)}</strong>
+          <span style="font-size:14px;">${c.theme.icon}</span>&nbsp;<strong>${esc(c.theme.label)}</strong>${sel ? ' ✓' : ''}
         </div>
         <div class="theme-bar-wrap">
           <div class="theme-bar" style="width:${width}%; background:${c.theme.color};"></div>
@@ -2730,7 +2897,8 @@ function renderAnalyticsSummary(rows) {
   const totalRows = rows.length;
   const srcChips = Object.entries(primarySrc).sort((a, b) => b[1] - a[1]).map(([k, v]) => {
     const pct = Math.round((v / totalRows) * 100);
-    return `<span class="chip ${srcClassFor(k)}" title="${esc(k)} — ${v} rows (${pct}% of pool)">${srcIcon(k)} <strong>${esc(k)}</strong> · ${v}<span style="opacity:.65;"> · ${pct}%</span></span>`;
+    const sel = xfHas('sources', k) ? ' selected' : '';
+    return `<span class="chip clickable-x ${srcClassFor(k)}${sel}" data-xf-kind="sources" data-xf-v="${esc(k)}" title="Click to filter to ${esc(k)} only. Click again to clear.">${srcIcon(k)} <strong>${esc(k)}</strong> · ${v}<span style="opacity:.65;"> · ${pct}%</span></span>`;
   }).join(' ');
 
   const byIntent = { high: 0, medium: 0, low: 0, informational: 0 };
@@ -2738,7 +2906,9 @@ function renderAnalyticsSummary(rows) {
   const intentChips = ['high', 'medium', 'low', 'informational'].filter(k => byIntent[k] > 0).map(k => {
     const cls = k === 'high' ? 'done' : k === 'medium' ? 'claimed' : 'pending';
     const pct = Math.round((byIntent[k] / totalRows) * 100);
-    return `<span class="chip ${cls}"><strong>${k}</strong>: ${byIntent[k]}<span style="opacity:.65;"> · ${pct}%</span></span>`;
+    const sel = xfHas('intents', k) ? ' selected' : '';
+    return `<span class="chip clickable-x ${cls}${sel}" data-xf-kind="intents" data-xf-v="${esc(k)}" title="Click to filter to ${esc(k)}-intent keywords only.">
+      <strong>${k}</strong>: ${byIntent[k]}<span style="opacity:.65;"> · ${pct}%</span></span>`;
   }).join(' ');
 
   el.innerHTML = `
@@ -2837,9 +3007,12 @@ function renderAnalyticsInsights(sourceRows, filteredRows) {
   const histBars = ['excellent', 'good', 'ok', 'low'].map(t => {
     const n = tiers[t];
     const pct = Math.round((n / tierMax) * 100);
+    const sel = xfHas('tiers', t);
     return `
-      <div style="display:grid; grid-template-columns: 120px 1fr 40px; gap:8px; align-items:center; padding: 3px 0;">
-        <div style="font-size:11px; color:${tierColor[t]};">${tierLabel[t]}</div>
+      <div class="clickable-x" data-xf-kind="tiers" data-xf-v="${t}" title="Click to filter dashboard to ${tierLabel[t]} keywords only."
+        style="display:grid; grid-template-columns: 120px 1fr 40px; gap:8px; align-items:center; padding: 3px 6px; border-radius: 4px;
+               ${sel ? 'background: var(--info-soft); outline: 1px solid var(--info);' : ''}">
+        <div style="font-size:11px; color:${tierColor[t]};">${tierLabel[t]}${sel ? ' ✓' : ''}</div>
         <div style="background:var(--bg-input); border-radius:3px; height:10px; overflow:hidden;">
           <div style="height:100%; width:${pct}%; background:${tierColor[t]};"></div>
         </div>

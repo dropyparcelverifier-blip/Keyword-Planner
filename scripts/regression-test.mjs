@@ -1139,6 +1139,21 @@ async function run() {
   assert(cssBody.includes('.scatter'),                           '20s.91 scatter CSS defined');
   assert(cssBody.includes('.donut'),                             '20s.92 donut CSS defined');
   assert(cssBody.includes('.gauge'),                             '20s.93 gauge CSS defined');
+  // Interactive cross-filter across cards.
+  assert(appJs.body.includes('applyCrossFilter'),                '20s.94 cross-filter application defined');
+  assert(appJs.body.includes('function xfToggle'),               '20s.95 cross-filter toggle helper defined');
+  assert(appJs.body.includes('function renderActiveFiltersBar'), '20s.96 active-filters bar renderer defined');
+  assert(appJs.body.includes('data-xf-kind'),                    '20s.97 clickable chips carry data-xf-kind attribute');
+  assert(appJs.body.includes("e.target.closest('a')"),           '20s.98 anchor clicks pass through cross-filter delegation');
+  assert(html.includes('id="anActiveFilters"'),                  '20s.99 active-filters bar in HTML');
+  assert(cssBody.includes('.af-bar'),                            '20s.100 active-filters CSS defined');
+  assert(cssBody.includes('.clickable-x'),                       '20s.101 clickable affordance CSS defined');
+  // Source filter is now contains-match (multi-source rows pass).
+  assert(/String\(r\.source \|\| ''\)\.toLowerCase\(\)\.split\(','\)/.test(appJs.body), '20s.102 source filter uses contains-match');
+  // Scatter rich tooltip.
+  assert(appJs.body.includes('anScatterTip'),                    '20s.103 scatter floating-tooltip element wired');
+  assert(cssBody.includes('.scatter-tt'),                        '20s.104 scatter tooltip CSS defined');
+  assert(appJs.body.includes("addEventListener('mouseenter'"),   '20s.105 scatter dots wire mouseenter');
 
   // Cache-buster: index.html served with mtime-versioned asset URLs so
   // browsers can't hold onto a stale app.js/styles.css after a deploy.
