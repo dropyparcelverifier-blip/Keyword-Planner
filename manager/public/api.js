@@ -65,6 +65,9 @@ export const api = {
   keywordsBatches:   ()                => _fetch('/api/keywords/batches'),
   keywordsOrphans:   ()                => _fetch('/api/keywords/orphans'),
   cleanupOrphans:    ()                => _fetch('/api/keywords/cleanup-orphans', { method: 'POST', body: { confirm: 'CLEAN_ORPHANS' } }),
+  quiesceWorkers:    ()                => _fetch('/api/workers/quiesce', { method: 'POST', body: {} }),
+  backupsList:       ()                => _fetch('/api/backups/list'),
+  backupNow:         ()                => _fetch('/api/backups/create', { method: 'POST', body: {} }),
 };
 
 // Live keyword stats — mirrors the extension's dashboard fetchBatchKeywordStats.

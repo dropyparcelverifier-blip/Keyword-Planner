@@ -29,6 +29,12 @@ const HOST  = process.env.HOST || '0.0.0.0';
 const TOKEN = (process.env.MANAGER_TOKEN || '').trim();
 const DB_PATH = process.env.DB || path.join(__dirname, 'adbrain.db');
 const PUBLIC_DIR = path.join(__dirname, 'public');
+// Auto-backup config. BACKUP_DIR defaults to manager/backups. BACKUP_KEEP_N
+// keeps the N newest backups and prunes older ones. Set BACKUP_KEEP_N=0
+// to disable the auto-scheduler entirely (manual backups still work).
+const BACKUP_DIR = process.env.BACKUP_DIR || path.join(__dirname, 'backups');
+const BACKUP_KEEP_N = parseInt(process.env.BACKUP_KEEP_N || '7', 10);
+const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;   // 24h
 
 // ---------------- DB ----------------
 const db = new DatabaseSync(DB_PATH);
@@ -240,6 +246,58 @@ const Q = {
   batchHasPending: db.prepare(`SELECT 1 FROM jobs WHERE batch_id=? AND status='pending' LIMIT 1`),
   existsActiveUrl: db.prepare(`SELECT 1 FROM jobs WHERE product_url=? AND batch_id<>? AND status IN ('pending','claimed','done') LIMIT 1`),
 };
+
+// ---------------- Backups ----------------
+// Uses SQLite's VACUUM INTO to write a consistent snapshot even while the
+// live DB is being written to (WAL-safe, no downtime). Files are stored
+// as backups/adbrain-YYYYMMDD-HHMMSS.db and auto-pruned to the newest N.
+function runBackup() {
+  try {
+    if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const ts = new Date().toISOString().replace(/[-:T]/g, '').split('.')[0]; // YYYYMMDDTHHMMSS
+    const target = path.join(BACKUP_DIR, `adbrain-${ts}.db`);
+    // Escape single quotes for SQL literal.
+    const safePath = target.replace(/'/g, "''");
+    db.exec(`VACUUM INTO '${safePath}'`);
+    // Prune: keep N newest by mtime.
+    const files = fs.readdirSync(BACKUP_DIR)
+      .filter(f => f.startsWith('adbrain-') && f.endsWith('.db'))
+      .map(f => ({ name: f, path: path.join(BACKUP_DIR, f), mtime: fs.statSync(path.join(BACKUP_DIR, f)).mtime.getTime() }))
+      .sort((a, b) => b.mtime - a.mtime);
+    const toDelete = files.slice(BACKUP_KEEP_N);
+    for (const f of toDelete) { try { fs.unlinkSync(f.path); } catch {} }
+    return { ok: true, path: target, size: fs.statSync(target).size, pruned: toDelete.length };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+function listBackups() {
+  try {
+    if (!fs.existsSync(BACKUP_DIR)) return [];
+    return fs.readdirSync(BACKUP_DIR)
+      .filter(f => f.startsWith('adbrain-') && f.endsWith('.db'))
+      .map(f => {
+        const s = fs.statSync(path.join(BACKUP_DIR, f));
+        return { name: f, path: path.join(BACKUP_DIR, f), size: s.size, mtime: s.mtime.getTime() };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+  } catch { return []; }
+}
+// Auto-schedule the daily backup. Skip if BACKUP_KEEP_N=0.
+if (BACKUP_KEEP_N > 0) {
+  // Run once on startup so the first backup lands within seconds of the
+  // manager coming up (users can verify the mechanism works without waiting).
+  setTimeout(() => {
+    const r = runBackup();
+    if (r.ok) console.log(`[manager] Initial backup written: ${r.path} (${r.size} bytes)`);
+    else console.error(`[manager] Initial backup FAILED: ${r.error}`);
+  }, 5000);
+  setInterval(() => {
+    const r = runBackup();
+    if (r.ok) console.log(`[manager] Nightly backup: ${r.path}`);
+    else console.error(`[manager] Nightly backup FAILED: ${r.error}`);
+  }, BACKUP_INTERVAL_MS);
+}
 
 // Atomic claim — one synchronous transaction (node:sqlite is sync + Node is
 // single-threaded → no concurrent claim can interleave, so no double-claims).
@@ -653,6 +711,25 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true });
     }
     if (m === 'GET' && p === '/api/workers/list') return send(res, 200, { ok: true, workers: Q.listWorkers.all() });
+    // Quiesce broadcast — send 'pause' to every worker. Returns the current
+    // in-flight snapshot so the UI can poll until it hits zero. Doesn't
+    // reset or delete anything — just tells workers to stop claiming.
+    if (m === 'POST' && p === '/api/workers/quiesce') {
+      Q.insertCommand.run(null, 'pause', null, 'manager-quiesce');
+      const claimed = Q.claimedNowCount.get();
+      const workers = Q.listWorkers.all();
+      const nowT = now();
+      const active = workers.filter(w => (nowT - Number(w.last_seen)) < 3 * 60 * 1000).length;
+      return send(res, 200, { ok: true, activeWorkers: active, claimedNow: claimed?.n || 0 });
+    }
+    if (m === 'GET' && p === '/api/backups/list') {
+      return send(res, 200, { ok: true, backups: listBackups(), keepN: BACKUP_KEEP_N, dir: BACKUP_DIR });
+    }
+    if (m === 'POST' && p === '/api/backups/create') {
+      const r = runBackup();
+      if (!r.ok) return send(res, 500, r);
+      return send(res, 200, r);
+    }
     if (m === 'GET' && p === '/api/jobs/failed') {
       const bId = url.searchParams.get('batchId') || '';
       const rows = bId ? Q.failedJobsByBatch.all(bId) : Q.failedJobsAll.all();

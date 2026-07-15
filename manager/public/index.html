@@ -456,6 +456,39 @@
         </div>
       </div>
 
+      <div class="card collapsible">
+        <div class="card-head">
+          <span class="card-icon">⏸</span>
+          <span class="card-title">Quiesce workers</span>
+          <span class="card-sub" id="quiesceSub">click to check</span>
+        </div>
+        <div class="card-body">
+          <div class="hint">Broadcasts <strong>pause</strong> to every worker. Each worker finishes its current SKU (5-15 min), pushes results, and stops claiming. Once counts hit zero, it's safe to reset or shut down without creating orphan keyword rows.</div>
+          <div class="row" style="margin-top: 10px;">
+            <button id="quiesceBtn" class="secondary">⏸ Quiesce all workers</button>
+            <button id="quiesceRefreshBtn" class="secondary">Refresh status</button>
+          </div>
+          <div id="quiesceStatus" style="margin-top: 10px;"></div>
+        </div>
+      </div>
+
+      <div class="card collapsible">
+        <div class="card-head">
+          <span class="card-icon">💾</span>
+          <span class="card-title">Database backups</span>
+          <span class="card-sub" id="backupsSub">—</span>
+        </div>
+        <div class="card-body">
+          <div class="hint">SQLite <code>VACUUM INTO</code> snapshots — consistent even while the manager is running. Auto-runs on manager startup + every 24 hours. Keeps the newest 7 backups (older ones auto-pruned). Set <code>BACKUP_KEEP_N=0</code> env var to disable auto-backup; <code>BACKUP_DIR</code> to change the location.</div>
+          <div class="row" style="margin-top: 10px;">
+            <button id="backupNowBtn">💾 Backup now</button>
+            <button id="backupsRefreshBtn" class="secondary">Refresh list</button>
+          </div>
+          <div id="backupsList" style="margin-top: 10px; max-height: 220px; overflow: auto;"></div>
+          <div id="backupResult"></div>
+        </div>
+      </div>
+
       <div class="card collapsible collapsed">
         <div class="card-head">
           <span class="card-icon">🧹</span>

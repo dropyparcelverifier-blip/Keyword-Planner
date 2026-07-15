@@ -887,6 +887,34 @@ async function run() {
   assert(appJs.body.includes('refreshOrphanCount'),   '20n.13 refreshOrphanCount() defined');
   assert(appJs.body.includes('WORK IN PROGRESS DETECTED'), '20n.14 reset-all preflight warns on active workers');
 
+  // ===== 20o. BACKUPS + QUIESCE =====
+  // Backup endpoints
+  const bList = await req('GET', '/api/backups/list');
+  assertEq(bList.status, 200, '20o.1 GET /api/backups/list 200');
+  assert(Array.isArray(bList.data.backups), '20o.2 backups is an array');
+  assert(typeof bList.data.keepN === 'number', '20o.3 backups returns keepN retention');
+  const bNow = await req('POST', '/api/backups/create', {});
+  assertEq(bNow.status, 200, '20o.4 POST /api/backups/create 200');
+  assert(bNow.data.path, '20o.5 backup returns path');
+  assert(bNow.data.size > 0, '20o.6 backup file has size');
+  const bList2 = await req('GET', '/api/backups/list');
+  assert(bList2.data.backups.length >= 1, '20o.7 backup appears in list after create');
+  // Quiesce endpoint
+  const q = await req('POST', '/api/workers/quiesce', {});
+  assertEq(q.status, 200, '20o.8 POST /api/workers/quiesce 200');
+  assert('activeWorkers' in q.data && 'claimedNow' in q.data, '20o.9 quiesce returns status counts');
+  // Broadcast pause command should appear in the queue
+  const cmds = await req('GET', '/api/commands?workerId=q-test-worker');
+  const hasPause = (cmds.data?.commands || []).some(c => c.command === 'pause' && c.created_by === 'manager-quiesce');
+  assert(hasPause, '20o.10 quiesce broadcasts pause via manager-quiesce');
+  // UI wiring
+  assert(idx.body.includes('id="quiesceBtn"'),     '20o.11 quiesce button in Config');
+  assert(idx.body.includes('id="backupNowBtn"'),   '20o.12 backup-now button in Config');
+  assert(idx.body.includes('id="backupsList"'),    '20o.13 backups list element');
+  assert(appJs.body.includes('refreshQuiesceStatus'), '20o.14 quiesce refresher defined');
+  assert(appJs.body.includes('refreshBackupsList'),   '20o.15 backups refresher defined');
+  assert(appJs.body.includes('quiescePollTimer'),     '20o.16 quiesce polls status every 3s');
+
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
   const [s1, w1, a1] = await Promise.all([
