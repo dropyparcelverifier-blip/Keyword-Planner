@@ -225,10 +225,19 @@ button.small { padding: 4px 10px; font-size: 11px; }
 .tile { background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 8px; padding: 10px 12px; }
 .tile.success { background: var(--success-soft); border-color: var(--success); }
 .tile.info    { background: var(--info-soft); border-color: var(--info); }
+.tile.warn    { background: var(--warn-soft); border-color: var(--warn); }
+.tile.danger  { background: var(--danger-soft); border-color: var(--danger); }
 .tile .lbl { font-size: 10px; color: var(--text-2); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
 .tile .val { font-size: 22px; font-weight: 700; color: var(--text-0); }
+.tile .val .sub { font-size: 11px; color: var(--text-2); font-weight: 500; margin-left: 4px; }
 .tile.success .val { color: var(--success); }
 .tile.info .val    { color: var(--info); }
+.tile.warn .val    { color: var(--warn); }
+.tile.danger .val  { color: var(--danger); }
+/* Compact tiles — dense stat strip used above the exec summary. */
+.tiles.compact-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+.tiles.compact-tiles .tile { padding: 8px 10px; }
+.tiles.compact-tiles .tile .val { font-size: 18px; }
 
 /* Log */
 .log { max-height: 400px; overflow: auto; font-family: var(--mono); font-size: 11px; background: var(--bg-input); border-radius: var(--radius-sm); padding: 8px; border: 1px solid var(--line-1); }
@@ -383,10 +392,44 @@ button.small { padding: 4px 10px; font-size: 11px; }
   .picker-actions { flex-direction: row; }
 }
 
+/* Executive summary bullets — one card = one plain-English takeaway.
+   Colored left border encodes tone (success/info/warn/neutral) without
+   needing an icon per row. */
+.exec-bullet {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 12px;
+  padding: 8px 12px;
+  margin-bottom: 6px;
+  background: var(--bg-2);
+  border-radius: 4px;
+}
+.exec-bullet:last-child { margin-bottom: 0; }
+.exec-label {
+  font-size: 10px; font-weight: 700; letter-spacing: .6px;
+  text-transform: uppercase; padding-top: 2px;
+}
+.exec-body { font-size: 13px; line-height: 1.55; color: var(--text-1); }
+.exec-body strong { color: var(--text-1); font-weight: 700; }
+.exec-body a { color: var(--accent); text-decoration: none; }
+.exec-body a:hover { text-decoration: underline; }
+@media (max-width: 700px) {
+  .exec-bullet { grid-template-columns: 1fr; gap: 4px; }
+}
+
 /* Tighter table density — save vertical space when reviewing 100-300 rows */
 .tbl.compact th { padding: 4px 6px; font-size: 9px; }
 .tbl.compact td { padding: 3px 6px; }
 .tbl.compact td .chip { padding: 1px 6px; font-size: 9px; }
+
+/* Inline "show N empty cols" toggle — reads as a link but is a button so
+   we get keyboard focus + hit-target without loading a URL. */
+.tiny-link {
+  background: transparent; border: none; padding: 0;
+  color: var(--accent); cursor: pointer; text-decoration: underline;
+  font-size: 11px; font-family: inherit;
+}
+.tiny-link:hover { color: var(--text-1); }
 
 /* Modals — used by the Claude-prompt preview + keyword detail views.
    Backdrop dims + click-outside closes; card is centered and scrolls
