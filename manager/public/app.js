@@ -1644,6 +1644,7 @@ async function refreshAnalyticsTab() {
     state.keywordBatches = kwB.batches || [];
     state.batchNames = new Map((names.names || []).map(n => [n.batch_id, n]));
     populateBatchSelects();
+    renderPickerBatchChips();
     if (analytics.batchId && $('anBatchSelect')) $('anBatchSelect').value = analytics.batchId;
     // Auto-select: if there's exactly one batch and none is chosen yet,
     // pick it. Removes the confusing "Waiting for input" empty state
@@ -1652,16 +1653,141 @@ async function refreshAnalyticsTab() {
       analytics.batchId = state.batches[0].batch_id;
       if ($('anBatchSelect')) $('anBatchSelect').value = analytics.batchId;
     }
+    renderBatchPreview();
   } catch {}
   if (analytics.batchId) await loadAnalyticsBatch(analytics.batchId);
 }
+
+// ─────────── Picker: batch chips (quick-jump to top-N recent batches) ───
+function renderPickerBatchChips() {
+  const el = $('anBatchChips');
+  if (!el) return;
+  // Batches WITH jobs, sorted by most recent (assumes batch_id contains
+  // an epoch-ms timestamp; sorting the string suffix desc is close enough).
+  const withJobs = [...state.batches].sort((a, b) => String(b.batch_id).localeCompare(String(a.batch_id))).slice(0, 6);
+  el.innerHTML = withJobs.map(b => {
+    const active = b.batch_id === analytics.batchId ? 'active' : '';
+    const label = batchLabel(b.batch_id).split('  (')[0];  // strip the "(id-tail)" suffix
+    return `<button class="quick-batch ${active}" data-batch="${esc(b.batch_id)}" title="${esc(b.batch_id)} — ${b.total} SKUs">${esc(label)} · ${b.total}</button>`;
+  }).join('');
+  el.querySelectorAll('button[data-batch]').forEach(btn => btn.addEventListener('click', async () => {
+    const id = btn.dataset.batch;
+    analytics.batchId = id;
+    analytics.sku = '';
+    $('anBatchSelect').value = id;
+    renderPickerBatchChips();
+    renderBatchPreview();
+    await loadAnalyticsBatch(id);
+  }));
+  updatePickerHints();
+}
+
+function updatePickerHints() {
+  const bh = $('anBatchHint');
+  if (bh) {
+    const n = state.batches.length + (state.keywordBatches || []).filter(b => !state.batches.find(j => j.batch_id === b.batch_id)).length;
+    bh.textContent = n === 0 ? 'no batches yet' : `${n} batch${n === 1 ? '' : 'es'} available`;
+  }
+}
+
+function renderBatchPreview() {
+  const el = $('anBatchPreview');
+  if (!el) return;
+  const id = analytics.batchId;
+  if (!id) { el.innerHTML = `<span style="color:var(--text-3);">Pick a batch to see coverage stats here.</span>`; return; }
+  const jobsBatch = state.batches.find(b => b.batch_id === id);
+  const kwBatch   = (state.keywordBatches || []).find(b => b.batch_id === id);
+  const name      = state.batchNames.get(id)?.display_name;
+  const parts = [];
+  if (name) parts.push(`<span class="stat">📛 <b>${esc(name)}</b></span>`);
+  parts.push(`<span class="stat" title="${esc(id)}"><code style="font-size:10px;">${esc(id.slice(-10))}</code></span>`);
+  if (jobsBatch) {
+    parts.push(`<span class="stat">SKUs: <b>${jobsBatch.total}</b></span>`);
+    if (jobsBatch.done != null)    parts.push(`<span class="stat" style="color:var(--success);">done: <b>${jobsBatch.done}</b></span>`);
+    if (jobsBatch.claimed != null) parts.push(`<span class="stat" style="color:var(--accent);">in-flight: <b>${jobsBatch.claimed}</b></span>`);
+    if (jobsBatch.pending != null) parts.push(`<span class="stat">pending: <b>${jobsBatch.pending}</b></span>`);
+    if (jobsBatch.failed  != null && jobsBatch.failed > 0)  parts.push(`<span class="stat" style="color:var(--danger);">failed: <b>${jobsBatch.failed}</b></span>`);
+  }
+  if (kwBatch) parts.push(`<span class="stat">keywords: <b>${(kwBatch.row_count || 0).toLocaleString()}</b></span>`);
+  el.innerHTML = `<div class="row-mini">${parts.join('')}</div>`;
+}
+
+function renderSkuPreview() {
+  const el = $('anSkuPreview');
+  if (!el) return;
+  if (!analytics.sku) { el.innerHTML = `<span style="color:var(--text-3);">Pick a SKU (or leave blank for all-batch view).</span>`; return; }
+  const rows = analytics.allRows.filter(r => (r.sku || r.product_url) === analytics.sku);
+  if (rows.length === 0) { el.innerHTML = `<span style="color:var(--text-3);">No rows for this SKU yet.</span>`; return; }
+  const ctx = rows.find(r => r.product_name) || rows[0];
+  const scored = rows.map(r => ({ ...r, __s: opportunityScore(r) }));
+  const topScore = Math.max(...scored.map(r => r.__s || 0), 0);
+  const highIntent = rows.filter(r => String(r.buying_intent || '').toLowerCase() === 'high').length;
+  const withImg = rows.filter(r => (toNum(r.image_count) || 0) > 0).length;
+  const withVol = rows.filter(r => (toNum(r.kp_monthly_searches) || 0) > 0).length;
+  const target = rows.length < 100 ? '<span style="color:var(--warn);">⚠ below 100</span>'
+               : rows.length > 300 ? '<span style="color:var(--info);">above 300</span>'
+               : '<span style="color:var(--success);">✓ in 100–300</span>';
+  const productUrl = ctx.product_url || '';
+  const productLink = productUrl
+    ? `&nbsp;·&nbsp;<a href="${esc(productUrl)}" target="_blank" rel="noopener" style="color:var(--accent);">📦 open product</a>`
+    : '';
+  el.innerHTML = `
+    <div style="color:var(--text-1); font-weight:600; margin-bottom: 4px;" title="${esc(ctx.product_name || '')}">${esc(ctx.product_name || analytics.sku)}</div>
+    <div class="row-mini">
+      <span class="stat">keywords: <b>${rows.length}</b> ${target}</span>
+      <span class="stat">high-intent: <b style="color:var(--success);">${highIntent}</b></span>
+      <span class="stat">img-match: <b>${withImg}</b></span>
+      <span class="stat">KP vol: <b>${withVol}</b></span>
+      <span class="stat">top score: <b style="color:var(--accent);">${topScore.toFixed(1)}</b></span>
+      ${productLink}
+    </div>`;
+}
+
+// Search-as-you-type filters both dropdowns without shuffling the DOM tree
+// (browsers keep the selected option even when others are hidden).
+function wirePickerSearch() {
+  const bs = $('anBatchSearch');
+  const ss = $('anSkuSearch');
+  const filter = (input, select) => {
+    if (!input || !select) return;
+    const q = (input.value || '').toLowerCase().trim();
+    let firstVisible = null;
+    Array.from(select.options).forEach(opt => {
+      const match = !q || opt.textContent.toLowerCase().includes(q) || opt.value.toLowerCase().includes(q);
+      opt.hidden = !match;
+      if (match && !firstVisible) firstVisible = opt;
+    });
+    // When user types "aq" and the current selection is hidden, jump to
+    // the first visible one so the preview reflects what they're searching.
+    if (firstVisible && select.selectedOptions[0]?.hidden) {
+      select.value = firstVisible.value;
+      select.dispatchEvent(new Event('change'));
+    }
+  };
+  bs?.addEventListener('input', () => filter(bs, $('anBatchSelect')));
+  ss?.addEventListener('input', () => filter(ss, $('anSkuSelect')));
+  // Global "/" hotkey focuses the batch search (skip when typing elsewhere).
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== '/' || e.ctrlKey || e.metaKey) return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
+    if (!$('panel-analytics')?.classList.contains('active')) return;
+    e.preventDefault();
+    bs?.focus();
+    bs?.select();
+  });
+}
+wirePickerSearch();
 $('anBatchSelect').addEventListener('change', async () => {
   analytics.batchId = $('anBatchSelect').value;
   analytics.sku = '';
+  renderPickerBatchChips();
+  renderBatchPreview();
   await loadAnalyticsBatch(analytics.batchId);
 });
 $('anSkuSelect').addEventListener('change', () => {
   analytics.sku = $('anSkuSelect').value;
+  renderSkuPreview();
   filterAndRenderAnalytics();
 });
 ['anSearch', 'anSource', 'anIntent', 'anMinRating', 'anOnlyImgMatches'].forEach(id => {
@@ -1669,6 +1795,176 @@ $('anSkuSelect').addEventListener('change', () => {
   if (!el) return;
   el.addEventListener(id === 'anSearch' ? 'input' : 'change', filterAndRenderAnalytics);
 });
+// ─────────── Claude listing-brief prompt builder ───────────
+// Bundles everything the model needs to write a full Shopify listing +
+// Amazon bullets + Google ad copy from the SKU's real research data.
+function buildClaudeListingPrompt(skuRows) {
+  if (!skuRows || skuRows.length === 0) return '';
+  // Deterministic product context — take the first row that has it.
+  const ctx = skuRows.find(r => r.product_name) || skuRows[0];
+  const productName = ctx.product_name || ctx.sku || '(unknown)';
+  const productUrl  = ctx.product_url || '';
+  const productImg  = ctx.product_image || '';
+  const sku         = ctx.sku || '';
+  const batchId     = ctx.batch_id || '';
+
+  // Score & rank keywords using the same opportunity_score users see in the table.
+  const scored = skuRows.map(r => ({ ...r, __s: opportunityScore(r) }));
+  scored.sort((a, b) => b.__s - a.__s);
+  const topN = scored.slice(0, 25);
+
+  // Buying-intent buckets — feeds the "which keywords to prioritize" note.
+  const byIntent = {};
+  for (const r of scored) {
+    const k = String(r.buying_intent || 'unclassified').toLowerCase();
+    byIntent[k] = (byIntent[k] || 0) + 1;
+  }
+
+  // Source mix — helps Claude reason about signal quality (KP-heavy vs
+  // autosuggest-heavy changes the reliability of demand estimates).
+  const bySource = {};
+  for (const r of scored) {
+    const primary = String(r.source || '—').split(',')[0].trim().toUpperCase();
+    bySource[primary] = (bySource[primary] || 0) + 1;
+  }
+
+  // Competitor domains from sellers_on_serp — bare domain counts, ranked.
+  const compCount = new Map();
+  for (const r of scored) {
+    const line = String(r.sellers_on_serp || '');
+    if (!line) continue;
+    for (const part of line.split('|')) {
+      const m = part.trim().match(/^([a-z0-9.-]+\.[a-z]{2,})/i);
+      if (m) compCount.set(m[1].toLowerCase(), (compCount.get(m[1].toLowerCase()) || 0) + 1);
+    }
+  }
+  const topCompetitors = Array.from(compCount.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10);
+
+  // Volume/price stats where available.
+  const vols   = scored.map(r => toNum(r.kp_monthly_searches)).filter(v => v && v > 0);
+  const bidHi  = scored.map(r => toNum(r.kp_bid_high)).filter(v => v && v > 0);
+  const amazonPrices = scored
+    .map(r => String(r.amazon_price || '').match(/([0-9]+(\.[0-9]+)?)/)?.[1])
+    .filter(Boolean)
+    .map(Number)
+    .filter(n => n > 0);
+  const stat = arr => arr.length ? {
+    min: Math.min(...arr).toFixed(0),
+    max: Math.max(...arr).toFixed(0),
+    med: arr.slice().sort((a, b) => a - b)[Math.floor(arr.length / 2)].toFixed(0),
+    n: arr.length,
+  } : null;
+  const volStat   = stat(vols);
+  const bidStat   = stat(bidHi);
+  const priceStat = stat(amazonPrices);
+
+  // FAQ candidates — question-shaped keywords or ones flagged as PAA/faq.
+  const faqCandidates = scored.filter(r => {
+    const kw = String(r.keyword || '').toLowerCase();
+    return String(r.faq || '').toLowerCase() === 'yes'
+      || /^(what|how|why|when|where|is|are|does|do|can|should|which)\b/.test(kw)
+      || /\?$/.test(kw);
+  }).slice(0, 15);
+
+  // Format helpers.
+  const kwLine = r => {
+    const parts = [];
+    parts.push(`"${r.keyword}"`);
+    parts.push(`score=${r.__s.toFixed(1)}`);
+    const vol = toNum(r.kp_monthly_searches);
+    if (vol && vol > 0) parts.push(`vol=${vol.toLocaleString()}`);
+    if (r.kp_competition) parts.push(`comp=${r.kp_competition}`);
+    if (r.buying_intent)  parts.push(`intent=${r.buying_intent}`);
+    if ((r.image_count || 0) > 0) parts.push(`imgs=${r.image_count}`);
+    return parts.join(' | ');
+  };
+
+  const lines = [];
+  lines.push('You are an expert e-commerce content strategist writing a Shopify product listing for Dropy.in (India, ₹).');
+  lines.push('');
+  lines.push('# PRODUCT');
+  lines.push(`Name:        ${productName}`);
+  if (sku)        lines.push(`SKU:         ${sku}`);
+  if (productUrl) lines.push(`URL:         ${productUrl}`);
+  if (productImg) lines.push(`Image:       ${productImg}`);
+  if (batchId)    lines.push(`Research batch: ${batchId}`);
+  lines.push('');
+  lines.push('# RESEARCH SUMMARY');
+  lines.push(`- ${scored.length} keywords collected across sources: ${Object.entries(bySource).map(([k, v]) => `${k}:${v}`).join(', ')}`);
+  lines.push(`- Buying-intent mix: ${Object.entries(byIntent).map(([k, v]) => `${k}:${v}`).join(', ')}`);
+  if (volStat)   lines.push(`- KP monthly searches (n=${volStat.n}): min ${volStat.min}, median ${volStat.med}, max ${volStat.max}`);
+  else           lines.push('- KP monthly-search data: not available for this SKU (rely on relative Score + Image-match signal for demand ranking)');
+  if (bidStat)   lines.push(`- KP top-of-page bid ₹ (n=${bidStat.n}): min ${bidStat.min}, median ${bidStat.med}, max ${bidStat.max}  ← use for ads budgeting`);
+  if (priceStat) lines.push(`- Amazon.in observed prices ₹ (n=${priceStat.n}): min ${priceStat.min}, median ${priceStat.med}, max ${priceStat.max}  ← competitive price benchmark`);
+  if (topCompetitors.length) lines.push(`- Top competitor domains on SERPs: ${topCompetitors.map(([d, n]) => `${d}(${n})`).join(', ')}`);
+  lines.push('');
+  lines.push(`# TOP ${topN.length} OPPORTUNITY KEYWORDS (highest opportunity score first)`);
+  topN.forEach((r, i) => lines.push(`${String(i + 1).padStart(2, ' ')}. ${kwLine(r)}`));
+  lines.push('');
+  if (faqCandidates.length) {
+    lines.push('# QUESTION-SHAPED QUERIES (raw material for FAQ section)');
+    faqCandidates.forEach(r => lines.push(`- ${r.keyword}`));
+    lines.push('');
+  }
+  lines.push('# DELIVERABLES');
+  lines.push('Produce a COMPLETE product-listing package in this exact order:');
+  lines.push('');
+  lines.push('1. **TITLE** — Shopify/Google-optimized, ≤70 characters. Include the primary keyword, brand, and category. No ALL CAPS.');
+  lines.push('2. **SUB-TITLE / SHORT DESCRIPTION** — ≤160 characters. One-line hook that combines the biggest pain-point + core benefit. Suitable for meta description.');
+  lines.push('3. **LONG DESCRIPTION** — 300–500 words. Structure: problem → solution → 4-6 benefit bullets → how it feels/looks/smells → who it\'s for → trust-cue closer. Use high-buying-intent keywords naturally (do not stuff).');
+  lines.push('4. **INGREDIENTS** — Bulleted list. For each hero ingredient, add a one-sentence "why it matters" note. Group actives vs supporting cast. If ingredients are unknown from the research data, mark them as "confirm on packaging" instead of inventing.');
+  lines.push('5. **HOW TO USE** — Numbered steps, morning/night if applicable. Include quantity, frequency, and one "pro tip".');
+  lines.push('6. **FAQs** — 8–12 Q&A pairs. Draw from the question-shaped queries above where possible; each answer 2–3 sentences.');
+  lines.push('7. **SEO KEYWORDS** — Comma-separated meta-keywords list. Longtail-first, India-first. Include the top 15 opportunity keywords verbatim.');
+  lines.push('8. **GOOGLE SEARCH AD** — 3 headline variants (≤30 chars each) + 2 description variants (≤90 chars each). Reflect high-intent phrases.');
+  lines.push('9. **AMAZON BULLETS** — 5 benefit-first bullets, keyword-rich, ≤200 chars each. Lead with the pay-off.');
+  lines.push('10. **META TITLE + META DESCRIPTION** — for the Shopify page. Title ≤60 chars, description ≤155 chars.');
+  lines.push('11. **HANDLE / URL SLUG** — Lowercase, kebab-case, ≤50 chars.');
+  lines.push('');
+  lines.push('# CONSTRAINTS');
+  lines.push('- India-first tone. Currency ₹. Reference "delivered pan-India" style cues where natural.');
+  lines.push('- Do NOT invent certifications, dermatologist claims, or "clinically proven" language unless the source data mentions them.');
+  lines.push('- Do NOT copy competitor domains listed above into the copy — use them only for tonal reference.');
+  lines.push('- Prefer high-buying-intent keywords in TITLE and Google Ad headlines. Reserve low-intent/informational keywords for the LONG DESCRIPTION and FAQs.');
+  lines.push('- Return each section under a clear markdown `##` heading in the same order as the list above.');
+  return lines.join('\n');
+}
+function openClaudePromptModal() {
+  const rows = analytics.sku
+    ? analytics.allRows.filter(r => (r.sku || r.product_url) === analytics.sku)
+    : analytics.allRows;
+  if (rows.length === 0) { toast('No keywords for this SKU yet.', 'warn'); return; }
+  const text = buildClaudeListingPrompt(rows);
+  $('claudePromptText').value = text;
+  $('claudeModalSub').textContent = `${rows.length} keyword(s) · ${(text.length / 1024).toFixed(1)} KB prompt`;
+  $('claudePromptStats').textContent = `${text.length.toLocaleString()} chars · ${Math.ceil(text.split(/\s+/).length)} words`;
+  $('claudeModal').style.display = 'flex';
+}
+$('anClaudeBtn')?.addEventListener('click', openClaudePromptModal);
+$('claudeCopyBtn')?.addEventListener('click', async () => {
+  const t = $('claudePromptText').value;
+  try { await navigator.clipboard.writeText(t); toast('Prompt copied — paste into Claude.', 'ok', { title: 'Copied' }); }
+  catch { $('claudePromptText').select(); toast('Copy failed — text is selected, press Ctrl+C.', 'warn'); }
+});
+$('claudeDownloadBtn')?.addEventListener('click', () => {
+  const t = $('claudePromptText').value;
+  const blob = new Blob([t], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  const skuSafe = String(analytics.sku || 'sku').replace(/[^\w.-]+/g, '_').slice(0, 60);
+  a.download = `claude_brief_${skuSafe}.txt`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(a.href);
+});
+$('claudeOpenBtn')?.addEventListener('click', async () => {
+  const t = $('claudePromptText').value;
+  try { await navigator.clipboard.writeText(t); } catch {}
+  toast('Opening Claude — paste the prompt into the chat box.', 'info', { title: 'Prompt copied' });
+  window.open('https://claude.ai/new', '_blank', 'noopener');
+});
+
 $('anExportBtn').addEventListener('click', () => {
   if (!analytics.skuRows.length) return;
   const csv = rowsToCsv(analytics.skuRows);
@@ -1719,6 +2015,10 @@ async function loadAnalyticsBatch(batchId) {
       analytics.sku = skuList[0]?.key || '';
       if ($('anSkuSelect')) $('anSkuSelect').value = analytics.sku;
     }
+    // Enable SKU search + update the SKU hint now that data has loaded.
+    const ss = $('anSkuSearch'); if (ss) ss.disabled = false;
+    const sh = $('anSkuHint'); if (sh) sh.textContent = `${skuList.length} SKU(s) in this batch`;
+    renderSkuPreview();
   } catch (e) {
     summary.innerHTML = `<div class="banner err">Failed to load: ${esc(e.message)}</div>`;
     return;
@@ -1772,6 +2072,8 @@ function filterAndRenderAnalytics() {
   $('anTopChartCard').style.display = source.length > 0 ? '' : 'none';
   $('anInsightsCard').style.display = source.length > 0 ? '' : 'none';
   $('anExportBtn').disabled = filtered.length === 0;
+  const claudeBtn = $('anClaudeBtn');
+  if (claudeBtn) claudeBtn.disabled = source.length === 0;
 }
 
 function renderAnalyticsSummary(rows) {
@@ -2098,12 +2400,13 @@ function renderAnalyticsTable(rows) {
     { key: 'link_verified_count',  label: 'Verified',   kind: 'num',   tip: 'Matched destination pages that re-verified via CLIP.' },
     { key: 'kp_bid_high',          label: 'Top bid ₹',  kind: 'money', tip: 'KP high-end top-of-page bid (₹) — useful for paid-ads planning.' },
     { key: 'source',               label: 'Source',     kind: 'chip' },
+    { key: '__details',            label: '',           kind: 'details', tip: 'Open full details for this keyword.' },
   ];
   const thead = `<thead><tr>${cols.map(c => `
     <th data-sort-key="${c.key}" style="cursor:pointer;" title="${esc(c.tip || 'Click to sort')}">
       ${esc(c.label)}${analytics.sortKey === c.key ? (analytics.sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
     </th>`).join('')}</tr></thead>`;
-  const tbody = `<tbody>${rows.slice(0, 500).map(r => {
+  const tbody = `<tbody>${rows.slice(0, 500).map((r, _idx) => {
     const rowScore = Number(r.opportunity_score) || 0;
     const rowTier  = scoreTier(rowScore);
     // Row's left border colored by tier — instantly conveys quality at a glance.
@@ -2190,12 +2493,18 @@ function renderAnalyticsTable(rows) {
         const n = toNum(v);
         return `<td class="num">${n != null ? n.toLocaleString() : '<span style="color:var(--text-3);">—</span>'}</td>`;
       }
+      if (c.kind === 'details') {
+        // Rendered as a button with data-row-idx so the row's full data is
+        // recoverable from analytics.skuRows without stashing it in DOM.
+        return `<td style="text-align:center; width: 30px;"><button class="row-detail-btn" data-kw-detail="${_idx}" title="Show every field for this keyword.">🔍</button></td>`;
+      }
       return `<td style="max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(v)}">${esc(v == null ? '—' : v)}</td>`;
     }).join('')}</tr>`;
   }).join('')}${rows.length > 500 ? `<tr><td colspan="${cols.length}" style="text-align:center; color:var(--text-3);">…and ${rows.length - 500} more — narrow the filters to see them.</td></tr>` : ''}</tbody>`;
   el.innerHTML = thead + tbody;
-  // Wire header click → sort toggle.
+  // Wire header click → sort toggle (skips the pseudo-details column).
   el.querySelectorAll('th[data-sort-key]').forEach(th => {
+    if (th.dataset.sortKey === '__details') return;
     th.addEventListener('click', () => {
       const k = th.dataset.sortKey;
       if (analytics.sortKey === k) analytics.sortDir = analytics.sortDir === 'desc' ? 'asc' : 'desc';
@@ -2203,7 +2512,104 @@ function renderAnalyticsTable(rows) {
       filterAndRenderAnalytics();
     });
   });
+  // Wire row 🔍 button → detail modal.
+  el.querySelectorAll('button[data-kw-detail]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.kwDetail, 10);
+      const row = rows[idx];
+      if (row) openKeywordDetail(row);
+    });
+  });
 }
+
+// ─────────── Keyword detail modal ───────────
+// Field ordering matches the export layout — most-useful signals first.
+const KW_DETAIL_GROUPS = [
+  ['🔑 Identity', ['keyword', 'source', 'parent_keyword', 'sku', 'product_name']],
+  ['📊 Scoring', ['opportunity_score', 'ad_rating', 'frequency', 'buying_intent', 'keyword_relevance', 'topic', 'funnel', 'faq']],
+  ['💰 KP metrics', ['kp_monthly_searches', 'kp_competition', 'kp_bid_low', 'kp_bid_high']],
+  ['📷 Image match', ['image_count', 'total_thumbs', 'visibility_pct', 'image_count_unverified', 'match_sources', 'serp_zone_counts', 'match_confidence_max', 'match_confidence_avg', 'match_confidence_min', 'link_checked_count', 'link_verified_count']],
+  ['🛒 Sellers & SERP', ['total_sellers', 'seller_type', 'dropy_is_seller', 'dropy_on_serp', 'ads_on_serp', 'sellers_on_serp', 'seller_titles', 'top_match_seller', 'top_match_price']],
+  ['📦 Amazon (R3)', ['amazon_suggest_count', 'amazon_rank', 'amazon_price', 'amazon_rating', 'amazon_reviews', 'amazon_title', 'amazon_competitors', 'amazon_total_results']],
+  ['🔗 Links', ['serp_url', 'matched_links', 'verified_links', 'product_url']],
+];
+function openKeywordDetail(row) {
+  const modal = $('kwDetailModal');
+  const title = $('kwDetailTitle');
+  const body = $('kwDetailBody');
+  if (!modal || !title || !body) return;
+  title.textContent = row.keyword || 'Keyword details';
+
+  // ── Quick-links row ─────────────────────────────────────────────
+  // Anything a user might want to click through to for context, one place.
+  const kw = String(row.keyword || '').trim();
+  const enc = encodeURIComponent;
+  const links = [];
+  if (kw) {
+    // Google SERP (india-focused via ?gl=in)
+    const serpUrl = row.serp_url || `https://www.google.com/search?q=${enc(kw)}&gl=in`;
+    links.push({ href: serpUrl,                                                 icon: '🔎', label: 'Google SERP' });
+    // Google Keyword Planner is auth-walled but we can deep-link the sign-in.
+    links.push({ href: `https://ads.google.com/aw/keywordplanner/ideas/new?keywords=${enc(kw)}`,
+                 icon: '📊', label: 'Google KP',      title: 'Open Keyword Planner for this seed (Google Ads account required).' });
+    // Google Trends — a decent free proxy for KP volume when no KP data.
+    links.push({ href: `https://trends.google.com/trends/explore?geo=IN&q=${enc(kw)}`,
+                 icon: '📈', label: 'Trends (IN)',   title: 'Google Trends for India — free demand proxy when KP metrics are missing.' });
+    // Amazon.in search — mirrors the amazon_reader flow.
+    links.push({ href: `https://www.amazon.in/s?k=${enc(kw)}`, icon: '🛒', label: 'Amazon.in' });
+    // dropy.in search on the current keyword — verify our own listing.
+    links.push({ href: `https://dropy.in/search?q=${enc(kw)}`, icon: '🏪', label: 'Search on dropy.in',
+                 title: 'Check whether this keyword surfaces our own product on dropy.in.' });
+  }
+  // If our product URL is known, always offer a jump to our listing.
+  if (row.product_url) links.push({ href: row.product_url, icon: '📦', label: 'Our product page' });
+  // If dropy shows up as a seller on THIS keyword's SERP, flag it explicitly.
+  const dropyIsSeller = String(row.dropy_is_seller || '').toLowerCase() === 'yes';
+  const dropyOnSerp   = String(row.dropy_on_serp   || '').toLowerCase() === 'yes';
+  const dropyBadge = (dropyIsSeller || dropyOnSerp)
+    ? `<span class="chip done" style="margin-left: 8px;">${dropyIsSeller ? '✓ dropy.in listed as SELLER' : '✓ dropy.in appears on SERP'}</span>`
+    : '';
+  const quickLinks = `
+    <div style="margin-bottom: 14px;">
+      <div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px;">🔗 Quick links${dropyBadge}</div>
+      <div class="row tight">
+        ${links.map(l => `<a href="${esc(l.href)}" target="_blank" rel="noopener" class="chip" style="text-decoration:none; background:var(--bg-3); color:var(--text-1); border:1px solid var(--line-2);" ${l.title ? `title="${esc(l.title)}"` : ''}>${l.icon} ${esc(l.label)}</a>`).join('')}
+      </div>
+    </div>`;
+
+  const shown = new Set();
+  const groups = KW_DETAIL_GROUPS.map(([grpLabel, keys]) => {
+    const fields = keys.filter(k => k in row).map(k => {
+      shown.add(k);
+      const raw = row[k];
+      const empty = raw === null || raw === undefined || raw === '' || (typeof raw === 'number' && !Number.isFinite(raw));
+      const val = empty ? '<span class="empty">—</span>' : esc(String(raw));
+      const isMono = typeof raw === 'string' && raw.length > 40;
+      return `<div class="k">${esc(k)}</div><div class="v ${isMono ? 'mono' : ''}">${val}</div>`;
+    }).join('');
+    return fields ? `<div style="margin-bottom: 14px;"><div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px;">${grpLabel}</div><div class="kw-fields">${fields}</div></div>` : '';
+  }).join('');
+  // Anything left over (custom columns) — dump at the end so we never hide data.
+  const extra = Object.keys(row).filter(k => !shown.has(k) && !k.startsWith('__')).map(k => {
+    const raw = row[k];
+    const empty = raw === null || raw === undefined || raw === '' || (typeof raw === 'number' && !Number.isFinite(raw));
+    const val = empty ? '<span class="empty">—</span>' : esc(String(raw));
+    return `<div class="k">${esc(k)}</div><div class="v mono">${val}</div>`;
+  }).join('');
+  const extraBlock = extra ? `<div style="margin-bottom: 14px;"><div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px;">Other fields</div><div class="kw-fields">${extra}</div></div>` : '';
+  body.innerHTML = quickLinks + groups + extraBlock;
+  modal.style.display = 'flex';
+}
+// Backdrop / Close-button close both modals.
+document.addEventListener('click', (e) => {
+  if (e.target?.dataset?.closeModal) {
+    document.querySelectorAll('.modal-root').forEach(m => m.style.display = 'none');
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') document.querySelectorAll('.modal-root').forEach(m => m.style.display = 'none');
+});
 
 // ─────────── Boot ───────────
 // Kick the stats bar + Upload sidebar right away so the first paint

@@ -328,6 +328,110 @@ button.small { padding: 4px 10px; font-size: 11px; }
 @keyframes cmdkFadeIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes cmdkPop    { from { opacity: 0; transform: translateY(-8px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 
+/* Rich batch/SKU picker for the Analytics tab. Grid = [batch][sku][actions].
+   Designed to scale to many batches: search-then-select inside each column,
+   with a small preview block below the picker showing key stats. */
+.picker-bar {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 10px;
+  padding: 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-1);
+  border-radius: 8px;
+  margin-bottom: 12px;
+  align-items: start;
+}
+.picker-col { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.picker-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+  color: var(--text-2); font-weight: 700;
+}
+.picker-hint { color: var(--text-3); font-weight: 400; font-size: 10px; text-transform: none; letter-spacing: 0; }
+.picker-col input[type="text"] { font-size: 12px; padding: 6px 8px; }
+.picker-col select {
+  font-size: 12px;
+  font-family: var(--mono);
+  min-height: 32px;
+}
+.picker-col select[size]:not([size="1"]) { max-height: 200px; }
+.picker-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.picker-chips .quick-batch {
+  font-size: 10px; padding: 3px 8px; border-radius: var(--radius-pill);
+  background: var(--bg-3); border: 1px solid var(--line-1); color: var(--text-2);
+  cursor: pointer; transition: all 120ms;
+}
+.picker-chips .quick-batch:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+.picker-chips .quick-batch.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.picker-preview {
+  font-size: 11px;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--line-1);
+  border-radius: 6px;
+  color: var(--text-2);
+  min-height: 32px;
+  line-height: 1.5;
+}
+.picker-preview .row-mini { display: flex; gap: 10px; flex-wrap: wrap; }
+.picker-preview .stat { font-family: var(--mono); }
+.picker-preview .stat b { color: var(--text-1); font-weight: 700; }
+.picker-actions { display: flex; flex-direction: column; gap: 6px; align-self: end; }
+@media (max-width: 900px) {
+  .picker-bar { grid-template-columns: 1fr; }
+  .picker-actions { flex-direction: row; }
+}
+
+/* Tighter table density — save vertical space when reviewing 100-300 rows */
+.tbl.compact th { padding: 4px 6px; font-size: 9px; }
+.tbl.compact td { padding: 3px 6px; }
+.tbl.compact td .chip { padding: 1px 6px; font-size: 9px; }
+
+/* Modals — used by the Claude-prompt preview + keyword detail views.
+   Backdrop dims + click-outside closes; card is centered and scrolls
+   internally if content is tall. */
+.modal-root {
+  position: fixed; inset: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  animation: cmdkFadeIn 120ms ease-out;
+}
+.modal-backdrop {
+  position: absolute; inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+.modal-card {
+  position: relative; z-index: 1;
+  background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 10px;
+  max-width: 900px; width: 100%; max-height: 90vh;
+  display: flex; flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  animation: cmdkPop 160ms ease-out;
+}
+.modal-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 14px; border-bottom: 1px solid var(--line-1);
+}
+.modal-title { font-weight: 700; font-size: 14px; }
+.modal-body { padding: 14px; overflow-y: auto; flex: 1; }
+/* Detail-modal field grid */
+.kw-fields {
+  display: grid; grid-template-columns: 140px 1fr; gap: 6px 12px;
+  font-size: 12px; line-height: 1.5;
+}
+.kw-fields .k { color: var(--text-2); text-transform: uppercase; font-size: 10px; letter-spacing: .5px; padding-top: 3px; }
+.kw-fields .v { color: var(--text-1); word-break: break-word; }
+.kw-fields .v.mono { font-family: var(--mono); font-size: 11px; }
+.kw-fields .v.empty { color: var(--text-3); }
+/* Row detail-icon button — small and low-contrast until hovered. */
+.row-detail-btn {
+  background: transparent; border: none; padding: 2px 6px; border-radius: 4px;
+  color: var(--text-3); cursor: pointer; font-size: 13px;
+}
+.row-detail-btn:hover { color: var(--accent); background: var(--bg-3); }
+
 /* Sticky headers on tables. Nested inside .card-body which has overflow-auto. */
 .tbl thead th {
   position: sticky; top: 0; z-index: 5;

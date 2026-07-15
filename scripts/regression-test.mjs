@@ -1045,6 +1045,34 @@ async function run() {
   assert(cssBody.includes('.tier-excellent'),                     '20s.21 CSS styles tier-excellent rows');
   assert(cssBody.includes('.tbl a'),                              '20s.22 CSS styles table links for clickable keywords');
 
+  // Claude listing-brief prompt builder + modal.
+  assert(appJs.body.includes('function buildClaudeListingPrompt'), '20s.23 Claude prompt builder defined');
+  assert(appJs.body.includes('anClaudeBtn'),                        '20s.24 Claude button wired');
+  assert(appJs.body.includes('claudePromptText'),                   '20s.25 Claude modal textarea present');
+  assert(html.includes('id="claudeModal"'),                         '20s.26 Claude modal in HTML');
+  assert(html.includes('anClaudeBtn'),                              '20s.27 Claude button in HTML');
+  // The prompt template asks for the full listing package the user needs.
+  assert(appJs.body.includes('TITLE'),         '20s.28 prompt requests TITLE');
+  assert(appJs.body.includes('LONG DESCRIPTION'),'20s.29 prompt requests LONG DESCRIPTION');
+  assert(appJs.body.includes('INGREDIENTS'),   '20s.30 prompt requests INGREDIENTS');
+  assert(appJs.body.includes('HOW TO USE'),    '20s.31 prompt requests HOW TO USE');
+  assert(appJs.body.includes('FAQs'),          '20s.32 prompt requests FAQs');
+  assert(appJs.body.includes('SEO KEYWORDS'),  '20s.33 prompt requests SEO KEYWORDS');
+  assert(appJs.body.includes('AMAZON BULLETS'),'20s.34 prompt requests AMAZON BULLETS');
+  // Keyword detail modal + quick-links.
+  assert(appJs.body.includes('function openKeywordDetail'),         '20s.35 keyword detail modal defined');
+  assert(appJs.body.includes('Quick links'),                        '20s.36 detail modal has quick-links block');
+  assert(appJs.body.includes('trends.google.com'),                  '20s.37 detail links include Google Trends');
+  assert(appJs.body.includes('ads.google.com/aw/keywordplanner'),   '20s.38 detail links include Google KP deep-link');
+  assert(appJs.body.includes('dropy.in/search'),                    '20s.39 detail links include dropy.in search');
+  // Rich picker.
+  assert(appJs.body.includes('renderPickerBatchChips'),             '20s.40 batch quick-chips wired');
+  assert(appJs.body.includes('renderBatchPreview'),                 '20s.41 batch preview wired');
+  assert(appJs.body.includes('renderSkuPreview'),                   '20s.42 SKU preview wired');
+  assert(appJs.body.includes('wirePickerSearch'),                   '20s.43 picker search-as-you-type wired');
+  assert(cssBody.includes('.picker-bar'),                           '20s.44 picker CSS defined');
+  assert(cssBody.includes('.tbl.compact'),                          '20s.45 compact table density defined');
+
   // Discovery engine: caps raised so per-SKU output hits 100-300.
   const kdSrcCaps = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
   assert(/MAX_KP_SEEDS\s*=\s*5\b/.test(kdSrcCaps),          '20s.11 MAX_KP_SEEDS raised to 5');

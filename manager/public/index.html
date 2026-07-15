@@ -241,19 +241,74 @@
 
     <!-- ================= ANALYTICS ================= -->
     <section class="panel" id="panel-analytics">
-      <div class="row" style="margin-bottom: 12px;">
-        <label style="display:flex; align-items:center; gap:8px;">
-          <span class="lbl" style="margin:0;">Batch:</span>
-          <select id="anBatchSelect" style="min-width: 220px;"></select>
-        </label>
-        <label style="display:flex; align-items:center; gap:8px;">
-          <span class="lbl" style="margin:0;">SKU:</span>
-          <select id="anSkuSelect" style="min-width: 260px;">
+      <!-- Rich batch+SKU picker. Designed to scale to many batches / hundreds
+           of SKUs: searchable, previews of key stats, quick-jump chips for
+           the most-productive batches, keyboard support (/ focuses search). -->
+      <div class="picker-bar" id="anPickerBar">
+        <div class="picker-col">
+          <div class="picker-head">
+            <span>Batch</span>
+            <span class="picker-hint" id="anBatchHint">—</span>
+          </div>
+          <input type="text" id="anBatchSearch" placeholder="🔍 Search batches (type name or id, ↑↓ to move, Enter to pick)…" autocomplete="off" />
+          <select id="anBatchSelect" size="1"></select>
+          <div id="anBatchChips" class="picker-chips"></div>
+          <div id="anBatchPreview" class="picker-preview"></div>
+        </div>
+        <div class="picker-col">
+          <div class="picker-head">
+            <span>SKU</span>
+            <span class="picker-hint" id="anSkuHint">— pick a batch first —</span>
+          </div>
+          <input type="text" id="anSkuSearch" placeholder="🔍 Search SKUs in this batch…" autocomplete="off" disabled />
+          <select id="anSkuSelect" size="1">
             <option value="">— pick a batch first —</option>
           </select>
-        </label>
-        <span class="spacer" style="flex:1;"></span>
-        <button class="small secondary" id="anExportBtn" disabled>📥 Export this SKU as CSV</button>
+          <div id="anSkuPreview" class="picker-preview"></div>
+        </div>
+        <div class="picker-actions">
+          <button class="small" id="anClaudeBtn" disabled title="Assemble a Claude prompt from this SKU's keyword research (title, subtitle, description, ingredients, how-to-use, FAQs, SEO, ad copy).">🤖 Claude listing brief</button>
+          <button class="small secondary" id="anExportBtn" disabled>📥 Export this SKU as CSV</button>
+        </div>
+      </div>
+
+      <!-- Claude prompt preview modal — shown when 🤖 button is clicked. -->
+      <div id="claudeModal" class="modal-root" style="display:none;">
+        <div class="modal-backdrop" data-close-modal="1"></div>
+        <div class="modal-card">
+          <div class="modal-head">
+            <span class="modal-title">🤖 Claude listing-brief prompt</span>
+            <span id="claudeModalSub" class="hint" style="margin-left: 8px;">—</span>
+            <span class="spacer" style="flex:1;"></span>
+            <button class="small secondary" data-close-modal="1">Close</button>
+          </div>
+          <div class="modal-body">
+            <div class="hint" style="margin-bottom: 8px;">
+              Paste this into Claude (or click "Open in Claude"). It bundles every relevant signal from this SKU's research so Claude can write a full Shopify listing + ad + SEO package.
+            </div>
+            <textarea id="claudePromptText" spellcheck="false" style="width:100%; min-height: 380px; font-family: var(--mono); font-size: 12px; padding: 10px; background: var(--bg-input); color: var(--text-1); border: 1px solid var(--line-2); border-radius: 6px; resize: vertical;"></textarea>
+            <div class="row" style="margin-top: 10px;">
+              <button id="claudeCopyBtn">📋 Copy prompt</button>
+              <button class="secondary" id="claudeDownloadBtn">💾 Download .txt</button>
+              <button class="secondary" id="claudeOpenBtn" title="Opens claude.ai/new with the prompt copied to your clipboard — paste it into the chat box.">🚀 Open in Claude</button>
+              <span class="spacer" style="flex:1;"></span>
+              <span id="claudePromptStats" class="hint"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Keyword-row detail modal — clicked from any row's 🔍 button. -->
+      <div id="kwDetailModal" class="modal-root" style="display:none;">
+        <div class="modal-backdrop" data-close-modal="1"></div>
+        <div class="modal-card">
+          <div class="modal-head">
+            <span class="modal-title" id="kwDetailTitle">Keyword details</span>
+            <span class="spacer" style="flex:1;"></span>
+            <button class="small secondary" data-close-modal="1">Close</button>
+          </div>
+          <div class="modal-body" id="kwDetailBody"></div>
+        </div>
       </div>
 
       <div id="anSummary">
@@ -351,7 +406,7 @@
               </label>
             </div>
             <div style="overflow: auto; max-height: 520px;">
-              <table class="tbl" id="anTable"></table>
+              <table class="tbl compact" id="anTable"></table>
             </div>
           </div>
         </div>
