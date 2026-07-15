@@ -124,6 +124,12 @@ CREATE TABLE IF NOT EXISTS workers (
 -- Additive migration for existing DBs that pre-date the mac/hostname cols.
 -- Duplicate-column ADD is caught by node:sqlite and logged; we swallow it.
 
+CREATE TABLE IF NOT EXISTS batch_names (
+  batch_id     TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  updated_at   INTEGER DEFAULT (strftime('%s','now')*1000)
+);
+
 CREATE TABLE IF NOT EXISTS worker_commands (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   worker_id   TEXT,               -- null = broadcast
@@ -286,6 +292,13 @@ const Q = {
       hostname=COALESCE(NULLIF(excluded.hostname, ''), workers.hostname)`),
   listWorkers: db.prepare(`SELECT worker_id, first_seen, last_seen, mac_address, hostname FROM workers ORDER BY last_seen DESC`),
   getWorker:   db.prepare(`SELECT * FROM workers WHERE worker_id = ?`),
+  // Batch display names — user-friendly labels ("Aquaphor Round 2") that
+  // replace opaque timestamp IDs in every dropdown / list. Underlying
+  // batch_id stays unchanged (still the join key across all tables).
+  upsertBatchName: db.prepare(`INSERT INTO batch_names (batch_id, display_name, updated_at)
+    VALUES (?, ?, ?) ON CONFLICT(batch_id) DO UPDATE SET display_name=excluded.display_name, updated_at=excluded.updated_at`),
+  deleteBatchName: db.prepare(`DELETE FROM batch_names WHERE batch_id = ?`),
+  listBatchNames:  db.prepare(`SELECT batch_id, display_name, updated_at FROM batch_names`),
   newestPendingBatch: db.prepare(`SELECT batch_id FROM jobs WHERE status='pending' GROUP BY batch_id ORDER BY MAX(created_at) DESC LIMIT 1`),
   batchHasPending: db.prepare(`SELECT 1 FROM jobs WHERE batch_id=? AND status='pending' LIMIT 1`),
   existsActiveUrl: db.prepare(`SELECT 1 FROM jobs WHERE product_url=? AND batch_id<>? AND status IN ('pending','claimed','done') LIMIT 1`),
@@ -893,6 +906,21 @@ const server = http.createServer(async (req, res) => {
     }
     if (m === 'GET' && p === '/api/keywords/batches') {
       return send(res, 200, { ok: true, batches: Q.keywordsBatchList.all() });
+    }
+    // Batch display names — a user-editable overlay on the opaque
+    // timestamp batch_ids that dropdowns/lists render instead of the ID.
+    if (m === 'GET' && p === '/api/batches/names') {
+      return send(res, 200, { ok: true, names: Q.listBatchNames.all() });
+    }
+    if (m === 'POST' && p === '/api/batches/rename') {
+      const b = await readJson(req);
+      const bid = String(b.batchId || '').trim();
+      const name = String(b.name || '').trim();
+      if (!bid) return send(res, 400, { ok: false, error: 'batchId required' });
+      if (!name) { Q.deleteBatchName.run(bid); return send(res, 200, { ok: true, cleared: true }); }
+      if (name.length > 100) return send(res, 400, { ok: false, error: 'display_name max 100 chars' });
+      Q.upsertBatchName.run(bid, name, now());
+      return send(res, 200, { ok: true, batchId: bid, name });
     }
     // Count orphan keyword rows — rows whose batch_id no longer has any
     // jobs. Cheap read; used by the Config-tab cleanup card + the reset
