@@ -1599,6 +1599,9 @@ const analytics = {
   // Users can click any column header to override.
   sortKey: 'opportunity_score',
   sortDir: 'desc',
+  // Hide columns whose entire filtered set is null/0/empty. Cuts through
+  // the "columns of nothing but em-dashes" visual noise. Toggleable.
+  hideEmptyCols: true,
 };
 
 // Opportunity score — a single number that ranks a keyword by SEO/Ads value.
@@ -2063,17 +2066,140 @@ function filterAndRenderAnalytics() {
   });
 
   analytics.skuRows = filtered;
+  renderExecutiveSummary(source, filtered);
   renderAnalyticsSummary(source);
   renderAnalyticsInsights(source, filtered);
   renderAnalyticsTopChart(filtered);
   renderAnalyticsTable(filtered);
 
-  $('anTableCard').style.display = source.length > 0 ? '' : 'none';
+  $('anExecCard').style.display     = source.length > 0 ? '' : 'none';
+  $('anTableCard').style.display    = source.length > 0 ? '' : 'none';
   $('anTopChartCard').style.display = source.length > 0 ? '' : 'none';
   $('anInsightsCard').style.display = source.length > 0 ? '' : 'none';
   $('anExportBtn').disabled = filtered.length === 0;
   const claudeBtn = $('anClaudeBtn');
   if (claudeBtn) claudeBtn.disabled = source.length === 0;
+}
+
+// ─────────── Executive summary ───────────
+// Turns raw metrics into plain-English business takeaways. Deliberately
+// short — 4-6 bullets max — so it reads like an exec briefing not a dump.
+function renderExecutiveSummary(sourceRows, filteredRows) {
+  const el = $('anExec');
+  const sub = $('anExecSub');
+  if (!el) return;
+  const rows = sourceRows || [];
+  if (rows.length === 0) { el.innerHTML = ''; if (sub) sub.textContent = '—'; return; }
+
+  const ctx = rows.find(r => r.product_name) || rows[0];
+  const scored = rows.map(r => ({ ...r, __s: opportunityScore(r) }));
+  scored.sort((a, b) => b.__s - a.__s);
+
+  // Primary source aggregation — collapses multi-source rows to their FIRST
+  // source (the one that discovered the keyword). Much cleaner than the raw
+  // combo chips that read like "KP_IDEA, AUTOSUGGEST, KP_REEXPAND, RELATED_SEARCH".
+  const primarySrc = {};
+  for (const r of scored) {
+    const k = String(r.source || '—').split(',')[0].trim().toUpperCase() || '—';
+    primarySrc[k] = (primarySrc[k] || 0) + 1;
+  }
+  const topSrc = Object.entries(primarySrc).sort((a, b) => b[1] - a[1])[0];
+
+  const intents = { high: 0, medium: 0, low: 0, informational: 0, other: 0 };
+  for (const r of scored) { const k = String(r.buying_intent || 'other').toLowerCase(); intents[k] != null ? intents[k]++ : intents.other++; }
+  const highPct = Math.round((intents.high / scored.length) * 100);
+  const lowPct  = Math.round((intents.low  / scored.length) * 100);
+
+  const withImg = scored.filter(r => (toNum(r.image_count) || 0) > 0).length;
+  const imgPct = Math.round((withImg / scored.length) * 100);
+  const withVol = scored.filter(r => (toNum(r.kp_monthly_searches) || 0) > 0).length;
+  const volPct = Math.round((withVol / scored.length) * 100);
+  const dropySeller = scored.filter(r => String(r.dropy_is_seller || '').toLowerCase() === 'yes').length;
+  const excellent = scored.filter(r => r.__s >= 12).length;
+  const excPct = Math.round((excellent / scored.length) * 100);
+
+  const topKw = scored[0];
+  const productName = ctx.product_name || analytics.sku || 'this SKU';
+  const targetStatus = scored.length < 100 ? { text: `⚠ below target (${scored.length} / 100 minimum)`, tone: 'warn' }
+                    : scored.length > 300 ? { text: `beyond target (${scored.length} / 100–300)`, tone: 'info' }
+                    : { text: `on target (${scored.length} / 100–300)`, tone: 'success' };
+
+  // Assemble business-tone takeaways. Each is styled with a tone-colored
+  // vertical bar on the left (banner-lite pattern) so the good/warn/danger
+  // reads at a glance without extra icons.
+  const takeaways = [];
+
+  // Coverage takeaway.
+  takeaways.push({
+    tone: targetStatus.tone,
+    label: 'Keyword coverage',
+    body: `${scored.length.toLocaleString()} keywords collected for <strong>${esc(productName)}</strong> — ${targetStatus.text}. ${excellent > 0 ? `<strong>${excellent}</strong> (${excPct}%) rank <span style="color:var(--success);">Excellent</span> (score ≥ 12).` : 'None rank Excellent yet — consider expanding autosuggest depth.'}`,
+  });
+
+  // Demand-signal takeaway (KP volume).
+  if (volPct >= 50) {
+    takeaways.push({ tone: 'success', label: 'Search-demand data', body: `${volPct}% of rows carry Google KP monthly-search volume — confident demand ranking.` });
+  } else if (volPct > 0) {
+    takeaways.push({ tone: 'warn', label: 'Search-demand data', body: `Only ${volPct}% of rows (${withVol}/${scored.length}) have KP volume. Ranking leans on relevance + image-match signals; enable KP-metrics backfill for tighter demand estimates.` });
+  } else {
+    takeaways.push({ tone: 'warn', label: 'Search-demand data', body: `<strong>No KP volume data on any row.</strong> Ranking relies purely on relevance + image matches. Fix: ensure the Keyword Planner URL is set and <code>backfillKpMetrics</code> is enabled per worker.` });
+  }
+
+  // Visual-visibility takeaway.
+  if (imgPct >= 30) {
+    takeaways.push({ tone: 'success', label: 'Visual visibility', body: `Our product visually surfaces on <strong>${imgPct}%</strong> of these keyword SERPs (${withImg} of ${scored.length}). Strong organic footprint.` });
+  } else if (imgPct > 0) {
+    takeaways.push({ tone: 'info', label: 'Visual visibility', body: `Product surfaces visually on <strong>${imgPct}%</strong> of SERPs — decent but there's room to lift image visibility with better product photography and Merchant Center feeds.` });
+  } else {
+    takeaways.push({ tone: 'warn', label: 'Visual visibility', body: `Product doesn't surface visually on any SERP. Suggests product images may not be indexed or don't match SERP thumbnails — investigate.` });
+  }
+
+  // Intent balance takeaway.
+  if (highPct >= 25) {
+    takeaways.push({ tone: 'success', label: 'Buying-intent balance', body: `<strong>${highPct}%</strong> of keywords are high-buying-intent — a strong pool to drive paid ads and category pages against.` });
+  } else if (highPct >= 10) {
+    takeaways.push({ tone: 'info', label: 'Buying-intent balance', body: `${highPct}% high-intent, ${lowPct}% low-intent. Split marketing: high-intent for ads, low-intent for SEO content/blog.` });
+  } else {
+    takeaways.push({ tone: 'warn', label: 'Buying-intent balance', body: `Only ${highPct}% high-intent (${lowPct}% low). Expand around "buy", "price", "best", "review", and city-modified queries to lift commercial intent.` });
+  }
+
+  // Best channel takeaway (which source is doing the heavy lifting).
+  if (topSrc) {
+    const [srcName, srcCount] = topSrc;
+    const srcPct = Math.round((srcCount / scored.length) * 100);
+    takeaways.push({ tone: 'neutral', label: 'Discovery mix', body: `<strong>${srcPct}%</strong> of the pool came from <span class="chip src-${srcName.toLowerCase().split('_')[0]}" style="font-size:10px;">${esc(srcName)}</span>. Diversify by adding more KP seeds or a deeper autosuggest crawl if this is over-concentrated.` });
+  }
+
+  // Merchandising takeaway.
+  if (dropySeller > 0) {
+    takeaways.push({ tone: 'success', label: 'Merchandising', body: `dropy.in is already listed as a seller on <strong>${dropySeller}</strong> of these keyword SERPs — protect these positions.` });
+  }
+
+  // Top-opportunity spotlight.
+  if (topKw) {
+    const vol = toNum(topKw.kp_monthly_searches);
+    const bits = [`score <strong>${topKw.__s.toFixed(1)}</strong>`];
+    if (vol && vol > 0) bits.push(`${vol.toLocaleString()} monthly searches`);
+    if (topKw.buying_intent) bits.push(`${topKw.buying_intent} intent`);
+    if (topKw.kp_competition) bits.push(`${topKw.kp_competition} competition`);
+    const href = topKw.serp_url || `https://www.google.com/search?q=${encodeURIComponent(topKw.keyword)}&gl=in`;
+    takeaways.push({ tone: 'info', label: 'Top opportunity', body: `<a href="${esc(href)}" target="_blank" rel="noopener"><strong>${esc(topKw.keyword)}</strong></a> — ${bits.join(' · ')}. Anchor your product title + first Google ad headline around this phrase.` });
+  }
+
+  const toneColor = {
+    success: 'var(--success)',
+    info:    'var(--accent)',
+    warn:    'var(--warn)',
+    danger:  'var(--danger)',
+    neutral: 'var(--text-3)',
+  };
+
+  el.innerHTML = takeaways.map(t => `
+    <div class="exec-bullet" style="border-left: 3px solid ${toneColor[t.tone] || 'var(--text-3)'};">
+      <div class="exec-label" style="color: ${toneColor[t.tone] || 'var(--text-2)'};">${esc(t.label)}</div>
+      <div class="exec-body">${t.body}</div>
+    </div>`).join('');
+  if (sub) sub.textContent = `${scored.length.toLocaleString()} keyword(s) analysed`;
 }
 
 function renderAnalyticsSummary(rows) {
@@ -2082,49 +2208,64 @@ function renderAnalyticsSummary(rows) {
     el.innerHTML = `<div class="empty"><div class="empty-icon">📭</div>${analytics.sku ? 'No keywords for this SKU yet.' : 'No keywords in this batch yet.'}</div>`;
     return;
   }
-  const withImg = rows.filter(r => (r.image_count || 0) > 0).length;
-  const totalImg = rows.reduce((s, r) => s + (r.image_count || 0), 0);
-  const avgRating = rows.reduce((s, r) => s + (r.ad_rating || 0), 0) / rows.length;
-  const bySrc = {}; for (const r of rows) { const k = String(r.source || '—'); bySrc[k] = (bySrc[k] || 0) + 1; }
-  const byIntent = {}; for (const r of rows) { const k = String(r.buying_intent || '—'); byIntent[k] = (byIntent[k] || 0) + 1; }
-  const totalKp = rows.filter(r => (toNum(r.kp_monthly_searches) || 0) > 0).length;
+  // Compact stat row — used to live above as 5 large tiles + a whole card
+  // for sources + intent. Merged into a single dense strip so the Executive
+  // Summary + Insights below get the vertical space instead. The multi-
+  // source combo chips ("KP_IDEA, AUTOSUGGEST, RELATED_SEARCH") that
+  // read as noise are gone; we aggregate by PRIMARY source instead.
+  const withImg = rows.filter(r => (toNum(r.image_count) || 0) > 0).length;
+  const totalImg = rows.reduce((s, r) => s + (toNum(r.image_count) || 0), 0);
+  const withVol = rows.filter(r => (toNum(r.kp_monthly_searches) || 0) > 0).length;
+  const avgScore = rows.reduce((s, r) => s + (Number(r.opportunity_score) || 0), 0) / rows.length;
 
-  // Sources chip row. Each source gets its own color so users can skim
-  // the mix at a glance (KP blue, autosuggest amber, SERP teal, etc.).
+  const primarySrc = {};
+  for (const r of rows) {
+    const k = String(r.source || '—').split(',')[0].trim().toUpperCase() || '—';
+    primarySrc[k] = (primarySrc[k] || 0) + 1;
+  }
   const srcClassFor = (k) => {
     const s = String(k).toLowerCase();
-    if (s.includes('kp')) return 'src-kp';
-    if (s.includes('autosuggest')) return 'src-autosuggest';
-    if (s.includes('serp')) return 'src-serp';
-    if (s.includes('paa')) return 'src-paa';
-    if (s.includes('related')) return 'src-related';
-    if (s.includes('amazon')) return 'src-amazon';
+    if (s.startsWith('kp')) return 'src-kp';
+    if (s.startsWith('autosuggest')) return 'src-autosuggest';
+    if (s.startsWith('serp')) return 'src-serp';
+    if (s.startsWith('paa')) return 'src-paa';
+    if (s.startsWith('related')) return 'src-related';
+    if (s.startsWith('amazon')) return 'src-amazon';
     return 'pending';
   };
-  const srcChips = Object.entries(bySrc).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) =>
-    `<span class="chip ${srcClassFor(k)}"><strong>${esc(k)}</strong>: ${v}</span>`
-  ).join(' ');
-  const intentChips = Object.entries(byIntent).filter(([k]) => k && k !== '—').sort((a, b) => b[1] - a[1]).map(([k, v]) => {
-    const cls = k === 'high' ? 'done' : k === 'medium' ? 'claimed' : k === 'low' ? 'pending' : 'pending';
-    return `<span class="chip ${cls}"><strong>${esc(k)}</strong>: ${v}</span>`;
+  const srcIcon = (k) => {
+    const s = String(k).toLowerCase();
+    if (s.startsWith('kp')) return '📊';
+    if (s.startsWith('autosuggest')) return '⌨️';
+    if (s.startsWith('serp')) return '🔎';
+    if (s.startsWith('paa')) return '❓';
+    if (s.startsWith('related')) return '🔗';
+    if (s.startsWith('amazon')) return '🛒';
+    return '·';
+  };
+  const totalRows = rows.length;
+  const srcChips = Object.entries(primarySrc).sort((a, b) => b[1] - a[1]).map(([k, v]) => {
+    const pct = Math.round((v / totalRows) * 100);
+    return `<span class="chip ${srcClassFor(k)}" title="${esc(k)} — ${v} rows (${pct}% of pool)">${srcIcon(k)} <strong>${esc(k)}</strong> · ${v}<span style="opacity:.65;"> · ${pct}%</span></span>`;
+  }).join(' ');
+
+  const byIntent = { high: 0, medium: 0, low: 0, informational: 0 };
+  for (const r of rows) { const k = String(r.buying_intent || '').toLowerCase(); if (byIntent[k] != null) byIntent[k]++; }
+  const intentChips = ['high', 'medium', 'low', 'informational'].filter(k => byIntent[k] > 0).map(k => {
+    const cls = k === 'high' ? 'done' : k === 'medium' ? 'claimed' : 'pending';
+    const pct = Math.round((byIntent[k] / totalRows) * 100);
+    return `<span class="chip ${cls}"><strong>${k}</strong>: ${byIntent[k]}<span style="opacity:.65;"> · ${pct}%</span></span>`;
   }).join(' ');
 
   el.innerHTML = `
-    <div class="tiles">
-      <div class="tile success"><div class="lbl">Keywords</div><div class="val">${rows.length.toLocaleString()}</div></div>
-      <div class="tile info"><div class="lbl">With image matches</div><div class="val">${withImg}</div></div>
-      <div class="tile"><div class="lbl">Total img hits</div><div class="val">${totalImg.toLocaleString()}</div></div>
-      <div class="tile"><div class="lbl">Avg AdRating</div><div class="val">${avgRating.toFixed(1)}</div></div>
-      <div class="tile"><div class="lbl">KP-metric rows</div><div class="val">${totalKp}</div></div>
+    <div class="tiles compact-tiles">
+      <div class="tile success"><div class="lbl">Keywords</div><div class="val">${totalRows.toLocaleString()}</div></div>
+      <div class="tile info"><div class="lbl">Image matches</div><div class="val">${withImg}<span class="sub"> · ${totalImg} hits</span></div></div>
+      <div class="tile ${avgScore >= 7 ? 'success' : ''}"><div class="lbl">Avg opportunity</div><div class="val">${avgScore.toFixed(1)}</div></div>
+      <div class="tile ${withVol > 0 ? '' : 'warn'}"><div class="lbl">KP volume rows</div><div class="val">${withVol}<span class="sub"> / ${totalRows}</span></div></div>
     </div>
-    <div class="card" style="margin-top: -4px;">
-      <div class="card-body" style="padding: 10px 14px;">
-        <div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px;">Sources</div>
-        <div class="row tight" style="margin-bottom: 8px;">${srcChips || '<span class="hint">—</span>'}</div>
-        ${intentChips ? `<div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px;">Buying intent</div>
-        <div class="row tight">${intentChips}</div>` : ''}
-      </div>
-    </div>
+    <div class="row tight" style="margin: 6px 0;">${srcChips || ''}</div>
+    ${intentChips ? `<div class="row tight" style="margin-bottom: 6px;">${intentChips}</div>` : ''}
   `;
 }
 
@@ -2373,7 +2514,7 @@ function scoreTier(n) {
 }
 function renderAnalyticsTable(rows) {
   const el = $('anTable');
-  $('anTableCount').textContent = `${rows.length.toLocaleString()} row(s)`;
+  // Note the hidden count is updated below (after we compute hiddenCols).
   if (rows.length === 0) {
     el.innerHTML = `<tr><td style="padding:16px; text-align:center; color:var(--text-3);">No keywords match the current filters.</td></tr>`;
     return;
@@ -2402,7 +2543,37 @@ function renderAnalyticsTable(rows) {
     { key: 'source',               label: 'Source',     kind: 'chip' },
     { key: '__details',            label: '',           kind: 'details', tip: 'Open full details for this keyword.' },
   ];
-  const thead = `<thead><tr>${cols.map(c => `
+  // Auto-hide any column whose entire filtered set is empty (all null / 0
+  // / "" — the em-dash forest). Anchor + score + keyword + details are
+  // pinned so they always show, and users can toggle via the button below.
+  const alwaysShow = new Set(['opportunity_score', 'keyword', 'source', '__details']);
+  const isEmptyForCol = (col) => rows.every(r => {
+    const v = r[col.key];
+    if (v == null || v === '' || v === '—') return true;
+    if (col.kind === 'yesno') return !(String(v).toLowerCase() === 'yes' || v === true || v === 1);
+    if (['num', 'money', 'pct', 'rating', 'imgs'].includes(col.kind)) {
+      const n = Number(v);
+      return !Number.isFinite(n) || n === 0;
+    }
+    return false;
+  });
+  const hiddenCols = new Set();
+  if (analytics.hideEmptyCols) {
+    for (const c of cols) if (!alwaysShow.has(c.key) && isEmptyForCol(c)) hiddenCols.add(c.key);
+  }
+  const visibleCols = cols.filter(c => !hiddenCols.has(c.key));
+  // Header count + hidden-cols hint.
+  const countEl = $('anTableCount');
+  if (countEl) {
+    const hiddenLabels = Array.from(hiddenCols).map(k => cols.find(c => c.key === k)?.label).filter(Boolean).join(', ');
+    const hint = hiddenCols.size > 0
+      ? ` · <button id="anShowAllColsBtn" class="tiny-link" title="Show every column even when all values are empty for the current filtered set.">show ${hiddenCols.size} empty col(s)</button><span class="hint" style="margin-left: 4px;">(${esc(hiddenLabels)})</span>`
+      : (!analytics.hideEmptyCols
+          ? ` · <button id="anHideEmptyColsBtn" class="tiny-link">hide empty cols</button>`
+          : '');
+    countEl.innerHTML = `${rows.length.toLocaleString()} row(s)${hint}`;
+  }
+  const thead = `<thead><tr>${visibleCols.map(c => `
     <th data-sort-key="${c.key}" style="cursor:pointer;" title="${esc(c.tip || 'Click to sort')}">
       ${esc(c.label)}${analytics.sortKey === c.key ? (analytics.sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
     </th>`).join('')}</tr></thead>`;
@@ -2412,7 +2583,7 @@ function renderAnalyticsTable(rows) {
     // Row's left border colored by tier — instantly conveys quality at a glance.
     const rowStyle = `border-left: 3px solid ${rowTier.color};`;
     return `
-    <tr class="tier-${rowTier.tier}" style="${rowStyle}">${cols.map(c => {
+    <tr class="tier-${rowTier.tier}" style="${rowStyle}">${visibleCols.map(c => {
       const v = r[c.key];
       if (c.kind === 'chip' && v) {
         // Source column uses source-specific colors; intent/relevance columns
@@ -2500,7 +2671,7 @@ function renderAnalyticsTable(rows) {
       }
       return `<td style="max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(v)}">${esc(v == null ? '—' : v)}</td>`;
     }).join('')}</tr>`;
-  }).join('')}${rows.length > 500 ? `<tr><td colspan="${cols.length}" style="text-align:center; color:var(--text-3);">…and ${rows.length - 500} more — narrow the filters to see them.</td></tr>` : ''}</tbody>`;
+  }).join('')}${rows.length > 500 ? `<tr><td colspan="${visibleCols.length}" style="text-align:center; color:var(--text-3);">…and ${rows.length - 500} more — narrow the filters to see them.</td></tr>` : ''}</tbody>`;
   el.innerHTML = thead + tbody;
   // Wire header click → sort toggle (skips the pseudo-details column).
   el.querySelectorAll('th[data-sort-key]').forEach(th => {
@@ -2521,6 +2692,9 @@ function renderAnalyticsTable(rows) {
       if (row) openKeywordDetail(row);
     });
   });
+  // Wire empty-columns toggles (present in the count/sub label).
+  $('anShowAllColsBtn')?.addEventListener('click', () => { analytics.hideEmptyCols = false; filterAndRenderAnalytics(); });
+  $('anHideEmptyColsBtn')?.addEventListener('click', () => { analytics.hideEmptyCols = true;  filterAndRenderAnalytics(); });
 }
 
 // ─────────── Keyword detail modal ───────────

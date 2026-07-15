@@ -1073,6 +1073,20 @@ async function run() {
   assert(cssBody.includes('.picker-bar'),                           '20s.44 picker CSS defined');
   assert(cssBody.includes('.tbl.compact'),                          '20s.45 compact table density defined');
 
+  // Executive summary + polish.
+  assert(appJs.body.includes('function renderExecutiveSummary'), '20s.46 executive summary renderer defined');
+  assert(html.includes('id="anExecCard"'),                       '20s.47 executive-summary card in HTML');
+  assert(appJs.body.includes('Buying-intent balance'),           '20s.48 exec includes buying-intent takeaway');
+  assert(appJs.body.includes('Visual visibility'),               '20s.49 exec includes visual-visibility takeaway');
+  assert(appJs.body.includes('Search-demand data'),              '20s.50 exec includes KP-demand takeaway');
+  assert(cssBody.includes('.exec-bullet'),                       '20s.51 exec-bullet styling defined');
+  // Auto-hide empty columns + toggle.
+  assert(appJs.body.includes('hideEmptyCols'),                   '20s.52 hide-empty-cols state present');
+  assert(appJs.body.includes('anShowAllColsBtn'),                '20s.53 show-empty-cols toggle wired');
+  // Compact tiles + primary-source aggregation.
+  assert(cssBody.includes('.tiles.compact-tiles'),               '20s.54 compact-tiles CSS defined');
+  assert(appJs.body.includes('primarySrc'),                      '20s.55 primary-source aggregation replaces combo chips');
+
   // Discovery engine: caps raised so per-SKU output hits 100-300.
   const kdSrcCaps = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
   assert(/MAX_KP_SEEDS\s*=\s*5\b/.test(kdSrcCaps),          '20s.11 MAX_KP_SEEDS raised to 5');
