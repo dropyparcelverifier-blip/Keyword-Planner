@@ -289,11 +289,24 @@
         </div>
       </div>
 
+      <div id="anInsightsCard" style="display:none;">
+        <div class="card">
+          <div class="card-head">
+            <span class="card-icon">💡</span>
+            <span class="card-title">Insights &amp; recommendations</span>
+            <span class="card-sub" id="anInsightsSub">—</span>
+          </div>
+          <div class="card-body">
+            <div id="anInsights"></div>
+          </div>
+        </div>
+      </div>
+
       <div id="anTopChartCard" style="display:none;">
         <div class="card">
           <div class="card-head">
             <span class="card-icon">🏆</span>
-            <span class="card-title">Top keywords by AdRating</span>
+            <span class="card-title">Top keywords — best SEO/Ad opportunities</span>
             <span class="card-sub" id="anTopChartSub">—</span>
           </div>
           <div class="card-body">
@@ -360,6 +373,29 @@
             <button class="secondary" id="unpinBatchBtn">Unpin</button>
           </div>
           <div id="pinBatchResult"></div>
+        </div>
+      </div>
+
+      <div class="card collapsible">
+        <div class="card-head">
+          <span class="card-icon">🏷️</span>
+          <span class="card-title">Name a batch</span>
+          <span class="card-sub">give batches human-readable labels (e.g. "Aquaphor Round 3")</span>
+        </div>
+        <div class="card-body">
+          <div class="hint">Names appear alongside the batch_id in every dropdown across the app. Leave the input blank + Save to remove a name.</div>
+          <div class="row" style="margin-top: 10px; align-items: flex-end;">
+            <label class="field" style="flex: 1;">
+              <span class="lbl">Batch</span>
+              <select id="renameBatchSelect" style="width: 100%;"></select>
+            </label>
+            <label class="field" style="flex: 2;">
+              <span class="lbl">Display name</span>
+              <input type="text" id="renameBatchName" maxlength="80" placeholder="e.g. Aquaphor Round 3" />
+            </label>
+            <button id="renameBatchBtn">Save name</button>
+          </div>
+          <div id="renameBatchResult"></div>
         </div>
       </div>
 

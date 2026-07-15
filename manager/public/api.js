@@ -70,6 +70,8 @@ export const api = {
   backupNow:         ()                => _fetch('/api/backups/create', { method: 'POST', body: {} }),
   wakeOnLan:         (workerId, mac)   => _fetch('/api/workers/wol', { method: 'POST', body: { workerId, mac } }),
   setWorkerMac:      (workerId, mac)   => _fetch('/api/workers/set-mac', { method: 'POST', body: { workerId, mac } }),
+  batchNames:        ()                => _fetch('/api/batches/names'),
+  renameBatch:       (batchId, name)   => _fetch('/api/batches/rename', { method: 'POST', body: { batchId, name } }),
 };
 
 // Live keyword stats — mirrors the extension's dashboard fetchBatchKeywordStats.

@@ -975,6 +975,72 @@ async function run() {
   assert(wd.body.includes("exit 0"),              '20q.12 watchdog exits silently when manager down');
   assert(ps.body.includes("'__MGR__'"),           '20q.13 installer substitutes __MGR__ placeholder');
 
+  // ===== 20r. BATCH NAMES (human-readable batch labels) =====
+  // Empty state — no names set yet.
+  const bnEmpty = await req('GET', '/api/batches/names');
+  assertEq(bnEmpty.status, 200, '20r.1 batch-names list returns 200');
+  assert(Array.isArray(bnEmpty.data?.names), '20r.2 names is an array');
+  const bnEmptyLen = bnEmpty.data.names.length;
+
+  // Set a name.
+  const bnSet = await req('POST', '/api/batches/rename', { batchId: BATCH_A, name: 'Aquaphor Round 3' });
+  assertEq(bnSet.status, 200, '20r.3 rename returns 200');
+  assert(bnSet.data?.ok === true, '20r.4 rename ok=true');
+
+  // Verify listed with new name.
+  const bnAfter = await req('GET', '/api/batches/names');
+  const namedRow = bnAfter.data.names.find(n => n.batch_id === BATCH_A);
+  assert(namedRow?.display_name === 'Aquaphor Round 3', '20r.5 rename persists via list endpoint');
+  assert(bnAfter.data.names.length === bnEmptyLen + 1, '20r.6 list length grew by exactly one');
+
+  // Update in place (same batch, different name).
+  await req('POST', '/api/batches/rename', { batchId: BATCH_A, name: 'Aquaphor Round 3 — final' });
+  const bnUpd = await req('GET', '/api/batches/names');
+  const updRow = bnUpd.data.names.find(n => n.batch_id === BATCH_A);
+  assert(updRow?.display_name === 'Aquaphor Round 3 — final', '20r.7 rename updates in place');
+  assert(bnUpd.data.names.length === bnEmptyLen + 1, '20r.8 update does not grow list');
+
+  // Empty name deletes the label.
+  await req('POST', '/api/batches/rename', { batchId: BATCH_A, name: '' });
+  const bnDel = await req('GET', '/api/batches/names');
+  const delRow = bnDel.data.names.find(n => n.batch_id === BATCH_A);
+  assert(!delRow, '20r.9 empty name removes the label');
+
+  // Missing batchId = 400.
+  const bnBad = await req('POST', '/api/batches/rename', { name: 'no id' });
+  assertEq(bnBad.status, 400, '20r.10 rename without batchId = 400');
+
+  // UI wiring — rename UI + fetch + label helper.
+  assert(appJs.body.includes('renameBatchSelect'),  '20r.11 rename dropdown wired in app.js');
+  assert(appJs.body.includes('api.renameBatch'),    '20r.12 rename button calls API');
+  assert(appJs.body.includes('function batchLabel'),'20r.13 display-name helper defined');
+  assert(appJs.body.includes('state.batchNames'),   '20r.14 batchNames state populated on refresh');
+  const html = readFileSync(resolve(REPO, 'manager/public/index.html'), 'utf-8');
+  assert(html.includes('renameBatchSelect') && html.includes('renameBatchName'), '20r.15 rename UI in index.html');
+
+  // ===== 20s. ANALYTICS INSIGHTS + COLUMN ORDER =====
+  // Analytics table must lead with opportunity score + Volume before AdRating.
+  assert(appJs.body.includes("key: 'opportunity_score'"),   '20s.1 opportunity_score column defined');
+  assert(appJs.body.includes('function opportunityScore'),  '20s.2 opportunityScore function defined');
+  assert(appJs.body.includes('renderAnalyticsInsights'),    '20s.3 insights renderer defined');
+  assert(html.includes('anInsightsCard'),                   '20s.4 insights card in HTML');
+  // Column ordering: Score < Keyword < Volume < Intent < ... < Source (Source moved to the end).
+  const colBlock = appJs.body.match(/const cols = \[[\s\S]{0,3000}?\];/)?.[0] || '';
+  const posOf = (needle) => colBlock.indexOf(needle);
+  assert(posOf("'opportunity_score'") < posOf("'keyword'"),        '20s.5 Score before Keyword');
+  assert(posOf("'kp_monthly_searches'") < posOf("'ad_rating'"),    '20s.6 Volume before AdRating');
+  assert(posOf("'buying_intent'") < posOf("'ad_rating'"),          '20s.7 Intent before AdRating');
+  assert(posOf("'keyword_relevance'") > 0,                         '20s.8 keyword_relevance column added');
+  assert(posOf("'visibility_pct'") > 0,                            '20s.9 visibility_pct column added');
+  assert(posOf("'dropy_is_seller'") > 0,                           '20s.10 dropy_is_seller column added');
+
+  // Discovery engine: caps raised so per-SKU output hits 100-300.
+  const kdSrcCaps = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+  assert(/MAX_KP_SEEDS\s*=\s*5\b/.test(kdSrcCaps),          '20s.11 MAX_KP_SEEDS raised to 5');
+  assert(/MAX_R1_KP_SERP_SEEDS\s*=\s*60\b/.test(kdSrcCaps), '20s.12 MAX_R1_KP_SERP_SEEDS raised to 60');
+  assert(/R2_KP_CAP_PER_SEED\s*=\s*40\b/.test(kdSrcCaps),   '20s.13 R2_KP_CAP_PER_SEED raised to 40');
+  assert(/maxAmazonKeywords \|\| 50/.test(kdSrcCaps),       '20s.14 maxAmazonKeywords default raised to 50');
+
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
   const [s1, w1, a1] = await Promise.all([

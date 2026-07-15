@@ -24,6 +24,9 @@ const state = {
   seenWorkerIds: new Set(),  // for new-worker-connect toast
   timelineTimer: null,        // dashboard throughput refresh
   workerFilter: '',            // activity-log scope: '' = all workers, else worker_id
+  // Batch display names — user-editable labels overlaid on batch IDs.
+  // Map<batchId, {display_name, updated_at}>. Populated on refresh.
+  batchNames: new Map(),
   // Diff-based event detection — remembers the previous refresh's snapshot
   // so we can toast on transitions (SKU done, worker offline, batch complete).
   eventSnap: {
@@ -679,7 +682,7 @@ function stopDashPolling() {
 
 async function refreshDashboard() {
   try {
-    const [summary, workers, roster, activity, failed, timeline, errors, kwBatches] = await Promise.all([
+    const [summary, workers, roster, activity, failed, timeline, errors, kwBatches, names] = await Promise.all([
       api.jobsSummary(),
       api.jobsWorkerStats(),
       api.workersList().catch(() => ({ workers: [] })),
@@ -688,8 +691,10 @@ async function refreshDashboard() {
       api.keywordsTimeline(state.activeBatch).catch(() => ({ buckets: [] })),
       api.activityErrors(state.activeBatch, 60).catch(() => ({ events: [] })),
       api.keywordsBatches().catch(() => ({ batches: [] })),
+      api.batchNames().catch(() => ({ names: [] })),
     ]);
     state.keywordBatches = kwBatches.batches || [];
+    state.batchNames = new Map((names.names || []).map(n => [n.batch_id, n]));
     // Merge fleet: workers with jobs history (workers.workers) + workers
     // that only heartbeat but haven't claimed yet (roster.workers). The
     // roster ensures armed-idle workers are visible in the fleet — they
@@ -767,19 +772,27 @@ async function refreshDashboard() {
   }
 }
 
+function batchLabel(batchId) {
+  // Prefer user-friendly name if set; otherwise fall back to the raw id.
+  const info = state.batchNames.get(batchId);
+  if (info?.display_name) return `${info.display_name}  (${batchId.slice(-6)})`;
+  return batchId;
+}
 function populateBatchSelects() {
   // Batches with jobs (from summary).
   const jobsBatchIds = new Set(state.batches.map(b => b.batch_id));
-  const jobsOpts = state.batches.map(b => `<option value="${esc(b.batch_id)}">${esc(b.batch_id)} — ${b.total} SKUs</option>`).join('');
+  const jobsOpts = state.batches.map(b => `<option value="${esc(b.batch_id)}">${esc(batchLabel(b.batch_id))} — ${b.total} SKUs</option>`).join('');
   // Batches that ONLY have keyword rows (orphans — jobs got wiped by reset
   // while workers were still pushing results from their local state). Users
   // still need to view/download these, so include them in the picker with
   // a clear label.
   const orphanOpts = (state.keywordBatches || [])
     .filter(b => !jobsBatchIds.has(b.batch_id))
-    .map(b => `<option value="${esc(b.batch_id)}">${esc(b.batch_id)} — ${b.row_count} kw (orphan)</option>`)
+    .map(b => `<option value="${esc(b.batch_id)}">${esc(batchLabel(b.batch_id))} — ${b.row_count} kw (orphan)</option>`)
     .join('');
   const allOpts = jobsOpts + orphanOpts;
+  const renameSel = $('renameBatchSelect');
+  if (renameSel) renameSel.innerHTML = `<option value="">— pick a batch —</option>` + allOpts;
   // The delete/pin selects are for BATCHES WITH JOBS ONLY (you can't
   // meaningfully pin an orphan batch — no work to hand to workers).
   for (const id of ['dashBatchSelect', 'downloadBatchSelect', 'anBatchSelect']) {
@@ -1204,6 +1217,35 @@ $('unpinBatchBtn').addEventListener('click', async () => {
   try { await api.activeBatchPin(null); setResult($('pinBatchResult'), '✓ Unpinned. Workers pick newest pending batch.', 'ok'); state.activeBatchPinned = null; $('pinBatchSelect').value = ''; }
   catch (e) { setResult($('pinBatchResult'), `Unpin failed: ${e.message}`, 'err'); }
 });
+// Prefill the name input when the user picks a batch — makes it obvious
+// they're editing an existing label, not creating a fresh one.
+$('renameBatchSelect')?.addEventListener('change', () => {
+  const id = $('renameBatchSelect').value;
+  const cur = id ? (state.batchNames.get(id)?.display_name || '') : '';
+  $('renameBatchName').value = cur;
+});
+$('renameBatchBtn')?.addEventListener('click', async () => {
+  const id = $('renameBatchSelect').value;
+  const name = ($('renameBatchName').value || '').trim();
+  if (!id) { setResult($('renameBatchResult'), 'Pick a batch first.', 'warn'); return; }
+  try {
+    const r = await api.renameBatch(id, name);
+    if (name) {
+      state.batchNames.set(id, { batch_id: id, display_name: name });
+      setResult($('renameBatchResult'), `✓ Renamed to "${name}".`, 'ok');
+      toast(`"${id.slice(-8)}" is now "${name}"`, 'ok', { title: 'Batch renamed' });
+    } else {
+      state.batchNames.delete(id);
+      setResult($('renameBatchResult'), '✓ Name cleared — will show raw batch_id.', 'ok');
+      toast('Name cleared', 'ok', { title: 'Batch label removed' });
+    }
+    populateBatchSelects();  // reflect immediately
+  } catch (e) {
+    setResult($('renameBatchResult'), `Failed: ${e.message}`, 'err');
+    toast(e.message, 'err', { title: 'Rename failed' });
+  }
+});
+
 $('deleteBatchBtn').addEventListener('click', async () => {
   const b = $('deleteBatchSelect').value;
   if (!b) { setResult($('deleteBatchResult'), 'Pick a batch to delete.', 'warn'); return; }
@@ -1552,19 +1594,55 @@ const analytics = {
   skuRows: [],
   // Header column set (union across all rows) — used for CSV export.
   columnSet: new Set(),
-  sortKey: 'ad_rating',
+  // Default to a computed opportunity score: rewards keywords with real KP
+  // volume + high AdRating + image matches + not-too-crowded competition.
+  // Users can click any column header to override.
+  sortKey: 'opportunity_score',
   sortDir: 'desc',
 };
+
+// Opportunity score — a single number that ranks a keyword by SEO/Ads value.
+// Design goals:
+//   - Reward real search demand (KP monthly searches) — this is what buyers
+//     are actually typing. Log-scaled so a "70k vol" doesn't drown out a
+//     more-relevant "3k vol" row.
+//   - Reward relevance signal (AdRating already blends multi-source presence).
+//   - Reward proven visual match (image_count > 0 means our product literally
+//     appears on that keyword's SERP).
+//   - Penalize brutal competition (KP High → -1.5).
+//   - Bonus for high buying-intent — these are the money keywords.
+// Weights tuned so the resulting number lives roughly in the 0..30 range,
+// which reads better than a normalized 0..1 score.
+function opportunityScore(r) {
+  const volume = Math.max(0, Number(r.kp_monthly_searches) || 0);
+  const rating = Math.max(0, Number(r.ad_rating) || 0);
+  const imgs   = Math.max(0, Number(r.image_count) || 0);
+  const comp   = String(r.kp_competition || '').toLowerCase();
+  const intent = String(r.buying_intent   || '').toLowerCase();
+
+  let s = 0;
+  if (volume > 0) s += Math.log10(volume + 1) * 3;   // 100 → 6, 10k → 12
+  s += rating * 0.6;                                  // AdRating 10 → 6
+  s += Math.min(imgs, 5) * 0.8;                       // cap the image boost
+  if (comp === 'low')    s += 1.0;
+  if (comp === 'medium') s += 0.3;
+  if (comp === 'high')   s -= 1.5;
+  if (intent === 'high')     s += 1.5;
+  else if (intent === 'medium') s += 0.5;
+  return s;
+}
 
 async function refreshAnalyticsTab() {
   // Populate batch dropdown from current summary + orphan keyword batches.
   try {
-    const [s, kwB] = await Promise.all([
+    const [s, kwB, names] = await Promise.all([
       api.jobsSummary(),
       api.keywordsBatches().catch(() => ({ batches: [] })),
+      api.batchNames().catch(() => ({ names: [] })),
     ]);
     state.batches = s.batches || [];
     state.keywordBatches = kwB.batches || [];
+    state.batchNames = new Map((names.names || []).map(n => [n.batch_id, n]));
     populateBatchSelects();
     if (analytics.batchId && $('anBatchSelect')) $('anBatchSelect').value = analytics.batchId;
     // Auto-select: if there's exactly one batch and none is chosen yet,
@@ -1669,7 +1747,11 @@ function filterAndRenderAnalytics() {
     return true;
   });
 
-  // Sort — always by current key.
+  // Attach the computed opportunity score once, so both sort + table share it.
+  for (const r of filtered) r.opportunity_score = opportunityScore(r);
+
+  // Sort — always by current key. opportunity_score is the default; users
+  // can click any column header to switch.
   const dirMul = analytics.sortDir === 'desc' ? -1 : 1;
   filtered.sort((a, b) => {
     const av = a[analytics.sortKey], bv = b[analytics.sortKey];
@@ -1682,11 +1764,13 @@ function filterAndRenderAnalytics() {
 
   analytics.skuRows = filtered;
   renderAnalyticsSummary(source);
-  renderAnalyticsTopChart(source);
+  renderAnalyticsInsights(source, filtered);
+  renderAnalyticsTopChart(filtered);
   renderAnalyticsTable(filtered);
 
   $('anTableCard').style.display = source.length > 0 ? '' : 'none';
   $('anTopChartCard').style.display = source.length > 0 ? '' : 'none';
+  $('anInsightsCard').style.display = source.length > 0 ? '' : 'none';
   $('anExportBtn').disabled = filtered.length === 0;
 }
 
@@ -1742,28 +1826,190 @@ function renderAnalyticsSummary(rows) {
   `;
 }
 
+// Auto-generated recommendations from the current batch/SKU. Users glance
+// at this instead of scanning the whole table.
+function renderAnalyticsInsights(sourceRows, filteredRows) {
+  const el = $('anInsights');
+  const sub = $('anInsightsSub');
+  if (!el) return;
+  if (!sourceRows || sourceRows.length === 0) {
+    el.innerHTML = '';
+    if (sub) sub.textContent = '—';
+    return;
+  }
+
+  // Attach scores to every row up-front so the ranking here matches the table.
+  const scored = sourceRows.map(r => ({ ...r, __s: opportunityScore(r) }));
+
+  // ── Top 3 opportunities ─────────────────────────────────────────
+  const top = [...scored].sort((a, b) => b.__s - a.__s).slice(0, 3);
+
+  // ── Buying-intent breakdown ─────────────────────────────────────
+  const byIntent = { high: 0, medium: 0, low: 0, informational: 0, other: 0 };
+  for (const r of scored) {
+    const k = String(r.buying_intent || 'other').toLowerCase();
+    byIntent[k] != null ? byIntent[k]++ : byIntent.other++;
+  }
+
+  // ── Best-performing source (by average opportunity score) ───────
+  const sourceStats = new Map();
+  for (const r of scored) {
+    const key = String(r.source || '—').split(',')[0].trim().toUpperCase();
+    const cur = sourceStats.get(key) || { count: 0, scoreSum: 0, imgs: 0 };
+    cur.count++;
+    cur.scoreSum += r.__s;
+    if ((r.image_count || 0) > 0) cur.imgs++;
+    sourceStats.set(key, cur);
+  }
+  const bestSources = Array.from(sourceStats.entries())
+    .filter(([, s]) => s.count >= 3)
+    .map(([k, s]) => ({ source: k, avg: s.scoreSum / s.count, count: s.count, imgs: s.imgs }))
+    .sort((a, b) => b.avg - a.avg)
+    .slice(0, 3);
+
+  // ── Coverage checks ─────────────────────────────────────────────
+  const total = scored.length;
+  const kpMetric = scored.filter(r => (r.kp_monthly_searches || 0) > 0).length;
+  const kpCoveragePct = total > 0 ? Math.round((kpMetric / total) * 100) : 0;
+  const withImg = scored.filter(r => (r.image_count || 0) > 0).length;
+  const imgCoveragePct = total > 0 ? Math.round((withImg / total) * 100) : 0;
+  const dropySellerRows = scored.filter(r => String(r.dropy_is_seller || '').toLowerCase() === 'yes').length;
+  const lowCompHighVol = scored.filter(r => String(r.kp_competition || '').toLowerCase() === 'low' && (r.kp_monthly_searches || 0) >= 500).length;
+
+  // ── SKU coverage vs 100-300 kw target ───────────────────────────
+  // Only informative when viewing "All SKUs" for a batch.
+  let skuCoverageBlock = '';
+  if (!analytics.sku) {
+    const perSku = new Map();
+    for (const r of scored) {
+      const k = r.sku || r.product_url || '—';
+      perSku.set(k, (perSku.get(k) || 0) + 1);
+    }
+    const counts = Array.from(perSku.values());
+    const below100 = counts.filter(n => n < 100).length;
+    const above300 = counts.filter(n => n > 300).length;
+    const inRange = counts.filter(n => n >= 100 && n <= 300).length;
+    const avg = counts.length ? Math.round(counts.reduce((a, b) => a + b, 0) / counts.length) : 0;
+    skuCoverageBlock = `
+      <div class="tile ${below100 > 0 ? 'warn' : 'success'}"><div class="lbl">Per-SKU kw coverage</div>
+        <div class="val" style="font-size:14px;">avg ${avg}</div>
+        <div style="font-size:10px; color:var(--text-2); margin-top:2px;">
+          ${inRange} in 100–300 · <span style="color:${below100 ? 'var(--warn)' : 'var(--text-3)'};">${below100} &lt;100</span> · ${above300} &gt;300
+        </div>
+      </div>`;
+  }
+
+  // Render.
+  el.innerHTML = `
+    <div class="tiles" style="margin-bottom: 10px;">
+      <div class="tile ${lowCompHighVol > 0 ? 'success' : ''}">
+        <div class="lbl">Low-comp + ≥500 vol</div>
+        <div class="val">${lowCompHighVol}</div>
+        <div style="font-size:10px; color:var(--text-2); margin-top:2px;">easy targets to bid/rank</div>
+      </div>
+      <div class="tile ${dropySellerRows > 0 ? 'info' : ''}">
+        <div class="lbl">We're already listed on</div>
+        <div class="val">${dropySellerRows}</div>
+        <div style="font-size:10px; color:var(--text-2); margin-top:2px;">dropy.in on SERP</div>
+      </div>
+      <div class="tile ${kpCoveragePct >= 60 ? 'success' : kpCoveragePct >= 30 ? 'warn' : ''}">
+        <div class="lbl">KP metric coverage</div>
+        <div class="val">${kpCoveragePct}%</div>
+        <div style="font-size:10px; color:var(--text-2); margin-top:2px;">${kpMetric}/${total} rows have Volume</div>
+      </div>
+      <div class="tile ${imgCoveragePct >= 30 ? 'success' : ''}">
+        <div class="lbl">Image-match coverage</div>
+        <div class="val">${imgCoveragePct}%</div>
+        <div style="font-size:10px; color:var(--text-2); margin-top:2px;">${withImg}/${total} rows have hits</div>
+      </div>
+      ${skuCoverageBlock}
+    </div>
+
+    <div class="two-col" style="gap: 10px;">
+      <div>
+        <div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px;">🎯 Top 3 opportunities</div>
+        ${top.length === 0 ? '<div class="hint">No scored rows yet.</div>' : top.map((r, i) => `
+          <div style="padding: 8px 10px; border: 1px solid var(--line-1); border-radius: 6px; margin-bottom: 6px; background: var(--bg-2);">
+            <div style="display:flex; justify-content:space-between; align-items:baseline;">
+              <div style="font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(r.keyword || '')}">
+                <span style="color:var(--accent);">#${i + 1}</span>&nbsp; ${esc(r.keyword || '—')}
+              </div>
+              <div style="font-family: var(--mono); color:var(--success); font-weight:600;">${r.__s.toFixed(1)}</div>
+            </div>
+            <div style="font-size:11px; color:var(--text-2); margin-top:4px;">
+              ${(r.kp_monthly_searches || 0) > 0 ? `📊 ${Number(r.kp_monthly_searches).toLocaleString()} vol` : '📊 —'}
+              &nbsp;·&nbsp;
+              ${r.kp_competition ? `🎯 ${esc(r.kp_competition)} comp` : '🎯 —'}
+              &nbsp;·&nbsp;
+              ⭐ ${(r.ad_rating || 0).toFixed(1)}
+              &nbsp;·&nbsp;
+              ${(r.image_count || 0) > 0 ? `📷 ${r.image_count}` : '📷 —'}
+              ${r.buying_intent ? `&nbsp;·&nbsp;<span class="chip ${r.buying_intent === 'high' ? 'done' : r.buying_intent === 'medium' ? 'claimed' : 'pending'}" style="font-size:10px;">${esc(r.buying_intent)}</span>` : ''}
+            </div>
+          </div>`).join('')}
+      </div>
+
+      <div>
+        <div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px;">🏆 Best-performing sources</div>
+        ${bestSources.length === 0 ? '<div class="hint">Need more rows to compare sources.</div>' : `
+          <table class="tbl" style="font-size: 12px;">
+            <thead><tr><th>Source</th><th class="num">Avg score</th><th class="num">Rows</th><th class="num">With imgs</th></tr></thead>
+            <tbody>${bestSources.map(s => `
+              <tr>
+                <td><span class="chip ${
+                  s.source.includes('KP') ? 'src-kp' :
+                  s.source.includes('AUTOSUGGEST') ? 'src-autosuggest' :
+                  s.source.includes('SERP') ? 'src-serp' :
+                  s.source.includes('PAA') ? 'src-paa' :
+                  s.source.includes('RELATED') ? 'src-related' :
+                  s.source.includes('AMAZON') ? 'src-amazon' : 'pending'
+                }">${esc(s.source)}</span></td>
+                <td class="num" style="color:var(--accent); font-weight:600;">${s.avg.toFixed(1)}</td>
+                <td class="num">${s.count}</td>
+                <td class="num" style="color: ${s.imgs > 0 ? 'var(--success)' : 'var(--text-3)'};">${s.imgs}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>`}
+
+        <div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-top:12px; margin-bottom:6px;">🧭 Buying intent mix</div>
+        <div class="row tight">
+          ${byIntent.high        > 0 ? `<span class="chip done">high: ${byIntent.high}</span>` : ''}
+          ${byIntent.medium      > 0 ? `<span class="chip claimed">medium: ${byIntent.medium}</span>` : ''}
+          ${byIntent.low         > 0 ? `<span class="chip pending">low: ${byIntent.low}</span>` : ''}
+          ${byIntent.informational > 0 ? `<span class="chip pending">informational: ${byIntent.informational}</span>` : ''}
+          ${byIntent.other       > 0 ? `<span class="chip pending">unclassified: ${byIntent.other}</span>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+  if (sub) sub.textContent = `${filteredRows.length.toLocaleString()} row(s) · scoring live`;
+}
+
 function renderAnalyticsTopChart(rows) {
   const el = $('anTopChart');
   if (rows.length === 0) { el.innerHTML = ''; return; }
+  // Rank by opportunity score (already attached in filterAndRenderAnalytics).
   const top = [...rows]
-    .filter(r => (r.ad_rating || 0) > 0)
-    .sort((a, b) => (b.ad_rating || 0) - (a.ad_rating || 0))
+    .filter(r => (r.opportunity_score || 0) > 0)
+    .sort((a, b) => (b.opportunity_score || 0) - (a.opportunity_score || 0))
     .slice(0, 10);
-  $('anTopChartSub').textContent = `top ${top.length}`;
-  if (top.length === 0) { el.innerHTML = `<div class="hint">No keywords have an AdRating yet.</div>`; return; }
-  const maxV = Math.max(...top.map(r => r.ad_rating || 0), 1);
+  $('anTopChartSub').textContent = `top ${top.length} by opportunity score`;
+  if (top.length === 0) { el.innerHTML = `<div class="hint">No scored keywords yet.</div>`; return; }
+  const maxV = Math.max(...top.map(r => r.opportunity_score || 0), 1);
   el.innerHTML = top.map(r => {
-    const kw = esc(r.keyword || '—');
-    const rating = r.ad_rating || 0;
-    const pct = Math.round((rating / maxV) * 100);
-    const img = r.image_count || 0;
+    const kw    = esc(r.keyword || '—');
+    const score = r.opportunity_score || 0;
+    const pct   = Math.round((score / maxV) * 100);
+    const img   = r.image_count || 0;
+    const vol   = r.kp_monthly_searches || 0;
     return `
-      <div style="display:grid; grid-template-columns: 220px 1fr 60px 60px; gap: 8px; align-items:center; padding: 4px 0; border-bottom: 1px solid var(--line-1); font-size: 12px;">
+      <div style="display:grid; grid-template-columns: 220px 1fr 60px 80px 50px; gap: 8px; align-items:center; padding: 4px 0; border-bottom: 1px solid var(--line-1); font-size: 12px;">
         <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${kw}">${kw}</div>
         <div style="background: var(--bg-input); border-radius: 4px; height: 14px; overflow: hidden; position: relative;">
           <div style="background: linear-gradient(90deg, var(--accent) 0%, var(--info) 100%); height: 100%; width: ${pct}%; transition: width 200ms;"></div>
         </div>
-        <div style="text-align:right; font-family: var(--mono); color: var(--accent);">${rating.toFixed(1)}</div>
+        <div style="text-align:right; font-family: var(--mono); color: var(--accent); font-weight:600;">${score.toFixed(1)}</div>
+        <div style="text-align:right; font-family: var(--mono); color: var(--text-2);">${vol > 0 ? Number(vol).toLocaleString() + ' v' : '—'}</div>
         <div style="text-align:right; font-family: var(--mono); color: ${img > 0 ? 'var(--success)' : 'var(--text-3)'};">${img > 0 ? `📷 ${img}` : '—'}</div>
       </div>
     `;
@@ -1777,26 +2023,36 @@ function renderAnalyticsTable(rows) {
     el.innerHTML = `<tr><td style="padding:16px; text-align:center; color:var(--text-3);">No keywords match the current filters.</td></tr>`;
     return;
   }
+  // Column order matters — most-important SEO/Ad signals first, mapping to
+  // the CSV/XLSX export layout so the dashboard mirrors what users see in
+  // Excel. Score is a computed opportunity score (see opportunityScore()).
   const cols = [
-    { key: 'keyword', label: 'Keyword', kind: 'text' },
-    { key: 'source', label: 'Source', kind: 'chip' },
-    { key: 'buying_intent', label: 'Intent', kind: 'chip' },
-    { key: 'kp_monthly_searches', label: 'Volume', kind: 'num' },
-    { key: 'kp_competition', label: 'Comp', kind: 'text' },
-    { key: 'image_count', label: 'Imgs', kind: 'imgs' },
-    { key: 'ad_rating', label: 'AdRating', kind: 'rating' },
-    { key: 'match_confidence_max', label: 'MaxConf', kind: 'num' },
-    { key: 'total_sellers', label: 'Sellers', kind: 'num' },
+    { key: 'opportunity_score',    label: 'Score',      kind: 'score', tip: 'Opportunity score — blends Volume, AdRating, image matches, Competition and buying-intent. Higher = better SEO/Ad target.' },
+    { key: 'keyword',              label: 'Keyword',    kind: 'text' },
+    { key: 'kp_monthly_searches',  label: 'Volume',     kind: 'num',   tip: 'Google Keyword Planner monthly searches — real demand.' },
+    { key: 'buying_intent',        label: 'Intent',     kind: 'chip' },
+    { key: 'keyword_relevance',    label: 'Relevance',  kind: 'chip',  tip: 'Semantic fit of the keyword to the product (high / medium / low / sibling-brand).' },
+    { key: 'kp_competition',       label: 'Comp',       kind: 'comp',  tip: 'KP competition (Low/Medium/High). High = crowded → harder to rank/bid.' },
+    { key: 'ad_rating',            label: 'AdRating',   kind: 'rating',tip: 'Blended relevance signal across all sources.' },
+    { key: 'image_count',          label: 'Imgs',       kind: 'imgs',  tip: 'SERP images that matched our product visually (CLIP + dHash).' },
+    { key: 'visibility_pct',       label: 'Vis %',      kind: 'pct',   tip: 'Fraction of that SERP that is our product (image_count / total_thumbs).' },
+    { key: 'frequency',            label: 'Freq',       kind: 'num',   tip: 'Number of sources that surfaced this keyword — multi-source is stronger.' },
+    { key: 'total_sellers',        label: 'Sellers',    kind: 'num',   tip: 'Distinct sellers seen on this keyword.' },
+    { key: 'dropy_is_seller',      label: 'Us?',        kind: 'yesno', tip: 'Does dropy.in already sell this product on the keyword’s Shopping/SERP?' },
+    { key: 'link_verified_count',  label: 'Verified',   kind: 'num',   tip: 'Matched destination pages that re-verified via CLIP.' },
+    { key: 'kp_bid_high',          label: 'Top bid ₹',  kind: 'money', tip: 'KP high-end top-of-page bid (₹) — useful for paid-ads planning.' },
+    { key: 'source',               label: 'Source',     kind: 'chip' },
   ];
   const thead = `<thead><tr>${cols.map(c => `
-    <th data-sort-key="${c.key}" style="cursor:pointer;" title="Click to sort">
+    <th data-sort-key="${c.key}" style="cursor:pointer;" title="${esc(c.tip || 'Click to sort')}">
       ${esc(c.label)}${analytics.sortKey === c.key ? (analytics.sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
     </th>`).join('')}</tr></thead>`;
   const tbody = `<tbody>${rows.slice(0, 500).map(r => `
     <tr>${cols.map(c => {
       const v = r[c.key];
       if (c.kind === 'chip' && v) {
-        // Source column uses source-specific colors; intent column uses done/claimed/pending.
+        // Source column uses source-specific colors; intent/relevance columns
+        // use done/claimed/pending green→yellow→grey.
         let cls;
         if (c.key === 'source') {
           const s = String(v).toLowerCase();
@@ -1807,6 +2063,9 @@ function renderAnalyticsTable(rows) {
               : s.includes('related') ? 'src-related'
               : s.includes('amazon') ? 'src-amazon'
               : 'pending';
+        } else if (c.key === 'keyword_relevance') {
+          const s = String(v).toLowerCase();
+          cls = s === 'high' ? 'done' : s === 'medium' ? 'claimed' : s.includes('sibling') ? 'src-paa' : 'pending';
         } else {
           cls = String(v) === 'high' ? 'done' : String(v) === 'medium' ? 'claimed' : 'pending';
         }
@@ -1814,7 +2073,34 @@ function renderAnalyticsTable(rows) {
       }
       if (c.kind === 'imgs') return `<td class="num" style="color:${(v||0) > 0 ? 'var(--success)' : 'var(--text-3)'};">${v || 0}</td>`;
       if (c.kind === 'rating') return `<td class="num" style="color:${(v||0) >= 7 ? 'var(--success)' : (v||0) >= 4 ? 'var(--warn)' : 'var(--text-3)'};">${v != null ? Number(v).toFixed(1) : '—'}</td>`;
-      if (c.kind === 'num') return `<td class="num">${v != null ? Number(v).toLocaleString() : '—'}</td>`;
+      if (c.kind === 'score') {
+        const n = Number(v) || 0;
+        // Bold + colored score so it's obvious this is THE ranking column.
+        const color = n >= 12 ? 'var(--success)' : n >= 7 ? 'var(--accent)' : n >= 3 ? 'var(--warn)' : 'var(--text-3)';
+        return `<td class="num" style="color:${color}; font-weight:600;">${n.toFixed(1)}</td>`;
+      }
+      if (c.kind === 'comp') {
+        const s = String(v || '').toLowerCase();
+        if (!s || s === '—') return `<td class="num" style="color:var(--text-3);">—</td>`;
+        const color = s === 'high' ? 'var(--danger)' : s === 'medium' ? 'var(--warn)' : 'var(--success)';
+        return `<td style="color:${color};">${esc(v)}</td>`;
+      }
+      if (c.kind === 'money') {
+        const n = Number(v);
+        if (!Number.isFinite(n) || n === 0) return `<td class="num" style="color:var(--text-3);">—</td>`;
+        return `<td class="num">₹${n.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>`;
+      }
+      if (c.kind === 'pct') {
+        const n = Number(v);
+        if (!Number.isFinite(n) || n === 0) return `<td class="num" style="color:var(--text-3);">—</td>`;
+        const color = n >= 50 ? 'var(--success)' : n >= 20 ? 'var(--warn)' : 'var(--text-2)';
+        return `<td class="num" style="color:${color};">${n.toFixed(0)}%</td>`;
+      }
+      if (c.kind === 'yesno') {
+        const yes = String(v || '').toLowerCase() === 'yes' || v === true || v === 1;
+        return yes ? `<td class="num" style="color:var(--success);">✓</td>` : `<td class="num" style="color:var(--text-3);">·</td>`;
+      }
+      if (c.kind === 'num') return `<td class="num">${v != null && v !== '' ? Number(v).toLocaleString() : '—'}</td>`;
       return `<td style="max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(v)}">${esc(v == null ? '—' : v)}</td>`;
     }).join('')}</tr>
   `).join('')}${rows.length > 500 ? `<tr><td colspan="${cols.length}" style="text-align:center; color:var(--text-3);">…and ${rows.length - 500} more — narrow the filters to see them.</td></tr>` : ''}</tbody>`;

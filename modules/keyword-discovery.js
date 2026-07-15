@@ -2301,7 +2301,9 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
   //   product to fill kp_* columns on non-KP rows (autosuggest/PAA/related/amazon).
   const backfillKpMetrics = opts.backfillKpMetrics !== false;
   // maxAmazonKeywords: cap on keywords per product entering the Amazon Round.
-  const maxAmazonKeywords = Math.max(1, opts.maxAmazonKeywords || 30);
+  // Raised default 30→50 to keep pace with the wider R1/R2 KP net so total
+  // per-SKU output reliably lands in the 100-300 target range.
+  const maxAmazonKeywords = Math.max(1, opts.maxAmazonKeywords || 50);
   // verifyMatchedLinks: open each matched result's destination page and re-check
   //   it carries our product image (bounded to matched links only).
   const verifyMatchedLinks = opts.verifyMatchedLinks !== false;
@@ -2948,7 +2950,10 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // overlap heavily — verbose product titles ("...Face Body 8 Fluid
       // Ounce") return narrow KP idea sets, so a shorter handle like
       // "cerave moisturizing cream" should replace them, not be skipped.
-      const MAX_KP_SEEDS = 3;
+      // Raised 3→5: broader KP seed net so per-SKU output reliably hits
+      // the 100-300 keyword target. The seed candidate list is deduped/
+      // overlap-filtered by selectKpSeeds so bumping this is safe.
+      const MAX_KP_SEEDS = 5;
       // Seed candidate order:
       //   [0] = simplified kpSeed (cleaned + capped to 10 words)
       //   [1+] = file-provided handles, each ALSO passed through
@@ -4051,7 +4056,9 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       //     dropped before they pollute the report or burn a SERP slot.
       const kp1RowsArr = [];
       const round1Seeds = [];
-      const MAX_R1_KP_SERP_SEEDS = 30;
+      // Raised 30→60: more Round-1 SERP seeds → more autosuggest + PAA +
+      // related expansion downstream → more keywords per SKU (target 100-300).
+      const MAX_R1_KP_SERP_SEEDS = 60;
       const kpRejectCounts = {};
       let kpBrandOtherStored = 0;
       const kpBrandOtherSamples = [];
@@ -4357,8 +4364,9 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           let kp2Added = 0;
           // Cap KP output per seed — KP can return 300+ ideas for a
           // borderline seed like "alfalfa 650 mg benefits", and most are
-          // competitor-brand noise. Top 20 keeps R2 budget bounded.
-          const R2_KP_CAP_PER_SEED = 20;
+          // competitor-brand noise. Raised 20→40 to feed the 100-300
+          // kw/SKU target; relevance filter still gates the wide net.
+          const R2_KP_CAP_PER_SEED = 40;
           const cappedR2 = relevantR2.slice(0, R2_KP_CAP_PER_SEED);
           if (relevantR2.length > R2_KP_CAP_PER_SEED) {
             onProgress?.({
