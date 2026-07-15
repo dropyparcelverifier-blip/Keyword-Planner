@@ -860,7 +860,18 @@ function renderWorkerFleet() {
   }
   // Friendly stage label mapper. Maps activity source + message pattern
   // into a compact "what is this worker doing" tag for the fleet grid.
-  const stageFor = (act) => {
+  // Also called with the worker's row so we can differentiate 'truly
+  // idle' from 'offline — no heartbeat in minutes'.
+  const stageFor = (act, worker) => {
+    // Heartbeat-based short-circuit: if we haven't heard from this
+    // worker in > 3 minutes, they're not idle — they're gone. Don't
+    // pretend last activity is current.
+    if (worker) {
+      const hb = Number(worker.last_heartbeat || 0);
+      const ago = Date.now() - hb;
+      if (!hb || ago > 5 * 60 * 1000) return { label: 'OFFLINE', color: 'var(--danger)' };
+      if (ago > 3 * 60 * 1000)        return { label: 'stale (no heartbeat)', color: 'var(--warn)' };
+    }
     if (!act) return { label: 'idle', color: 'var(--text-3)' };
     const src = (act.source || '').toLowerCase();
     const msg = (act.message || '').toLowerCase();
@@ -885,7 +896,7 @@ function renderWorkerFleet() {
   el.innerHTML = `<table class="tbl">
     <thead><tr><th>Worker</th><th>Current step</th><th>Last hb</th><th class="num">In-flight</th><th class="num">Done</th><th class="num">Failed</th><th style="width: 1%;">Actions</th></tr></thead>
     <tbody>${state.workers.map(w => {
-      const stage = stageFor(w._lastActivity);
+      const stage = stageFor(w._lastActivity, w);
       return `
       <tr>
         <td><span class="chip ${workerDotClass(w.last_heartbeat)}">●</span>

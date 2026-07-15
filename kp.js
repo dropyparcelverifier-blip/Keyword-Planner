@@ -695,7 +695,10 @@
     }
 
     if (outcome.kind === 'no-results') {
-      kpLog(`Google returned no keyword ideas for this seed ("${outcome.phrase}") — moving on`, 'err');
+      // This is Google's legitimate answer — a niche seed with no
+      // expansion ideas. NOT an error, so we log at info level so the
+      // manager's Errors card doesn't fill with these.
+      kpLog(`Google returned no keyword ideas for this seed ("${outcome.phrase}") — moving on`, 'info');
       return []; // empty result, but not an error — product will be marked done
     }
     kpLog(`results loaded (${outcome.rows} initial <row> elements on page; paginating + scrolling for all)`, 'ok');
