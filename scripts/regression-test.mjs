@@ -1251,6 +1251,11 @@ async function run() {
   const acEmpty = await req('POST', '/api/activity/clear', {});
   assertEq(acEmpty.status, 200, 'DS.71 activity/clear returns 200 with empty body (nuke-all)');
   assert(typeof acEmpty.data.deleted === 'number', 'DS.72 activity/clear returns deleted count');
+  // Frozen-engine detection.
+  assert(appFull.includes('STUCK (heartbeat ok, engine frozen)'),      'DS.73 frozen-engine STUCK label defined');
+  assert(appFull.includes('actAgo > 5 * 60 * 1000 && inFlight > 0'),   'DS.74 frozen detection uses 5min activity-stale threshold');
+  assert(appFull.includes('reconnectAllFrozenBtn'),                    'DS.75 reconnect-all-frozen banner button wired');
+  assert(appFull.includes('🥶'),                                        'DS.76 frozen state has a distinct visual icon');
   assert(cssFull.includes('.scatter-full'),                        'DS.26 full-width scatter variant defined');
   assert(htmlFull.includes('scatter-full'),                        'DS.27 scatter uses full-width layout');
   assert(/\.card-title\s*\{[\s\S]{0,120}font-size:\s*var\(--text-md\)/.test(cssFull), 'DS.28 unified card-title sizing');

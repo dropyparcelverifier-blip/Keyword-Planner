@@ -1097,6 +1097,17 @@ function renderWorkerFleet() {
       const ago = Date.now() - hb;
       if (!hb || ago > 5 * 60 * 1000) return { label: 'OFFLINE', color: 'var(--danger)' };
       if (ago > 3 * 60 * 1000)        return { label: 'stale (no heartbeat)', color: 'var(--warn)' };
+      // Stuck-engine detection: heartbeat is fresh BUT no new activity
+      // for 5+ minutes AND the worker is holding claims (so it SHOULD
+      // be doing something). The SW is alive (heartbeat) but the engine
+      // loop has frozen — most commonly on a hung SERP, a KP page that
+      // never fires the ready signal, or a network stall inside pushToAdBrain.
+      const lastActTs = act ? Number(new Date(act.ts).getTime() || 0) : 0;
+      const actAgo = lastActTs > 0 ? Date.now() - lastActTs : Infinity;
+      const inFlight = Number(worker.in_flight || 0);
+      if (actAgo > 5 * 60 * 1000 && inFlight > 0) {
+        return { label: 'STUCK (heartbeat ok, engine frozen)', color: 'var(--danger)', stuck: true };
+      }
     }
     if (!act) return { label: 'idle', color: 'var(--text-3)' };
     const src = (act.source || '').toLowerCase();
@@ -1143,16 +1154,39 @@ function renderWorkerFleet() {
       <button id="releaseAllStuckBtn" class="small danger">↻ Release all locked SKUs now</button>
     </div>` : '';
 
-  el.innerHTML = stuckBanner + `<table class="tbl">
+  // Frozen-engine detection: workers where heartbeat is fresh but no
+  // activity has landed in 5+ minutes AND they hold claims. Different
+  // from "stopped by user" — the worker THINKS it's running but the
+  // engine loop is hung. Manual reset needed.
+  const frozen = state.workers.filter(w => stageFor(w._lastActivity, w).stuck);
+  const frozenBanner = frozen.length > 0 ? `
+    <div class="banner err" style="margin-bottom: 10px; display: flex; align-items: center; gap: 10px;">
+      <span style="font-size: 18px;">🥶</span>
+      <div style="flex: 1;">
+        <strong>${frozen.length} worker${frozen.length > 1 ? 's' : ''} STUCK — heartbeat is fine, but the engine has stopped producing activity</strong>
+        (${frozen.map(w => `${w.worker_id} · last activity ${fmtAgo(w._lastActivity?.ts)}`).join(', ')}).
+        Most common cause: a SERP/KP tab hung, or a network stall in the push queue.
+        Try Force reconnect first; if that doesn't unstick it, Stop then re-Connect on the worker PC.
+      </div>
+      <button id="reconnectAllFrozenBtn" class="small" style="background:var(--warn); color:#000;">⟳ Reconnect all frozen</button>
+    </div>` : '';
+
+  el.innerHTML = frozenBanner + stuckBanner + `<table class="tbl">
     <thead><tr><th>Worker</th><th>Current step</th><th>Last hb</th><th class="num">In-flight</th><th class="num">Done</th><th class="num">Failed</th><th style="width: 1%;">Actions</th></tr></thead>
     <tbody>${state.workers.map(w => {
       const stage = stageFor(w._lastActivity, w);
       const isStuck = stuck.includes(w);
+      const isFrozen = stage.stuck === true;
       const inFlightCell = isStuck
         ? `<td class="num" style="color:var(--warn); font-weight:700;" title="Locked to a stopped worker — click ↻ to release">${w.in_flight || 0} ⚠</td>`
+        : isFrozen
+        ? `<td class="num" style="color:var(--danger); font-weight:700;" title="Worker is frozen — engine hasn't produced activity in 5+ min but still holds these claims">${w.in_flight || 0} 🥶</td>`
         : `<td class="num">${w.in_flight || 0}</td>`;
+      const rowBg = isFrozen ? 'background: rgba(248, 113, 113, 0.08);'
+                  : isStuck  ? 'background: rgba(251, 191, 36, 0.05);'
+                  : '';
       return `
-      <tr${isStuck ? ' style="background: rgba(251, 191, 36, 0.05);"' : ''}>
+      <tr${rowBg ? ` style="${rowBg}"` : ''}>
         <td><span class="chip ${workerDotClass(w.last_heartbeat)}">●</span>
             <a href="#" class="mono" data-filter-worker="${esc(w.worker_id)}" style="color: var(--info); text-decoration: none;" title="Filter activity log to this worker">${esc(w.worker_id)}</a></td>
         <td><span style="color: ${stage.color}; font-size: 11px;" title="${esc(w._lastActivity?.message || '')}">${esc(stage.label)}</span>
@@ -1204,6 +1238,21 @@ function renderWorkerFleet() {
     }
     toast(`Released ${total} SKU(s) — active workers will pick them up on the next claim cycle.`, 'ok', { title: '↻ All locked SKUs released' });
     refreshDashboard();
+  });
+  // Reconnect-all-frozen button. Sends 'reconnect' to every frozen
+  // worker — this overrides any user-stopped flag and re-arms the engine
+  // loop. If the worker was mid-SKU with a hung SERP tab, reconnect
+  // won't fix that — user still needs to close the tab manually — but
+  // 90% of "frozen" cases are transient (SW alarm race, network stall)
+  // and reconnect brings them back.
+  $('reconnectAllFrozenBtn')?.addEventListener('click', async () => {
+    if (!confirm(`Send Force reconnect to ${frozen.length} frozen worker(s)? If this doesn't unstick them within ~60s, physically visit the worker PC and Stop → Connect.`)) return;
+    let sent = 0;
+    for (const w of frozen) {
+      try { await api.commandsSend(w.worker_id, 'reconnect', {}); sent++; } catch {}
+    }
+    toast(`Reconnect sent to ${sent} worker(s). Give them ~60s to re-arm.`, 'info', { title: '⟳ Reconnect broadcast' });
+    setTimeout(refreshDashboard, 3000);
   });
   // Click worker ID -> filter activity log to that worker.
   el.querySelectorAll('a[data-filter-worker]').forEach(a => {
