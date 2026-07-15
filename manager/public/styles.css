@@ -504,10 +504,74 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
   .exec-bullet { grid-template-columns: 1fr; gap: 4px; }
 }
 
-/* Tighter table density — save vertical space when reviewing 100-300 rows */
-.tbl.compact th { padding: 4px 6px; font-size: 9px; }
-.tbl.compact td { padding: 3px 6px; }
-.tbl.compact td .chip { padding: 1px 6px; font-size: 9px; }
+/* Compact keyword table — deep-dive grid with 15+ columns. Rules:
+   1. Headers never wrap (multi-line headers destroy scannability).
+   2. Fixed 32px row height — chips inside cells shrink instead of stacking.
+   3. First 2 columns (Score + Keyword) sticky-left when scrolling
+      horizontally so users always know which row they're reading.
+   4. Border between columns for grid feel (was borderless mush).
+   5. Font size + padding uniform across every cell.
+   6. Numeric cells right-aligned, mono font.
+*/
+.tbl.compact {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--text-sm);
+  table-layout: auto;
+}
+.tbl.compact th {
+  padding: var(--space-2) var(--space-2);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-2);
+  background: var(--bg-3);
+  border-bottom: 2px solid var(--line-2);
+  white-space: nowrap;             /* headers never break to a second line */
+  position: sticky; top: 0; z-index: 5;
+}
+.tbl.compact td {
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--line-1);
+  vertical-align: middle;
+  height: 32px;                    /* enforce consistent row height */
+  max-height: 32px;
+  overflow: hidden;                /* chip stacks won't blow up rows */
+  white-space: nowrap;
+}
+.tbl.compact td.num,
+.tbl.compact th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.tbl.compact td .chip {
+  padding: 1px 6px;
+  font-size: 9px;
+  vertical-align: middle;
+}
+/* First two columns (Score + Keyword) pin left on horizontal scroll —
+   users never lose "which row is this?" context in a wide table. */
+.tbl.compact th:nth-child(1), .tbl.compact td:nth-child(1) { position: sticky; left: 0; z-index: 4; background: var(--bg-2); }
+.tbl.compact th:nth-child(2), .tbl.compact td:nth-child(2) { position: sticky; left: 96px; z-index: 4; background: var(--bg-2); }
+.tbl.compact thead th:nth-child(1), .tbl.compact thead th:nth-child(2) { background: var(--bg-3); z-index: 6; }
+.tbl.compact tbody tr:hover td:nth-child(1), .tbl.compact tbody tr:hover td:nth-child(2) { background: rgba(80, 155, 255, 0.06) !important; }
+
+/* Scroll wrapper — the parent .card-body already has overflow-auto,
+   but we want the horizontal scrollbar on the TABLE only, not the
+   whole card, so search/filter controls stay put. */
+.tbl-wrap { overflow-x: auto; overflow-y: hidden; max-width: 100%; }
+
+/* Multi-source chip cells: primary chip stays visible, additional
+   sources become a compact "+N" badge with the full list on hover. */
+.multi-src {
+  display: inline-flex; align-items: center; gap: 3px;
+  max-width: 100%;
+}
+.multi-src .chip { flex-shrink: 0; }
+.multi-src .more-badge {
+  font-size: 9px; font-family: var(--mono); font-weight: 700;
+  padding: 1px 5px; border-radius: var(--radius-pill);
+  background: var(--bg-3); color: var(--text-2);
+  border: 1px solid var(--line-2); cursor: help;
+}
 
 /* Active-filters bar — shows the current cross-filter selection as
    removable chips. Sticky-ish position (below the picker) so users

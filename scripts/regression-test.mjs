@@ -1203,6 +1203,17 @@ async function run() {
   const bgFull = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
   assert(bgFull.includes("fetch(`${normalized}/api/health`"),       'DS.39 setup-code import verifies manager reachability');
   assert(bgFull.includes('saved: true'),                            'DS.40 setup-code import distinguishes saved-but-unreachable from decode error');
+  // Table cell polish + Business Takeaways trim + Top-10 bar normalization.
+  assert(cssFull.includes('.tbl.compact th') && cssFull.includes('white-space: nowrap'), 'DS.41 table headers never wrap');
+  assert(cssFull.includes('.multi-src'),                             'DS.42 multi-source chip collapse styled');
+  assert(appFull.includes('multi-src'),                              'DS.43 source cell renders primary chip + +N badge');
+  assert(cssFull.includes('.tbl-wrap'),                              'DS.44 table has horizontal scroll wrapper');
+  assert(htmlFull.includes('class="tbl-wrap"'),                      'DS.45 table wrap applied in HTML');
+  assert(!appFull.includes("label: 'Keyword coverage'"),             'DS.46 duplicate Keyword-coverage takeaway removed');
+  assert(!appFull.includes("label: 'Search-demand data'"),           'DS.47 duplicate Search-demand-data takeaway removed');
+  assert(!appFull.includes("label: 'Visual visibility'"),            'DS.48 duplicate Visual-visibility takeaway removed');
+  assert(appFull.includes('range ${batchMin.toFixed(1)}'),           'DS.49 Top-10 chart shows actual score range in subtitle');
+  assert(appFull.includes('score - batchMin) / span'),               'DS.50 Top-10 bars normalize against actual data span');
   assert(cssFull.includes('.scatter-full'),                        'DS.26 full-width scatter variant defined');
   assert(htmlFull.includes('scatter-full'),                        'DS.27 scatter uses full-width layout');
   assert(/\.card-title\s*\{[\s\S]{0,120}font-size:\s*var\(--text-md\)/.test(cssFull), 'DS.28 unified card-title sizing');
