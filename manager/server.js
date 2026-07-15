@@ -532,6 +532,38 @@ if (-not $isReinstall) {
   $firstRunArgs = ('--user-data-dir="{0}" --load-extension="{1}" --new-window "chrome://extensions"' -f $prof, $extDir)
   Start-Process -FilePath $chrome -ArgumentList $firstRunArgs
 }
+
+# Chrome-watchdog scheduled task. Every 5 minutes it checks whether the
+# AdBrain Chrome (identified by --user-data-dir matching our profile) is
+# still running; if not, relaunches it. Covers Chrome crashes, user-
+# closed windows, and post-Windows-Update reboots. Combined with the
+# Startup shortcut this gives near-100% Chrome uptime on the worker PC.
+$watchdogPath = Join-Path $root 'chrome-watchdog.ps1'
+$logPathVar   = Join-Path $root 'chrome-watchdog.log'
+try {
+  Invoke-WebRequest -UseBasicParsing -Uri "$mgr/worker/chrome-watchdog-template.ps1" -OutFile $watchdogPath -ErrorAction Stop
+  # Substitute placeholders in the downloaded template. No PS line
+  # continuations here (backticks would terminate the JS template literal
+  # this whole installer script lives inside).
+  $wdBody = Get-Content $watchdogPath -Raw
+  $wdBody = $wdBody -replace '__PROFILE__', ($prof   -replace "'","''")
+  $wdBody = $wdBody -replace '__EXTDIR__',  ($extDir -replace "'","''")
+  $wdBody = $wdBody -replace '__CHROME__',  ($chrome -replace "'","''")
+  $wdBody = $wdBody -replace '__LOG__',     ($logPathVar -replace "'","''")
+  Set-Content -Path $watchdogPath -Value $wdBody -Encoding UTF8
+
+  $taskName = 'AdBrain Chrome Watchdog'
+  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+  $tAction    = New-ScheduledTaskAction    -Execute 'powershell.exe' -Argument ('-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File "' + $watchdogPath + '"')
+  $tTrigger   = New-ScheduledTaskTrigger   -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration ([TimeSpan]::FromDays(3650))
+  $tPrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+  $tSettings  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+  Register-ScheduledTask -TaskName $taskName -Action $tAction -Trigger $tTrigger -Principal $tPrincipal -Settings $tSettings | Out-Null
+  Write-Host '[AdBrain] Chrome watchdog installed - relaunches Chrome every 5 min if it stops' -ForegroundColor Green
+} catch {
+  Write-Host ('[AdBrain] Could not install Chrome watchdog: ' + $_.Exception.Message) -ForegroundColor Yellow
+  Write-Host '         (Non-fatal - Chrome still auto-launches on login via Startup shortcut.)' -ForegroundColor DarkGray
+}
 Write-Host ''
 Write-Host '===================================================================' -ForegroundColor Yellow
 if ($isReinstall) {
@@ -587,6 +619,14 @@ $ErrorActionPreference = 'Continue'
 $root    = Join-Path $env:LOCALAPPDATA 'AdBrainWorker'
 $startup = [Environment]::GetFolderPath('Startup')
 $lnkPath = Join-Path $startup 'AdBrain Worker.lnk'
+
+# 0) Remove the Chrome-watchdog scheduled task if the installer registered it.
+try {
+  Unregister-ScheduledTask -TaskName 'AdBrain Chrome Watchdog' -Confirm:$false -ErrorAction Stop
+  Write-Host "[AdBrain] Removed scheduled task 'AdBrain Chrome Watchdog'" -ForegroundColor Green
+} catch {
+  Write-Host "[AdBrain] No watchdog task to remove (or already gone)" -ForegroundColor Yellow
+}
 
 # 1) Remove the Startup shortcut so Chrome no longer auto-launches on login.
 if (Test-Path $lnkPath) {
@@ -667,6 +707,17 @@ const server = http.createServer(async (req, res) => {
   if (m === 'GET' && p === '/worker-files.json') return send(res, 200, { ok: true, files: WORKER_FILES });
   if (m === 'GET' && p.startsWith('/worker/')) {
     const rel = p.replace(/^\/worker\//, '');
+    // Special: watchdog script isn't part of the extension bundle but
+    // the installer needs to download it. Served from scripts/ instead
+    // of the repo root.
+    if (rel === 'chrome-watchdog-template.ps1') {
+      const file = path.join(__dirname, '..', 'scripts', rel);
+      return fs.readFile(file, (err, data) => {
+        if (err) return send(res, 404, { ok: false, error: 'watchdog template missing' });
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-cache' });
+        res.end(data);
+      });
+    }
     if (!WORKER_FILES.includes(rel)) return send(res, 404, { ok: false, error: 'not in worker file allowlist' });
     const file = path.join(__dirname, '..', rel);
     return fs.readFile(file, (err, data) => {

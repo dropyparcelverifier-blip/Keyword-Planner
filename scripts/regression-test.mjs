@@ -956,6 +956,20 @@ async function run() {
   assert(appJs.body.includes('api.wakeOnLan'),       '20p.17 WOL button wired to endpoint');
   assert(appJs.body.includes('api.setWorkerMac'),    '20p.18 UI can set MAC when unknown');
 
+  // ===== 20q. CHROME WATCHDOG =====
+  // Installer references watchdog template + registers scheduled task
+  assert(ps.body.includes('chrome-watchdog-template.ps1'), '20q.1 installer downloads watchdog template');
+  assert(ps.body.includes("Register-ScheduledTask"),        '20q.2 installer registers scheduled task');
+  assert(ps.body.includes("AdBrain Chrome Watchdog"),       '20q.3 task named consistently');
+  assert(un.body.includes("AdBrain Chrome Watchdog"),       '20q.4 uninstaller removes watchdog task');
+  // Watchdog template served + has placeholders
+  const wd = await fetchNoAuth('/worker/chrome-watchdog-template.ps1');
+  assertEq(wd.status, 200, '20q.5 watchdog template served');
+  assert(wd.body.includes('__PROFILE__'), '20q.6 template has profile placeholder');
+  assert(wd.body.includes('__EXTDIR__'),  '20q.7 template has extdir placeholder');
+  assert(wd.body.includes('__CHROME__'),  '20q.8 template has chrome placeholder');
+  assert(wd.body.includes('Start-Process'), '20q.9 template launches chrome via Start-Process');
+
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
   const [s1, w1, a1] = await Promise.all([
