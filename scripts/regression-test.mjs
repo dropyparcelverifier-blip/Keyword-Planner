@@ -1234,6 +1234,23 @@ async function run() {
   const relOk = await req('POST', '/api/jobs/release-by-worker', { workerId: 'nonexistent-worker' });
   assertEq(relOk.status, 200,                                           'DS.58 release-by-worker returns 200 for unknown worker');
   assert(relOk.data.ok === true && relOk.data.released === 0,           'DS.59 release-by-worker returns released count');
+
+  // Activity clear + errors clear + per-worker monitor.
+  assert(srvFull.includes("/api/activity/clear"),                       'DS.60 activity clear endpoint defined');
+  assert(apiFull.includes('activityClear'),                             'DS.61 activityClear client wrapper');
+  assert(htmlFull.includes('id="activityClearBtn"'),                    'DS.62 activity-clear button in HTML');
+  assert(htmlFull.includes('id="errorsClearBtn"'),                      'DS.63 errors-clear button in HTML');
+  assert(appFull.includes('activityClearBtn'),                          'DS.64 activity-clear handler wired');
+  assert(appFull.includes('errorsClearBtn'),                            'DS.65 errors-clear handler wired');
+  assert(htmlFull.includes('id="workerMonitorModal"'),                  'DS.66 worker monitor modal in HTML');
+  assert(appFull.includes('function openWorkerMonitor'),                'DS.67 openWorkerMonitor defined');
+  assert(appFull.includes('function refreshWorkerMonitor'),             'DS.68 refreshWorkerMonitor defined');
+  assert(appFull.includes('data-monitor="1"'),                          'DS.69 monitor button on each worker row');
+  assert(cssFull.includes('.wm-hdr') && cssFull.includes('.wm-log'),    'DS.70 worker-monitor CSS defined');
+  // Smoke test on activity/clear endpoint.
+  const acEmpty = await req('POST', '/api/activity/clear', {});
+  assertEq(acEmpty.status, 200, 'DS.71 activity/clear returns 200 with empty body (nuke-all)');
+  assert(typeof acEmpty.data.deleted === 'number', 'DS.72 activity/clear returns deleted count');
   assert(cssFull.includes('.scatter-full'),                        'DS.26 full-width scatter variant defined');
   assert(htmlFull.includes('scatter-full'),                        'DS.27 scatter uses full-width layout');
   assert(/\.card-title\s*\{[\s\S]{0,120}font-size:\s*var\(--text-md\)/.test(cssFull), 'DS.28 unified card-title sizing');

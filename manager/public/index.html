@@ -213,6 +213,7 @@
               <select id="activityWorkerFilter" style="margin-left:auto; min-width: 140px; font-size: 11px; padding: 3px 6px;">
                 <option value="">All workers</option>
               </select>
+              <button class="small ghost" id="activityClearBtn" title="Clear activity log. If a worker filter is set, only that worker's rows are cleared.">🗑 Clear</button>
             </div>
             <div class="card-body">
               <div class="log" id="activityLog"><div class="empty">No activity yet.</div></div>
@@ -236,6 +237,7 @@
               <span class="card-icon">🐛</span>
               <span class="card-title" style="color: var(--danger);">Errors reported by workers</span>
               <span class="card-sub" id="errorsSub">—</span>
+              <button class="small ghost" id="errorsClearBtn" style="margin-left:auto;" title="Clear all error-level log entries (info + warn events are kept).">🗑 Clear errors</button>
             </div>
             <div class="card-body" style="max-height: 280px; overflow: auto; padding: 6px 12px;">
               <div id="errorsList"></div>
@@ -300,6 +302,23 @@
               <span id="claudePromptStats" class="hint"></span>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- Per-worker monitor modal — click any worker's 🖥 button (or
+           the worker id itself) to zoom into a full-screen card with
+           the worker's live status, all controls, and its filtered
+           activity log. Reuses the existing modal system so backdrop
+           click + Escape both dismiss. -->
+      <div id="workerMonitorModal" class="modal-root" style="display:none;">
+        <div class="modal-backdrop" data-close-modal="1"></div>
+        <div class="modal-card" style="max-width: 1100px;">
+          <div class="modal-head">
+            <span class="modal-title" id="workerMonitorTitle">Worker monitor</span>
+            <span class="spacer" style="flex:1;"></span>
+            <button class="small secondary" data-close-modal="1">Close</button>
+          </div>
+          <div class="modal-body" id="workerMonitorBody"></div>
         </div>
       </div>
 

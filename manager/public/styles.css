@@ -1024,6 +1024,48 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
 .hero-trend-down { color: var(--danger); }
 .hero-trend-flat { color: var(--text-3); }
 
+/* Per-worker monitor modal — status header, action row, filtered log. */
+.wm-hdr {
+  display: grid; grid-template-columns: 1fr auto; gap: var(--space-4);
+  align-items: center; padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--line-1); margin-bottom: var(--space-3);
+}
+.wm-status { display: flex; align-items: center; gap: var(--space-3); }
+.wm-stage  { font-size: var(--text-xl); font-weight: 700; }
+.wm-hb     { font-size: var(--text-xs); color: var(--text-3); }
+.wm-tiles  { display: flex; gap: var(--space-2); }
+.wm-tiles .tile { padding: var(--space-2) var(--space-3); min-width: 80px; text-align: center; }
+.wm-tiles .val { font-size: var(--text-xl); }
+.wm-actions {
+  display: flex; flex-wrap: wrap; gap: var(--space-2);
+  padding-bottom: var(--space-3); border-bottom: 1px solid var(--line-1);
+  margin-bottom: var(--space-3);
+}
+.wm-actions button { font-size: var(--text-md); padding: var(--space-2) var(--space-3); }
+.wm-log-hdr {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: var(--text-sm); font-weight: 700; color: var(--text-2);
+  text-transform: uppercase; letter-spacing: .5px; margin-bottom: var(--space-2);
+}
+.wm-log {
+  max-height: 380px; overflow-y: auto;
+  background: var(--bg-input); border: 1px solid var(--line-1); border-radius: var(--radius-sm);
+  padding: var(--space-2);
+}
+.wm-log-row {
+  display: grid; grid-template-columns: 90px 90px 1fr; gap: var(--space-2);
+  padding: var(--space-1) var(--space-2); font-size: var(--text-sm);
+  font-family: var(--mono); align-items: baseline;
+}
+.wm-log-row:hover { background: var(--bg-2); }
+.wm-log-ts  { color: var(--text-3); }
+.wm-log-src { color: var(--text-2); text-transform: uppercase; font-size: 9px; font-weight: 700; }
+.wm-log-msg { color: var(--text-1); word-break: break-word; white-space: pre-wrap; }
+@media (max-width: 700px) {
+  .wm-hdr { grid-template-columns: 1fr; }
+  .wm-log-row { grid-template-columns: 1fr; gap: 0; }
+}
+
 /* Data-quality banner — appears at the top of the Analytics hero when
    we can diagnose a concrete data issue (0% KP volume, low kw count,
    0% image match). Tone-colored border + icon; body has actionable
