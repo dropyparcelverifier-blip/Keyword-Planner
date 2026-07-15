@@ -1086,6 +1086,20 @@ async function run() {
   // Compact tiles + primary-source aggregation.
   assert(cssBody.includes('.tiles.compact-tiles'),               '20s.54 compact-tiles CSS defined');
   assert(appJs.body.includes('primarySrc'),                      '20s.55 primary-source aggregation replaces combo chips');
+  // Keyword theme clustering + content-gap + copy + DQ badge.
+  assert(appJs.body.includes('function clusterKeywordsByTheme'), '20s.61 theme clustering fn defined');
+  assert(appJs.body.includes('KW_THEMES'),                        '20s.62 theme dictionary defined');
+  assert(appJs.body.includes('function renderThemesCard'),        '20s.63 themes card renderer defined');
+  assert(appJs.body.includes('function renderContentGaps'),       '20s.64 content-gap renderer defined');
+  assert(html.includes('id="anThemesCard"'),                      '20s.65 themes card in HTML');
+  assert(html.includes('id="anGapCard"'),                         '20s.66 gap card in HTML');
+  assert(cssBody.includes('.theme-list'),                         '20s.67 theme-list CSS defined');
+  assert(cssBody.includes('.gap-list'),                           '20s.68 gap-list CSS defined');
+  assert(html.includes('id="anCopyKwBtn"'),                       '20s.69 Copy top keywords button in HTML');
+  assert(appJs.body.includes('anCopyKwBtn'),                      '20s.70 Copy top keywords wired');
+  assert(appJs.body.includes('dq-badge'),                         '20s.71 DQ badge injected in SKU preview');
+  assert(cssBody.includes('.dq-badge'),                           '20s.72 DQ badge CSS defined');
+
   // Cache-buster: index.html served with mtime-versioned asset URLs so
   // browsers can't hold onto a stale app.js/styles.css after a deploy.
   const idxServed = await fetchNoAuth('/');
