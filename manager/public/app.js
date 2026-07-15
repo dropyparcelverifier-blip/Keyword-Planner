@@ -956,17 +956,15 @@ function renderBatchOverview() {
     return;
   }
   el.innerHTML = `<table class="tbl">
-    <thead><tr><th>Batch</th><th style="width: 30%;">Progress</th><th class="num">Total</th><th class="num">Done</th><th class="num">Failed</th></tr></thead>
+    <thead><tr><th>Batch</th><th style="width: 30%;">Progress</th><th class="num">Total</th><th class="num">Done</th><th class="num">Failed</th><th style="width:1%;">Manage</th></tr></thead>
     <tbody>${state.batches.map(b => {
       const done = b.done || 0, failed = b.failed || 0, claimed = b.claimed || 0, total = b.total || 0;
       const donePct = total ? (done / total) * 100 : 0;
-      const claimedPct = total ? (claimed / total) * 100 : 0;
       const complete = done + failed === total && total > 0;
       const fillClass = complete ? 'done' : (claimed > 0 ? '' : (donePct > 0 ? '' : 'stuck'));
-      // Stacked bar: done (green/gradient) + claimed (accent), pending is background.
       return `
-        <tr style="cursor:pointer;" onclick="document.getElementById('dashBatchSelect').value='${esc(b.batch_id)}'; document.getElementById('dashBatchSelect').dispatchEvent(new Event('change'));">
-          <td class="mono">${esc(b.batch_id)}</td>
+        <tr>
+          <td class="mono" style="cursor:pointer;" onclick="document.getElementById('dashBatchSelect').value='${esc(b.batch_id)}'; document.getElementById('dashBatchSelect').dispatchEvent(new Event('change'));">${esc(b.batch_id)}</td>
           <td>
             <div class="progress">
               <div class="progress-fill ${fillClass}" style="width: ${donePct.toFixed(1)}%;"></div>
@@ -979,9 +977,167 @@ function renderBatchOverview() {
           <td class="num">${total}</td>
           <td class="num" style="color:var(--success);">${done}</td>
           <td class="num" style="color:${failed > 0 ? 'var(--danger)' : 'var(--text-3)'};">${failed}</td>
+          <td><button class="tiny secondary" data-queue-manage="${esc(b.batch_id)}" title="Open the queue manager for this batch — view every SKU, edit priority, re-queue failed, delete, add new.">Manage</button></td>
         </tr>`;
     }).join('')}
     </tbody></table>`;
+  // Wire the Manage buttons.
+  el.querySelectorAll('button[data-queue-manage]').forEach(btn =>
+    btn.addEventListener('click', () => openQueueManager(btn.dataset.queueManage))
+  );
+}
+
+// ─────────── Queue manager modal ───────────
+// Per-job CRUD for a batch — safe against active workers. Auto-refreshes
+// every 5s while open so worker state stays live. Uses the same modal
+// system as the worker monitor (backdrop click + Escape both close).
+let _queueTimer = null;
+async function openQueueManager(batchId) {
+  const modal = $('queueManageModal');
+  const body  = $('queueManageBody');
+  const title = $('queueManageTitle');
+  if (!modal || !body || !title || !batchId) return;
+  title.innerHTML = `Queue · <span class="mono">${esc(batchLabel ? batchLabel(batchId) : batchId)}</span>`;
+  body.innerHTML = `<div class="hint">Loading queue…</div>`;
+  modal.style.display = 'flex';
+  await refreshQueueManager(batchId);
+  if (_queueTimer) clearInterval(_queueTimer);
+  _queueTimer = setInterval(() => {
+    if (modal.style.display === 'none') { clearInterval(_queueTimer); _queueTimer = null; return; }
+    refreshQueueManager(batchId);
+  }, 5000);
+}
+
+async function refreshQueueManager(batchId) {
+  const body = $('queueManageBody');
+  if (!body) return;
+  let rows = [];
+  try { const r = await api.jobsList(batchId); rows = r.rows || []; } catch (e) {
+    body.innerHTML = `<div class="banner err">Failed to load queue: ${esc(e.message)}</div>`;
+    return;
+  }
+  const stat = { pending: 0, claimed: 0, done: 0, failed: 0 };
+  for (const r of rows) stat[r.status] = (stat[r.status] || 0) + 1;
+  const statusColor = (s) => s === 'done' ? 'var(--success)'
+                            : s === 'failed' ? 'var(--danger)'
+                            : s === 'claimed' ? 'var(--accent)'
+                            : 'var(--text-2)';
+  body.innerHTML = `
+    <div class="qm-strip">
+      <span><strong>${rows.length}</strong> total</span>
+      <span style="color:var(--text-2);"><strong>${stat.pending || 0}</strong> pending</span>
+      <span style="color:var(--accent);"><strong>${stat.claimed || 0}</strong> claimed</span>
+      <span style="color:var(--success);"><strong>${stat.done || 0}</strong> done</span>
+      <span style="color:var(--danger);"><strong>${stat.failed || 0}</strong> failed</span>
+      <span class="spacer" style="flex:1;"></span>
+      <button class="small secondary" id="qmAddBtn">+ Add SKU</button>
+    </div>
+    <div id="qmAddForm" style="display:none; margin-bottom: var(--space-3);"></div>
+    <div class="tbl-wrap" style="max-height: 480px; overflow-y: auto;">
+      <table class="tbl compact">
+        <thead>
+          <tr>
+            <th style="width:60px;">ID</th>
+            <th style="width:70px;" class="num">Prio</th>
+            <th>SKU</th>
+            <th>Product name</th>
+            <th>URL</th>
+            <th style="width:80px;">Status</th>
+            <th>Worker</th>
+            <th style="width:180px;">Actions</th>
+          </tr>
+        </thead>
+        <tbody>${rows.map(r => `
+          <tr data-job-id="${r.id}">
+            <td class="mono" style="color:var(--text-3);">${r.id}</td>
+            <td class="num"><input type="number" class="qm-prio" data-job-id="${r.id}" value="${r.priority}" min="0" max="9999" step="10" style="width: 60px; padding: 2px 4px; font-size: 11px;" /></td>
+            <td class="mono">${esc(r.sku || '—')}</td>
+            <td style="max-width:220px; overflow:hidden; text-overflow:ellipsis;" title="${esc(r.product_name || '')}">${esc(r.product_name || '—')}</td>
+            <td style="max-width:200px; overflow:hidden; text-overflow:ellipsis;"><a href="${esc(r.product_url)}" target="_blank" rel="noopener" title="${esc(r.product_url)}">${esc(r.product_url.replace(/^https?:\/\//, '').slice(0, 40))}</a></td>
+            <td><span class="chip" style="background:transparent; color:${statusColor(r.status)}; border:1px solid ${statusColor(r.status)};">${r.status}</span></td>
+            <td class="mono" style="color:var(--text-2); font-size:10px;">${esc(r.claimed_by || '—')}</td>
+            <td>
+              <button class="tiny secondary qm-reset" data-job-id="${r.id}" title="Reset to pending (re-queue). Warns if the job is already done.">↺ Reset</button>
+              <button class="tiny danger qm-delete" data-job-id="${r.id}" title="Delete this SKU from the queue. Refuses claimed jobs unless force is checked below.">✕ Delete</button>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div class="hint" style="margin-top: var(--space-2);">
+      Auto-refreshes every 5s. Priority edits save on blur or Enter.
+      Delete/Reset on a <strong>claimed</strong> job will prompt for force — use only if the worker is truly hung.
+    </div>`;
+
+  // Wire priority edits — save on blur / Enter.
+  body.querySelectorAll('input.qm-prio').forEach(inp => {
+    const save = async () => {
+      const id = Number(inp.dataset.jobId);
+      const val = Number(inp.value);
+      if (!Number.isFinite(id) || !Number.isFinite(val)) return;
+      try { await api.jobUpdate(id, { priority: val }); toast(`Priority for job ${id} → ${val}`, 'ok'); }
+      catch (e) { toast(`Update failed: ${e.message}`, 'err'); }
+    };
+    inp.addEventListener('blur', save);
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
+  });
+  // Wire reset buttons.
+  body.querySelectorAll('button.qm-reset').forEach(btn => btn.addEventListener('click', async () => {
+    const id = Number(btn.dataset.jobId);
+    try {
+      await api.jobReset(id, false);
+      toast(`Job ${id} reset to pending`, 'ok');
+      refreshQueueManager(batchId);
+    } catch (e) {
+      if (e.status === 409 && confirm(`${e.message}\n\nForce reset anyway?`)) {
+        try { await api.jobReset(id, true); toast(`Job ${id} force-reset`, 'ok'); refreshQueueManager(batchId); }
+        catch (e2) { toast(e2.message, 'err'); }
+      } else if (e.status !== 409) { toast(e.message, 'err'); }
+    }
+  }));
+  // Wire delete buttons.
+  body.querySelectorAll('button.qm-delete').forEach(btn => btn.addEventListener('click', async () => {
+    const id = Number(btn.dataset.jobId);
+    if (!confirm(`Delete job ${id}? Also deletes any keyword rows collected for it in this batch.`)) return;
+    try {
+      const r = await api.jobDelete(id, false);
+      toast(`Job ${id} deleted (${r.keywordsDeleted} keyword row(s) also removed)`, 'ok');
+      refreshQueueManager(batchId);
+    } catch (e) {
+      if (e.status === 409 && confirm(`${e.message}\n\nForce delete anyway? (The worker's next heartbeat/mark-done will fail silently.)`)) {
+        try { const r = await api.jobDelete(id, true); toast(`Job ${id} force-deleted (${r.keywordsDeleted} kw)`, 'ok'); refreshQueueManager(batchId); }
+        catch (e2) { toast(e2.message, 'err'); }
+      } else if (e.status !== 409) { toast(e.message, 'err'); }
+    }
+  }));
+  // Wire "add SKU" toggle.
+  body.querySelector('#qmAddBtn')?.addEventListener('click', () => {
+    const form = body.querySelector('#qmAddForm');
+    if (form.style.display === 'none') {
+      form.innerHTML = `
+        <div style="display:grid; grid-template-columns: 1fr 1fr auto; gap: var(--space-2); padding: var(--space-3); background: var(--bg-2); border: 1px solid var(--line-2); border-radius: var(--radius-sm);">
+          <input id="qmAddUrl" placeholder="Product URL (required)" style="grid-column: 1 / -1;" />
+          <input id="qmAddSku" placeholder="SKU (optional)" />
+          <input id="qmAddName" placeholder="Product name (optional)" />
+          <button id="qmAddSubmit">Add</button>
+        </div>`;
+      form.style.display = '';
+      form.querySelector('#qmAddSubmit').addEventListener('click', async () => {
+        const url = form.querySelector('#qmAddUrl').value.trim();
+        if (!url) { toast('URL required', 'warn'); return; }
+        const sku = form.querySelector('#qmAddSku').value.trim();
+        const name = form.querySelector('#qmAddName').value.trim();
+        try {
+          const r = await api.jobAddOne(batchId, { url, sku: sku || null, product_name: name || null, priority: 100 });
+          toast(`Added job ${r.jobId}`, 'ok');
+          form.style.display = 'none';
+          refreshQueueManager(batchId);
+        } catch (e) { toast(e.message, 'err'); }
+      });
+    } else {
+      form.style.display = 'none';
+    }
+  });
 }
 
 // Per-worker monitor modal — click 🖥 on any worker row.
@@ -2475,7 +2631,19 @@ $('claudeOpenBtn')?.addEventListener('click', async () => {
   const t = $('claudePromptText').value;
   await copyToClipboard(t);
   toast('Opening Claude — paste the prompt into the chat box.', 'info', { title: 'Prompt copied' });
-  window.open('https://claude.ai/new', '_blank', 'noopener');
+  // Open via a real anchor click (not window.open with 'noopener').
+  // Reason: this manager runs on HTTP; some Chrome profile + third-party-
+  // cookie configurations treat the noopener-broken navigation as a fresh
+  // session and prompt for login, even when claude.ai has a valid cookie
+  // in that profile. A plain anchor click carries the browser's normal
+  // top-level navigation semantics — session cookies flow correctly.
+  const a = document.createElement('a');
+  a.href = 'https://claude.ai/new';
+  a.target = '_blank';
+  a.rel = 'noreferrer';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 });
 
 $('anExportBtn').addEventListener('click', () => {

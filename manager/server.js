@@ -248,6 +248,18 @@ const Q = {
   // or offline and its stale claims are blocking other workers from
   // picking up the SKUs.
   releaseByWorker: db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL WHERE status='claimed' AND claimed_by=?`),
+  // Per-job CRUD helpers. Deliberately narrow (one field family per stmt)
+  // so we can never accidentally update the wrong column via body param
+  // injection. Job status transitions still respect claimed_by (worker
+  // safety) — done inside the endpoint below, not at the SQL level.
+  getJob:       db.prepare(`SELECT * FROM jobs WHERE id=?`),
+  updateJobFields: db.prepare(`UPDATE jobs SET sku=?, product_name=?, priority=?, handles=?, brands=? WHERE id=?`),
+  updateJobPriority: db.prepare(`UPDATE jobs SET priority=? WHERE id=?`),
+  updateJobStatus:   db.prepare(`UPDATE jobs SET status=?, claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=NULL, failed_reason=NULL WHERE id=?`),
+  deleteJob:    db.prepare(`DELETE FROM jobs WHERE id=?`),
+  jobsForBatch: db.prepare(`SELECT id, batch_id, sku, product_url, product_name, priority, status, claimed_by, claimed_at, heartbeat_at, done_at, failed_reason, attempts FROM jobs WHERE batch_id=? ORDER BY priority DESC, id ASC`),
+  deleteKeywordsForProduct: db.prepare(`DELETE FROM keywords WHERE batch_id=? AND product_url=?`),
+  jobIdByBatchAndUrl: db.prepare(`SELECT id FROM jobs WHERE batch_id=? AND product_url=?`),
   summary: db.prepare(`SELECT batch_id,
       COUNT(*) total,
       SUM(status='pending') pending, SUM(status='claimed') claimed,
@@ -858,6 +870,103 @@ const server = http.createServer(async (req, res) => {
       const info = Q.releaseByWorker.run(wid);
       return send(res, 200, { ok: true, released: info.changes, workerId: wid });
     }
+    // ─── Per-job CRUD (worker-safe) ─────────────────────────────────
+    // GET all jobs in a batch — richer than /per-product (adds worker,
+    // heartbeat, attempts, failed_reason). Used by the Queue-manage UI.
+    if (m === 'GET' && p === '/api/jobs/list') {
+      const batchId = String(url.searchParams.get('batchId') || '').trim();
+      if (!batchId) return send(res, 400, { ok: false, error: 'batchId required' });
+      return send(res, 200, { ok: true, rows: Q.jobsForBatch.all(batchId) });
+    }
+    // POST update — safe against active workers. Priority changes always
+    // OK. Field edits (sku/name/handles/brands) refused for CLAIMED jobs
+    // unless force=true, because changing product_url/name mid-run would
+    // confuse the worker's local state. product_url is NEVER updatable
+    // (it's part of the UNIQUE key + used as the job's identity across
+    // the whole system).
+    if (m === 'POST' && p === '/api/jobs/update') {
+      const b = await readJson(req);
+      const id = Number(b.jobId || b.id || 0);
+      if (!Number.isFinite(id) || id <= 0) return send(res, 400, { ok: false, error: 'jobId required' });
+      const row = Q.getJob.get(id);
+      if (!row) return send(res, 404, { ok: false, error: `no job with id ${id}` });
+      // Priority-only path — always safe.
+      if (b.priority != null && Object.keys(b).length <= 3) {
+        Q.updateJobPriority.run(Number(b.priority), id);
+        return send(res, 200, { ok: true, updated: 1, mode: 'priority-only' });
+      }
+      // Full-field update — refuses if job is claimed unless force.
+      if (row.status === 'claimed' && !b.force) {
+        return send(res, 409, { ok: false, error: `job ${id} is claimed by ${row.claimed_by}. Release the claim first, or pass force=true (worker's next heartbeat may fail).` });
+      }
+      const newSku      = b.sku          != null ? String(b.sku)          : row.sku;
+      const newName     = b.product_name != null ? String(b.product_name) : row.product_name;
+      const newPriority = b.priority     != null ? Number(b.priority)     : row.priority;
+      const newHandles  = b.handles      != null ? String(b.handles)      : row.handles;
+      const newBrands   = b.brands       != null ? String(b.brands)       : row.brands;
+      Q.updateJobFields.run(newSku, newName, newPriority, newHandles, newBrands, id);
+      return send(res, 200, { ok: true, updated: 1, mode: 'full-field' });
+    }
+    // POST reset — flip a job back to pending regardless of current state.
+    // Useful for "requeue this failed job" or "the worker is stuck, force
+    // this SKU back to pending". Refuses to reset a DONE job unless force.
+    if (m === 'POST' && p === '/api/jobs/reset') {
+      const b = await readJson(req);
+      const id = Number(b.jobId || b.id || 0);
+      if (!Number.isFinite(id) || id <= 0) return send(res, 400, { ok: false, error: 'jobId required' });
+      const row = Q.getJob.get(id);
+      if (!row) return send(res, 404, { ok: false, error: `no job with id ${id}` });
+      if (row.status === 'done' && !b.force) {
+        return send(res, 409, { ok: false, error: `job ${id} is already done. Pass force=true to re-queue it (existing keyword rows stay in the DB).` });
+      }
+      Q.updateJobStatus.run('pending', id);
+      return send(res, 200, { ok: true, updated: 1, previous: row.status });
+    }
+    // POST delete — refuses claimed jobs unless force. Also drops any
+    // keyword rows for the deleted job's product_url within this batch
+    // to prevent orphan rows lingering in Analytics.
+    if (m === 'POST' && p === '/api/jobs/delete-one') {
+      const b = await readJson(req);
+      const id = Number(b.jobId || b.id || 0);
+      if (!Number.isFinite(id) || id <= 0) return send(res, 400, { ok: false, error: 'jobId required' });
+      const row = Q.getJob.get(id);
+      if (!row) return send(res, 404, { ok: false, error: `no job with id ${id}` });
+      if (row.status === 'claimed' && !b.force) {
+        return send(res, 409, { ok: false, error: `job ${id} is claimed by ${row.claimed_by}. Release the claim first, or pass force=true.` });
+      }
+      // node:sqlite doesn't have better-sqlite3's db.transaction() helper —
+      // use explicit BEGIN/COMMIT (the pattern used elsewhere in this file).
+      let kwDeleted = 0;
+      db.exec('BEGIN');
+      try {
+        Q.deleteJob.run(id);
+        const kwDel = Q.deleteKeywordsForProduct.run(row.batch_id, row.product_url);
+        kwDeleted = kwDel.changes;
+        db.exec('COMMIT');
+      } catch (txErr) {
+        db.exec('ROLLBACK');
+        throw txErr;
+      }
+      return send(res, 200, { ok: true, deleted: 1, keywordsDeleted: kwDeleted, sku: row.sku, productUrl: row.product_url });
+    }
+    // POST add-one — insert a single SKU into an existing batch. Uses the
+    // same upsert semantics as /api/jobs/upload but bounded to one row.
+    if (m === 'POST' && p === '/api/jobs/add-one') {
+      const b = await readJson(req);
+      const batchId = String(b.batchId || '').trim();
+      const productUrl = String(b.url || b.product_url || '').trim();
+      if (!batchId)    return send(res, 400, { ok: false, error: 'batchId required' });
+      if (!productUrl) return send(res, 400, { ok: false, error: 'product url required' });
+      const sku = b.sku ? String(b.sku) : null;
+      const name = b.product_name ? String(b.product_name) : (b.name ? String(b.name) : null);
+      const priority = Number.isFinite(b.priority) ? Number(b.priority) : 100;
+      const handles = Array.isArray(b.handles) ? b.handles.join('|') : (b.handles ? String(b.handles) : null);
+      const brands  = Array.isArray(b.brands)  ? b.brands.join('|')  : (b.brands  ? String(b.brands)  : null);
+      Q.insertJob.run(batchId, sku, productUrl, name, priority, handles, brands);
+      const row = Q.jobIdByBatchAndUrl.get(batchId, productUrl);
+      return send(res, 200, { ok: true, jobId: row?.id, batchId, productUrl });
+    }
+
     if (m === 'GET' && p === '/api/jobs/summary')      return send(res, 200, { ok: true, batches: Q.summary.all() });
     if (m === 'GET' && p === '/api/jobs/worker-stats') return send(res, 200, { ok: true, workers: Q.workerStats.all() });
     if (m === 'GET' && p === '/api/jobs/per-product')  return send(res, 200, { ok: true, rows: Q.perProduct.all(url.searchParams.get('batchId') || '') });
