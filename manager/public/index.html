@@ -345,79 +345,126 @@
         </div>
       </div>
 
-      <!-- Executive summary — plain-English business takeaways from the
-           current SKU. Rendered above everything else so it's the first
-           thing users see. -->
-      <div id="anExecCard" style="display:none;">
-        <div class="card">
-          <div class="card-head">
-            <span class="card-icon">📋</span>
-            <span class="card-title">Executive summary</span>
-            <span class="card-sub" id="anExecSub">—</span>
+      <!-- ─── LAYER: EXECUTIVE — 30-second summary ─────────────────── -->
+      <div id="anLayerExec" class="an-layer" style="display:none;">
+        <div class="an-layer-head">📋 Executive summary <span class="an-layer-hint">the 30-second read</span></div>
+        <div id="anExecCard">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">📋</span>
+              <span class="card-title" id="anExecTitle">Business takeaways</span>
+              <span class="card-sub" id="anExecSub">—</span>
+            </div>
+            <div class="card-body">
+              <div id="anExec"></div>
+            </div>
           </div>
-          <div class="card-body">
-            <div id="anExec"></div>
+        </div>
+        <div id="anInsightsCard">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">💡</span>
+              <span class="card-title">Insights &amp; signals</span>
+              <span class="card-sub" id="anInsightsSub">—</span>
+            </div>
+            <div class="card-body">
+              <div id="anInsights"></div>
+            </div>
           </div>
         </div>
       </div>
 
-      <div id="anInsightsCard" style="display:none;">
-        <div class="card">
-          <div class="card-head">
-            <span class="card-icon">💡</span>
-            <span class="card-title">Insights &amp; recommendations</span>
-            <span class="card-sub" id="anInsightsSub">—</span>
+      <!-- ─── LAYER: CONTENT PLAN — what to write ──────────────────── -->
+      <div id="anLayerContent" class="an-layer" style="display:none;">
+        <div class="an-layer-head">📝 Content plan <span class="an-layer-hint">what to write next</span></div>
+        <div id="anThemesCard">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">🎨</span>
+              <span class="card-title">Keyword themes</span>
+              <span class="card-sub" id="anThemesSub">—</span>
+            </div>
+            <div class="card-body">
+              <div id="anThemes"></div>
+            </div>
           </div>
-          <div class="card-body">
-            <div id="anInsights"></div>
+        </div>
+        <div id="anGapCard">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">🕳️</span>
+              <span class="card-title">Content gaps — questions to answer on the page</span>
+              <span class="card-sub" id="anGapSub">—</span>
+            </div>
+            <div class="card-body">
+              <div id="anGap"></div>
+            </div>
           </div>
         </div>
       </div>
 
-      <!-- Keyword themes — groups the pool into 8-10 semantic buckets so
-           users see where demand is concentrated (price / ingredients /
-           how-to / reviews / questions / brand / variant / etc). -->
-      <div id="anThemesCard" style="display:none;">
-        <div class="card">
-          <div class="card-head">
-            <span class="card-icon">🎨</span>
-            <span class="card-title">Keyword themes — where demand is concentrated</span>
-            <span class="card-sub" id="anThemesSub">—</span>
+      <!-- ─── LAYER: PRIORITIZE — what to act on first ─────────────── -->
+      <div id="anLayerPrioritize" class="an-layer" style="display:none;">
+        <div class="an-layer-head">🎯 Prioritize <span class="an-layer-hint">what to target first</span></div>
+        <div class="two-col">
+          <!-- Scatter plot: Score vs demand — the quick-wins quadrant. -->
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">💎</span>
+              <span class="card-title" id="anScatterTitle">Quick-wins quadrant</span>
+              <span class="card-sub" id="anScatterSub">—</span>
+            </div>
+            <div class="card-body">
+              <div id="anScatter"></div>
+            </div>
           </div>
-          <div class="card-body">
-            <div id="anThemes"></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Content-gap card — questions from research that likely aren't
-           on the product page yet. Actionable list for the copy team. -->
-      <div id="anGapCard" style="display:none;">
-        <div class="card">
-          <div class="card-head">
-            <span class="card-icon">🕳️</span>
-            <span class="card-title">Content gaps — questions to answer on the product page</span>
-            <span class="card-sub" id="anGapSub">—</span>
-          </div>
-          <div class="card-body">
-            <div id="anGap"></div>
-          </div>
-        </div>
-      </div>
-
-      <div id="anTopChartCard" style="display:none;">
-        <div class="card">
-          <div class="card-head">
-            <span class="card-icon">🏆</span>
-            <span class="card-title">Top keywords — best SEO/Ad opportunities</span>
-            <span class="card-sub" id="anTopChartSub">—</span>
-          </div>
-          <div class="card-body">
-            <div id="anTopChart"></div>
+          <!-- Top-10 bar chart (moved from below — belongs in prioritize layer). -->
+          <div id="anTopChartCard" style="display:none;">
+            <div class="card">
+              <div class="card-head">
+                <span class="card-icon">🏆</span>
+                <span class="card-title">Top 10 by opportunity score</span>
+                <span class="card-sub" id="anTopChartSub">—</span>
+              </div>
+              <div class="card-body">
+                <div id="anTopChart"></div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
+      <!-- ─── LAYER: DISTRIBUTE — how the pool breaks down ──────────── -->
+      <div id="anLayerDistribute" class="an-layer" style="display:none;">
+        <div class="an-layer-head">📊 Distribution <span class="an-layer-hint">where the keywords live</span></div>
+        <div class="two-col">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">🥯</span>
+              <span class="card-title">Source distribution</span>
+              <span class="card-sub" id="anDonutSub">—</span>
+            </div>
+            <div class="card-body">
+              <div id="anDonut"></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">🎚️</span>
+              <span class="card-title">Coverage vs 100–300 target</span>
+              <span class="card-sub" id="anGaugeSub">—</span>
+            </div>
+            <div class="card-body">
+              <div id="anGauge"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ─── LAYER: DEEP DIVE — the full sortable/filterable table ──── -->
+      <div id="anLayerDeepDive" class="an-layer" style="display:none;">
+        <div class="an-layer-head">🔎 Deep dive <span class="an-layer-hint">every row, every column, sortable</span></div>
+      </div>
       <div id="anTableCard" style="display:none;">
         <div class="card">
           <div class="card-head">

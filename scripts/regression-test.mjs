@@ -1123,6 +1123,23 @@ async function run() {
   // Groups persist to localStorage.
   assert(appJs.body.includes("localStorage.setItem('adbrainAnGroups'"), '20s.78 group visibility persisted');
 
+  // Visual layers + scatter/donut/gauge — the "how to represent" pass.
+  assert(appJs.body.includes('function renderScatter'),          '20s.79 scatter plot renderer defined');
+  assert(appJs.body.includes('quick-wins-badge'),                '20s.80 scatter labels quick-wins quadrant');
+  assert(appJs.body.includes('function renderSourceDonut'),      '20s.81 source-donut renderer defined');
+  assert(appJs.body.includes('function renderCoverageGauge'),    '20s.82 coverage-gauge renderer defined');
+  assert(html.includes('id="anLayerExec"'),                      '20s.83 Executive layer wrapper in HTML');
+  assert(html.includes('id="anLayerPrioritize"'),                '20s.84 Prioritize layer wrapper in HTML');
+  assert(html.includes('id="anLayerDistribute"'),                '20s.85 Distribute layer wrapper in HTML');
+  assert(html.includes('id="anLayerContent"'),                   '20s.86 Content-plan layer wrapper in HTML');
+  assert(html.includes('id="anScatter"'),                        '20s.87 scatter container in HTML');
+  assert(html.includes('id="anDonut"'),                          '20s.88 donut container in HTML');
+  assert(html.includes('id="anGauge"'),                          '20s.89 gauge container in HTML');
+  assert(cssBody.includes('.an-layer-head'),                     '20s.90 layer-header CSS defined');
+  assert(cssBody.includes('.scatter'),                           '20s.91 scatter CSS defined');
+  assert(cssBody.includes('.donut'),                             '20s.92 donut CSS defined');
+  assert(cssBody.includes('.gauge'),                             '20s.93 gauge CSS defined');
+
   // Cache-buster: index.html served with mtime-versioned asset URLs so
   // browsers can't hold onto a stale app.js/styles.css after a deploy.
   const idxServed = await fetchNoAuth('/');
