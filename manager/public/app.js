@@ -1785,7 +1785,7 @@ function renderAnalyticsSummary(rows) {
   const avgRating = rows.reduce((s, r) => s + (r.ad_rating || 0), 0) / rows.length;
   const bySrc = {}; for (const r of rows) { const k = String(r.source || '—'); bySrc[k] = (bySrc[k] || 0) + 1; }
   const byIntent = {}; for (const r of rows) { const k = String(r.buying_intent || '—'); byIntent[k] = (byIntent[k] || 0) + 1; }
-  const totalKp = rows.filter(r => (r.kp_monthly_searches || 0) > 0).length;
+  const totalKp = rows.filter(r => (toNum(r.kp_monthly_searches) || 0) > 0).length;
 
   // Sources chip row. Each source gets its own color so users can skim
   // the mix at a glance (KP blue, autosuggest amber, SERP teal, etc.).
@@ -1899,6 +1899,27 @@ function renderAnalyticsInsights(sourceRows, filteredRows) {
       </div>`;
   }
 
+  // ── Score-tier histogram ────────────────────────────────────────
+  // Groups every row by its opportunity-score tier so the user can see the
+  // shape of the batch at a glance (mostly-low vs a fat middle vs a few gems).
+  const tiers = { excellent: 0, good: 0, ok: 0, low: 0 };
+  for (const r of scored) tiers[scoreTier(r.__s).tier]++;
+  const tierMax = Math.max(tiers.excellent, tiers.good, tiers.ok, tiers.low, 1);
+  const tierColor = { excellent: 'var(--success)', good: 'var(--accent)', ok: 'var(--warn)', low: 'var(--text-3)' };
+  const tierLabel = { excellent: '≥12  ·  Excellent', good: '7–12  ·  Good', ok: '3–7  ·  OK', low: '<3  ·  Weak' };
+  const histBars = ['excellent', 'good', 'ok', 'low'].map(t => {
+    const n = tiers[t];
+    const pct = Math.round((n / tierMax) * 100);
+    return `
+      <div style="display:grid; grid-template-columns: 120px 1fr 40px; gap:8px; align-items:center; padding: 3px 0;">
+        <div style="font-size:11px; color:${tierColor[t]};">${tierLabel[t]}</div>
+        <div style="background:var(--bg-input); border-radius:3px; height:10px; overflow:hidden;">
+          <div style="height:100%; width:${pct}%; background:${tierColor[t]};"></div>
+        </div>
+        <div style="font-family:var(--mono); font-size:11px; text-align:right; color:${tierColor[t]}; font-weight:600;">${n}</div>
+      </div>`;
+  }).join('');
+
   // Render.
   el.innerHTML = `
     <div class="tiles" style="margin-bottom: 10px;">
@@ -1925,28 +1946,44 @@ function renderAnalyticsInsights(sourceRows, filteredRows) {
       ${skuCoverageBlock}
     </div>
 
+    <div class="card" style="margin-bottom: 10px; background: var(--bg-2);">
+      <div class="card-body" style="padding: 10px 14px;">
+        <div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px;">📊 Score distribution across ${total.toLocaleString()} keyword(s)</div>
+        ${histBars}
+      </div>
+    </div>
+
     <div class="two-col" style="gap: 10px;">
       <div>
         <div style="font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px;">🎯 Top 3 opportunities</div>
-        ${top.length === 0 ? '<div class="hint">No scored rows yet.</div>' : top.map((r, i) => `
-          <div style="padding: 8px 10px; border: 1px solid var(--line-1); border-radius: 6px; margin-bottom: 6px; background: var(--bg-2);">
-            <div style="display:flex; justify-content:space-between; align-items:baseline;">
-              <div style="font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(r.keyword || '')}">
-                <span style="color:var(--accent);">#${i + 1}</span>&nbsp; ${esc(r.keyword || '—')}
+        ${top.length === 0 ? '<div class="hint">No scored rows yet.</div>' : top.map((r, i) => {
+          const vol = toNum(r.kp_monthly_searches);
+          const rating = toNum(r.ad_rating);
+          const imgs = toNum(r.image_count) ?? 0;
+          const kw = String(r.keyword || '—');
+          const href = r.serp_url || `https://www.google.com/search?q=${encodeURIComponent(kw)}`;
+          const tier = scoreTier(r.__s);
+          return `
+          <div style="padding: 8px 10px; border: 1px solid var(--line-1); border-left: 3px solid ${tier.color}; border-radius: 6px; margin-bottom: 6px; background: var(--bg-2);">
+            <div style="display:flex; justify-content:space-between; align-items:baseline; gap:8px;">
+              <div style="font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1;" title="${esc(kw)}">
+                <span style="color:var(--accent);">#${i + 1}</span>&nbsp;
+                <a href="${esc(href)}" target="_blank" rel="noopener">${esc(kw)}</a>
               </div>
-              <div style="font-family: var(--mono); color:var(--success); font-weight:600;">${r.__s.toFixed(1)}</div>
+              <div style="font-family: var(--mono); color:${tier.color}; font-weight:700; font-size:14px;">${r.__s.toFixed(1)}</div>
             </div>
             <div style="font-size:11px; color:var(--text-2); margin-top:4px;">
-              ${(r.kp_monthly_searches || 0) > 0 ? `📊 ${Number(r.kp_monthly_searches).toLocaleString()} vol` : '📊 —'}
+              ${vol != null && vol > 0 ? `📊 ${vol.toLocaleString()} vol` : '📊 —'}
               &nbsp;·&nbsp;
               ${r.kp_competition ? `🎯 ${esc(r.kp_competition)} comp` : '🎯 —'}
               &nbsp;·&nbsp;
-              ⭐ ${(r.ad_rating || 0).toFixed(1)}
+              ⭐ ${rating != null ? rating.toFixed(1) : '—'}
               &nbsp;·&nbsp;
-              ${(r.image_count || 0) > 0 ? `📷 ${r.image_count}` : '📷 —'}
+              ${imgs > 0 ? `📷 ${imgs}` : '📷 —'}
               ${r.buying_intent ? `&nbsp;·&nbsp;<span class="chip ${r.buying_intent === 'high' ? 'done' : r.buying_intent === 'medium' ? 'claimed' : 'pending'}" style="font-size:10px;">${esc(r.buying_intent)}</span>` : ''}
             </div>
-          </div>`).join('')}
+          </div>`;
+        }).join('')}
       </div>
 
       <div>
@@ -1997,25 +2034,41 @@ function renderAnalyticsTopChart(rows) {
   if (top.length === 0) { el.innerHTML = `<div class="hint">No scored keywords yet.</div>`; return; }
   const maxV = Math.max(...top.map(r => r.opportunity_score || 0), 1);
   el.innerHTML = top.map(r => {
-    const kw    = esc(r.keyword || '—');
-    const score = r.opportunity_score || 0;
+    const kwRaw = String(r.keyword || '—');
+    const kw    = esc(kwRaw);
+    const score = toNum(r.opportunity_score) ?? 0;
     const pct   = Math.round((score / maxV) * 100);
-    const img   = r.image_count || 0;
-    const vol   = r.kp_monthly_searches || 0;
+    const img   = toNum(r.image_count) ?? 0;
+    const vol   = toNum(r.kp_monthly_searches);
+    const href  = r.serp_url || `https://www.google.com/search?q=${encodeURIComponent(kwRaw)}`;
+    const tier  = scoreTier(score);
     return `
       <div style="display:grid; grid-template-columns: 220px 1fr 60px 80px 50px; gap: 8px; align-items:center; padding: 4px 0; border-bottom: 1px solid var(--line-1); font-size: 12px;">
-        <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${kw}">${kw}</div>
+        <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${kw}"><a href="${esc(href)}" target="_blank" rel="noopener">${kw}</a></div>
         <div style="background: var(--bg-input); border-radius: 4px; height: 14px; overflow: hidden; position: relative;">
-          <div style="background: linear-gradient(90deg, var(--accent) 0%, var(--info) 100%); height: 100%; width: ${pct}%; transition: width 200ms;"></div>
+          <div style="background: ${tier.color}; height: 100%; width: ${pct}%; transition: width 200ms;"></div>
         </div>
-        <div style="text-align:right; font-family: var(--mono); color: var(--accent); font-weight:600;">${score.toFixed(1)}</div>
-        <div style="text-align:right; font-family: var(--mono); color: var(--text-2);">${vol > 0 ? Number(vol).toLocaleString() + ' v' : '—'}</div>
+        <div style="text-align:right; font-family: var(--mono); color: ${tier.color}; font-weight:600;">${score.toFixed(1)}</div>
+        <div style="text-align:right; font-family: var(--mono); color: var(--text-2);">${vol != null && vol > 0 ? vol.toLocaleString() + ' v' : '—'}</div>
         <div style="text-align:right; font-family: var(--mono); color: ${img > 0 ? 'var(--success)' : 'var(--text-3)'};">${img > 0 ? `📷 ${img}` : '—'}</div>
       </div>
     `;
   }).join('');
 }
 
+// Helper: robust numeric coercion — treats NaN/null/'' as null (renders as "—").
+function toNum(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+// Score→tier mapping — used for row-level left border + tile coloring.
+function scoreTier(n) {
+  if (n >= 12) return { tier: 'excellent', color: 'var(--success)' };
+  if (n >= 7)  return { tier: 'good',      color: 'var(--accent)'  };
+  if (n >= 3)  return { tier: 'ok',        color: 'var(--warn)'    };
+  return          { tier: 'low',       color: 'var(--text-3)'  };
+}
 function renderAnalyticsTable(rows) {
   const el = $('anTable');
   $('anTableCount').textContent = `${rows.length.toLocaleString()} row(s)`;
@@ -2023,12 +2076,15 @@ function renderAnalyticsTable(rows) {
     el.innerHTML = `<tr><td style="padding:16px; text-align:center; color:var(--text-3);">No keywords match the current filters.</td></tr>`;
     return;
   }
+  // Max score across the current filtered set — used to normalize the inline
+  // bar in the Score column so the top row always looks full.
+  const maxScore = Math.max(...rows.map(r => Number(r.opportunity_score) || 0), 1);
   // Column order matters — most-important SEO/Ad signals first, mapping to
   // the CSV/XLSX export layout so the dashboard mirrors what users see in
   // Excel. Score is a computed opportunity score (see opportunityScore()).
   const cols = [
     { key: 'opportunity_score',    label: 'Score',      kind: 'score', tip: 'Opportunity score — blends Volume, AdRating, image matches, Competition and buying-intent. Higher = better SEO/Ad target.' },
-    { key: 'keyword',              label: 'Keyword',    kind: 'text' },
+    { key: 'keyword',              label: 'Keyword',    kind: 'kw',    tip: 'Click to open the Google SERP for this keyword (uses stored serp_url when available).' },
     { key: 'kp_monthly_searches',  label: 'Volume',     kind: 'num',   tip: 'Google Keyword Planner monthly searches — real demand.' },
     { key: 'buying_intent',        label: 'Intent',     kind: 'chip' },
     { key: 'keyword_relevance',    label: 'Relevance',  kind: 'chip',  tip: 'Semantic fit of the keyword to the product (high / medium / low / sibling-brand).' },
@@ -2047,8 +2103,13 @@ function renderAnalyticsTable(rows) {
     <th data-sort-key="${c.key}" style="cursor:pointer;" title="${esc(c.tip || 'Click to sort')}">
       ${esc(c.label)}${analytics.sortKey === c.key ? (analytics.sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
     </th>`).join('')}</tr></thead>`;
-  const tbody = `<tbody>${rows.slice(0, 500).map(r => `
-    <tr>${cols.map(c => {
+  const tbody = `<tbody>${rows.slice(0, 500).map(r => {
+    const rowScore = Number(r.opportunity_score) || 0;
+    const rowTier  = scoreTier(rowScore);
+    // Row's left border colored by tier — instantly conveys quality at a glance.
+    const rowStyle = `border-left: 3px solid ${rowTier.color};`;
+    return `
+    <tr class="tier-${rowTier.tier}" style="${rowStyle}">${cols.map(c => {
       const v = r[c.key];
       if (c.kind === 'chip' && v) {
         // Source column uses source-specific colors; intent/relevance columns
@@ -2071,13 +2132,38 @@ function renderAnalyticsTable(rows) {
         }
         return `<td><span class="chip ${cls}">${esc(v)}</span></td>`;
       }
-      if (c.kind === 'imgs') return `<td class="num" style="color:${(v||0) > 0 ? 'var(--success)' : 'var(--text-3)'};">${v || 0}</td>`;
-      if (c.kind === 'rating') return `<td class="num" style="color:${(v||0) >= 7 ? 'var(--success)' : (v||0) >= 4 ? 'var(--warn)' : 'var(--text-3)'};">${v != null ? Number(v).toFixed(1) : '—'}</td>`;
+      if (c.kind === 'imgs') {
+        const n = toNum(v);
+        return `<td class="num" style="color:${(n||0) > 0 ? 'var(--success)' : 'var(--text-3)'};">${n ?? 0}</td>`;
+      }
+      if (c.kind === 'rating') {
+        const n = toNum(v);
+        if (n == null) return `<td class="num" style="color:var(--text-3);">—</td>`;
+        const color = n >= 7 ? 'var(--success)' : n >= 4 ? 'var(--warn)' : 'var(--text-3)';
+        return `<td class="num" style="color:${color};">${n.toFixed(1)}</td>`;
+      }
       if (c.kind === 'score') {
-        const n = Number(v) || 0;
-        // Bold + colored score so it's obvious this is THE ranking column.
-        const color = n >= 12 ? 'var(--success)' : n >= 7 ? 'var(--accent)' : n >= 3 ? 'var(--warn)' : 'var(--text-3)';
-        return `<td class="num" style="color:${color}; font-weight:600;">${n.toFixed(1)}</td>`;
+        const n = toNum(v) ?? 0;
+        // Inline mini-bar makes the ranking visible at a glance without users
+        // having to read the number — the top row is always full, others scale.
+        const pct = Math.round((n / maxScore) * 100);
+        return `<td class="num" style="min-width: 96px;">
+          <div style="display:flex; align-items:center; gap:6px;">
+            <div style="flex:1; background: var(--bg-input); border-radius: 3px; height: 8px; overflow:hidden;">
+              <div style="height:100%; width:${pct}%; background: ${rowTier.color}; transition: width 200ms;"></div>
+            </div>
+            <span style="color:${rowTier.color}; font-weight:600; min-width: 30px; text-align:right;">${n.toFixed(1)}</span>
+          </div>
+        </td>`;
+      }
+      if (c.kind === 'kw') {
+        // Keyword cell: click to open Google SERP for that keyword — quick
+        // spot-check when reviewing data. Uses stored serp_url if present.
+        const kw = String(v || '—');
+        const href = r.serp_url || `https://www.google.com/search?q=${encodeURIComponent(kw)}`;
+        return `<td style="max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(kw)} — click to open SERP">
+          <a href="${esc(href)}" target="_blank" rel="noopener" style="color: var(--text-1); text-decoration:none;">${esc(kw)}</a>
+        </td>`;
       }
       if (c.kind === 'comp') {
         const s = String(v || '').toLowerCase();
@@ -2086,13 +2172,13 @@ function renderAnalyticsTable(rows) {
         return `<td style="color:${color};">${esc(v)}</td>`;
       }
       if (c.kind === 'money') {
-        const n = Number(v);
-        if (!Number.isFinite(n) || n === 0) return `<td class="num" style="color:var(--text-3);">—</td>`;
+        const n = toNum(v);
+        if (n == null || n === 0) return `<td class="num" style="color:var(--text-3);">—</td>`;
         return `<td class="num">₹${n.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>`;
       }
       if (c.kind === 'pct') {
-        const n = Number(v);
-        if (!Number.isFinite(n) || n === 0) return `<td class="num" style="color:var(--text-3);">—</td>`;
+        const n = toNum(v);
+        if (n == null || n === 0) return `<td class="num" style="color:var(--text-3);">—</td>`;
         const color = n >= 50 ? 'var(--success)' : n >= 20 ? 'var(--warn)' : 'var(--text-2)';
         return `<td class="num" style="color:${color};">${n.toFixed(0)}%</td>`;
       }
@@ -2100,10 +2186,13 @@ function renderAnalyticsTable(rows) {
         const yes = String(v || '').toLowerCase() === 'yes' || v === true || v === 1;
         return yes ? `<td class="num" style="color:var(--success);">✓</td>` : `<td class="num" style="color:var(--text-3);">·</td>`;
       }
-      if (c.kind === 'num') return `<td class="num">${v != null && v !== '' ? Number(v).toLocaleString() : '—'}</td>`;
+      if (c.kind === 'num') {
+        const n = toNum(v);
+        return `<td class="num">${n != null ? n.toLocaleString() : '<span style="color:var(--text-3);">—</span>'}</td>`;
+      }
       return `<td style="max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(v)}">${esc(v == null ? '—' : v)}</td>`;
-    }).join('')}</tr>
-  `).join('')}${rows.length > 500 ? `<tr><td colspan="${cols.length}" style="text-align:center; color:var(--text-3);">…and ${rows.length - 500} more — narrow the filters to see them.</td></tr>` : ''}</tbody>`;
+    }).join('')}</tr>`;
+  }).join('')}${rows.length > 500 ? `<tr><td colspan="${cols.length}" style="text-align:center; color:var(--text-3);">…and ${rows.length - 500} more — narrow the filters to see them.</td></tr>` : ''}</tbody>`;
   el.innerHTML = thead + tbody;
   // Wire header click → sort toggle.
   el.querySelectorAll('th[data-sort-key]').forEach(th => {

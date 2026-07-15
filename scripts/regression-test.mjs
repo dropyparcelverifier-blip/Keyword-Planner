@@ -1034,6 +1034,17 @@ async function run() {
   assert(posOf("'visibility_pct'") > 0,                            '20s.9 visibility_pct column added');
   assert(posOf("'dropy_is_seller'") > 0,                           '20s.10 dropy_is_seller column added');
 
+  // Visual/data polish.
+  assert(appJs.body.includes('function toNum'),                   '20s.15 toNum() defined — NaN-safe numeric coercion');
+  assert(appJs.body.includes('function scoreTier'),               '20s.16 scoreTier() defined — score→visual tier map');
+  assert(appJs.body.includes('class="tier-${rowTier.tier}'), '20s.17 rows tagged with tier class for CSS');
+  assert(appJs.body.includes("kind: 'kw'"),                       '20s.18 keyword column uses clickable kw kind');
+  assert(appJs.body.includes('google.com/search?q='),             '20s.19 keyword cells open Google SERP');
+  assert(appJs.body.includes('Score distribution across'),        '20s.20 insights card has score-distribution histogram');
+  const cssBody = readFileSync(resolve(REPO, 'manager/public/styles.css'), 'utf-8');
+  assert(cssBody.includes('.tier-excellent'),                     '20s.21 CSS styles tier-excellent rows');
+  assert(cssBody.includes('.tbl a'),                              '20s.22 CSS styles table links for clickable keywords');
+
   // Discovery engine: caps raised so per-SKU output hits 100-300.
   const kdSrcCaps = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
   assert(/MAX_KP_SEEDS\s*=\s*5\b/.test(kdSrcCaps),          '20s.11 MAX_KP_SEEDS raised to 5');
