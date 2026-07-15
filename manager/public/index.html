@@ -561,45 +561,52 @@
 
     <!-- ================= CONFIG ================= -->
     <section class="panel" id="panel-config">
-      <div class="card collapsible">
-        <div class="card-head">
-          <span class="card-icon">📌</span>
-          <span class="card-title">Pin active batch</span>
-        </div>
-        <div class="card-body">
-          <div class="hint">Force every armed worker to switch to this batch within ~30s. Leave blank to unpin (workers pick the newest pending batch automatically).</div>
-          <div class="row" style="margin-top: 10px;">
-            <select id="pinBatchSelect" style="min-width: 260px;"></select>
-            <button id="pinBatchBtn">Pin</button>
-            <button class="secondary" id="unpinBatchBtn">Unpin</button>
+      <div class="an-layer">
+        <div class="an-layer-head">Batches</div>
+        <div class="two-col">
+          <div class="card collapsible">
+            <div class="card-head">
+              <span class="card-icon">📌</span>
+              <span class="card-title">Pin active batch</span>
+            </div>
+            <div class="card-body">
+              <div class="hint">Force every armed worker to switch to this batch within ~30s. Leave blank to unpin.</div>
+              <div class="row" style="margin-top: 10px;">
+                <select id="pinBatchSelect" style="min-width: 220px;"></select>
+                <button id="pinBatchBtn">Pin</button>
+                <button class="secondary" id="unpinBatchBtn">Unpin</button>
+              </div>
+              <div id="pinBatchResult"></div>
+            </div>
           </div>
-          <div id="pinBatchResult"></div>
+
+          <div class="card collapsible">
+            <div class="card-head">
+              <span class="card-icon">🏷️</span>
+              <span class="card-title">Name a batch</span>
+              <span class="card-sub">human-readable labels</span>
+            </div>
+            <div class="card-body">
+              <div class="hint">Names appear alongside batch_id in every dropdown. Blank + Save removes a name.</div>
+              <div class="row" style="margin-top: 10px; align-items: flex-end;">
+                <label class="field" style="flex: 1;">
+                  <span class="lbl">Batch</span>
+                  <select id="renameBatchSelect" style="width: 100%;"></select>
+                </label>
+                <label class="field" style="flex: 2;">
+                  <span class="lbl">Display name</span>
+                  <input type="text" id="renameBatchName" maxlength="80" placeholder="e.g. Aquaphor Round 3" />
+                </label>
+                <button id="renameBatchBtn">Save</button>
+              </div>
+              <div id="renameBatchResult"></div>
+            </div>
+          </div>
         </div>
       </div>
 
-      <div class="card collapsible">
-        <div class="card-head">
-          <span class="card-icon">🏷️</span>
-          <span class="card-title">Name a batch</span>
-          <span class="card-sub">give batches human-readable labels (e.g. "Aquaphor Round 3")</span>
-        </div>
-        <div class="card-body">
-          <div class="hint">Names appear alongside the batch_id in every dropdown across the app. Leave the input blank + Save to remove a name.</div>
-          <div class="row" style="margin-top: 10px; align-items: flex-end;">
-            <label class="field" style="flex: 1;">
-              <span class="lbl">Batch</span>
-              <select id="renameBatchSelect" style="width: 100%;"></select>
-            </label>
-            <label class="field" style="flex: 2;">
-              <span class="lbl">Display name</span>
-              <input type="text" id="renameBatchName" maxlength="80" placeholder="e.g. Aquaphor Round 3" />
-            </label>
-            <button id="renameBatchBtn">Save name</button>
-          </div>
-          <div id="renameBatchResult"></div>
-        </div>
-      </div>
-
+      <div class="an-layer">
+        <div class="an-layer-head">Worker pipeline</div>
       <div class="card collapsible">
         <div class="card-head">
           <span class="card-icon">🎯</span>
@@ -641,118 +648,132 @@
           <div id="saveConfigResult"></div>
         </div>
       </div>
+      </div>
 
-      <div class="card collapsible collapsed">
-        <div class="card-head">
-          <span class="card-icon">🗑</span>
-          <span class="card-title">Delete a batch</span>
-          <span class="card-sub">jobs + keywords + activity for one batch_id</span>
-        </div>
-        <div class="card-body">
-          <div class="hint">Wipes every job, keyword row, and activity-log entry for a specific batch. Worker config + KP URL untouched. Cannot be undone.</div>
-          <div class="row" style="margin-top: 10px;">
-            <select id="deleteBatchSelect" style="min-width: 260px;"></select>
-            <button class="danger" id="deleteBatchBtn">Delete this batch</button>
+      <div class="an-layer">
+        <div class="an-layer-head">Maintenance</div>
+        <div class="two-col">
+          <div class="card collapsible">
+            <div class="card-head">
+              <span class="card-icon">🧽</span>
+              <span class="card-title">Clean orphan keyword rows</span>
+              <span class="card-sub" id="orphanCountSub">—</span>
+            </div>
+            <div class="card-body">
+              <div class="hint">Orphans = keyword rows whose <code>batch_id</code> no longer has any jobs (usually from a reset while workers were still pushing).</div>
+              <div class="row" style="margin-top: 10px;">
+                <button id="cleanupOrphansBtn" class="danger" disabled>Clean orphan keywords</button>
+                <button id="refreshOrphansBtn" class="secondary">Recount</button>
+              </div>
+              <div id="cleanupOrphansResult"></div>
+            </div>
           </div>
-          <div id="deleteBatchResult"></div>
+
+          <div class="card collapsible">
+            <div class="card-head">
+              <span class="card-icon">⏸</span>
+              <span class="card-title">Quiesce workers</span>
+              <span class="card-sub" id="quiesceSub">click to check</span>
+            </div>
+            <div class="card-body">
+              <div class="hint">Broadcasts <strong>pause</strong> to every worker. Each finishes its current SKU, pushes results, stops claiming. Safe to reset once counts hit zero.</div>
+              <div class="row" style="margin-top: 10px;">
+                <button id="quiesceBtn" class="secondary">Quiesce all workers</button>
+                <button id="quiesceRefreshBtn" class="secondary">Refresh status</button>
+              </div>
+              <div id="quiesceStatus" style="margin-top: 10px;"></div>
+            </div>
+          </div>
+
+          <div class="card collapsible">
+            <div class="card-head">
+              <span class="card-icon">💾</span>
+              <span class="card-title">Database backups</span>
+              <span class="card-sub" id="backupsSub">—</span>
+            </div>
+            <div class="card-body">
+              <div class="hint">SQLite <code>VACUUM INTO</code> snapshots. Auto-runs on startup + every 24h. Keeps newest 7 (older auto-pruned). Env: <code>BACKUP_KEEP_N</code>, <code>BACKUP_DIR</code>.</div>
+              <div class="row" style="margin-top: 10px;">
+                <button id="backupNowBtn">Backup now</button>
+                <button id="backupsRefreshBtn" class="secondary">Refresh list</button>
+              </div>
+              <div id="backupsList" style="margin-top: 10px; max-height: 200px; overflow: auto;"></div>
+              <div id="backupResult"></div>
+            </div>
+          </div>
+
+          <div class="card collapsible collapsed">
+            <div class="card-head">
+              <span class="card-icon">🧹</span>
+              <span class="card-title">Cleanup old data</span>
+            </div>
+            <div class="card-body">
+              <div class="hint">Retention purge — activity + acked commands older than cutoff are deleted. Jobs + keywords kept.</div>
+              <div class="grid-2" style="margin-top: 10px;">
+                <label class="field">
+                  <span class="lbl">Activity log — keep N days</span>
+                  <input type="number" id="cleanupLogDays" min="0" max="90" value="7" />
+                </label>
+                <label class="field">
+                  <span class="lbl">Acked commands — keep N days</span>
+                  <input type="number" id="cleanupCommandsDays" min="0" max="30" value="1" />
+                </label>
+              </div>
+              <div class="row">
+                <button class="danger" id="cleanupBtn">Run cleanup</button>
+              </div>
+              <div id="cleanupResult"></div>
+            </div>
+          </div>
         </div>
       </div>
 
-      <div class="card collapsible collapsed" style="border-color: var(--danger);">
-        <div class="card-head" style="background: var(--danger-soft);">
-          <span class="card-icon">💥</span>
-          <span class="card-title" style="color: var(--danger);">Reset everything (danger zone)</span>
-          <span class="card-sub">deletes ALL batches + keywords + activity + commands</span>
-        </div>
-        <div class="card-body">
-          <div class="hint">Nukes every batch, every keyword row, every activity-log entry, and every worker command. <strong>Worker config (KP URL, token, pacing, etc.) is preserved.</strong> Cannot be undone.</div>
-          <div class="row" style="margin-top: 10px; align-items: center;">
-            <label style="flex: 1; font-size: 12px; color: var(--text-2);">
-              Type <code style="color: var(--danger);">RESET</code> to enable the button:
-              <input type="text" id="resetConfirmInput" placeholder="RESET" style="margin-top: 4px;" autocomplete="off" />
-            </label>
-            <button class="danger" id="resetAllBtn" disabled>Reset everything</button>
+      <div class="an-layer">
+        <div class="an-layer-head" style="color: var(--danger);">Danger zone</div>
+        <div class="two-col">
+          <div class="card collapsible collapsed">
+            <div class="card-head">
+              <span class="card-icon">🗑</span>
+              <span class="card-title">Delete a batch</span>
+              <span class="card-sub">jobs + keywords + activity</span>
+            </div>
+            <div class="card-body">
+              <div class="hint">Wipes every job, keyword row, and activity-log entry for a specific batch. Worker config untouched. Cannot be undone.</div>
+              <div class="row" style="margin-top: 10px;">
+                <select id="deleteBatchSelect" style="min-width: 220px;"></select>
+                <button class="danger" id="deleteBatchBtn">Delete this batch</button>
+              </div>
+              <div id="deleteBatchResult"></div>
+            </div>
           </div>
-          <div id="resetAllResult"></div>
-        </div>
-      </div>
 
-      <div class="card collapsible">
-        <div class="card-head">
-          <span class="card-icon">🧽</span>
-          <span class="card-title">Clean orphan keyword rows</span>
-          <span class="card-sub" id="orphanCountSub">—</span>
-        </div>
-        <div class="card-body">
-          <div class="hint">Orphans are keyword rows whose <code>batch_id</code> no longer has any jobs — typically because a reset ran while workers were still pushing results. They're still viewable/downloadable via the Analytics + Downloads tabs but can safely be cleaned once you've grabbed what you need.</div>
-          <div class="row" style="margin-top: 10px;">
-            <button id="cleanupOrphansBtn" class="danger" disabled>🧽 Clean orphan keywords</button>
-            <button id="refreshOrphansBtn" class="secondary">Recount</button>
+          <div class="card collapsible collapsed" style="border-color: var(--danger);">
+            <div class="card-head">
+              <span class="card-icon">💥</span>
+              <span class="card-title" style="color: var(--danger);">Reset everything</span>
+              <span class="card-sub">wipes ALL batches</span>
+            </div>
+            <div class="card-body">
+              <div class="hint">Nukes every batch, keyword, activity entry, and command. <strong>Worker config preserved.</strong> Cannot be undone.</div>
+              <div class="row" style="margin-top: 10px; align-items: center;">
+                <label style="flex: 1; font-size: 12px; color: var(--text-2);">
+                  Type <code style="color: var(--danger);">RESET</code> to enable:
+                  <input type="text" id="resetConfirmInput" placeholder="RESET" style="margin-top: 4px;" autocomplete="off" />
+                </label>
+                <button class="danger" id="resetAllBtn" disabled>Reset everything</button>
+              </div>
+              <div id="resetAllResult"></div>
+            </div>
           </div>
-          <div id="cleanupOrphansResult"></div>
-        </div>
-      </div>
-
-      <div class="card collapsible">
-        <div class="card-head">
-          <span class="card-icon">⏸</span>
-          <span class="card-title">Quiesce workers</span>
-          <span class="card-sub" id="quiesceSub">click to check</span>
-        </div>
-        <div class="card-body">
-          <div class="hint">Broadcasts <strong>pause</strong> to every worker. Each worker finishes its current SKU (5-15 min), pushes results, and stops claiming. Once counts hit zero, it's safe to reset or shut down without creating orphan keyword rows.</div>
-          <div class="row" style="margin-top: 10px;">
-            <button id="quiesceBtn" class="secondary">⏸ Quiesce all workers</button>
-            <button id="quiesceRefreshBtn" class="secondary">Refresh status</button>
-          </div>
-          <div id="quiesceStatus" style="margin-top: 10px;"></div>
-        </div>
-      </div>
-
-      <div class="card collapsible">
-        <div class="card-head">
-          <span class="card-icon">💾</span>
-          <span class="card-title">Database backups</span>
-          <span class="card-sub" id="backupsSub">—</span>
-        </div>
-        <div class="card-body">
-          <div class="hint">SQLite <code>VACUUM INTO</code> snapshots — consistent even while the manager is running. Auto-runs on manager startup + every 24 hours. Keeps the newest 7 backups (older ones auto-pruned). Set <code>BACKUP_KEEP_N=0</code> env var to disable auto-backup; <code>BACKUP_DIR</code> to change the location.</div>
-          <div class="row" style="margin-top: 10px;">
-            <button id="backupNowBtn">💾 Backup now</button>
-            <button id="backupsRefreshBtn" class="secondary">Refresh list</button>
-          </div>
-          <div id="backupsList" style="margin-top: 10px; max-height: 220px; overflow: auto;"></div>
-          <div id="backupResult"></div>
-        </div>
-      </div>
-
-      <div class="card collapsible collapsed">
-        <div class="card-head">
-          <span class="card-icon">🧹</span>
-          <span class="card-title">Cleanup old data</span>
-        </div>
-        <div class="card-body">
-          <div class="hint">Retention purge — activity log rows and acknowledged commands older than the cutoff are deleted. Jobs and keyword results are kept.</div>
-          <div class="grid-2" style="margin-top: 10px;">
-            <label class="field">
-              <span class="lbl">Activity log — keep last N days</span>
-              <input type="number" id="cleanupLogDays" min="0" max="90" value="7" />
-            </label>
-            <label class="field">
-              <span class="lbl">Acked commands — keep last N days</span>
-              <input type="number" id="cleanupCommandsDays" min="0" max="30" value="1" />
-            </label>
-          </div>
-          <div class="row">
-            <button class="danger" id="cleanupBtn">Run cleanup</button>
-          </div>
-          <div id="cleanupResult"></div>
         </div>
       </div>
     </section>
 
     <!-- ================= WORKERS ================= -->
     <section class="panel" id="panel-workers">
+      <div class="an-layer">
+        <div class="an-layer-head">Add a new worker</div>
+        <div class="two-col">
       <div class="card">
         <div class="card-head">
           <span class="card-icon">📥</span>
@@ -800,6 +821,12 @@
         </div>
       </div>
 
+        </div>
+      </div>
+
+      <div class="an-layer">
+        <div class="an-layer-head">Connect + manage workers</div>
+        <div class="two-col">
       <div class="card">
         <div class="card-head">
           <span class="card-icon">🔗</span>
@@ -844,6 +871,8 @@
             <button id="sendCmdBtn">Send</button>
           </div>
           <div id="sendCmdResult"></div>
+        </div>
+      </div>
         </div>
       </div>
     </section>
