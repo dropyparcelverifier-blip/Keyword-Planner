@@ -62,6 +62,7 @@ export const api = {
   failedJobs:        (batchId)         => _fetch(`/api/jobs/failed${batchId ? `?batchId=${encodeURIComponent(batchId)}` : ''}`),
   requeueAllFailed:  (batchId)         => _fetch('/api/jobs/requeue-all-failed', { method: 'POST', body: { batchId: batchId || '' } }),
   keywordsTimeline:  (batchId)         => _fetch(`/api/keywords/timeline${batchId ? `?batchId=${encodeURIComponent(batchId)}` : ''}`),
+  keywordsBatches:   ()                => _fetch('/api/keywords/batches'),
 };
 
 // Live keyword stats — mirrors the extension's dashboard fetchBatchKeywordStats.

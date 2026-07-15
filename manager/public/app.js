@@ -679,7 +679,7 @@ function stopDashPolling() {
 
 async function refreshDashboard() {
   try {
-    const [summary, workers, roster, activity, failed, timeline, errors] = await Promise.all([
+    const [summary, workers, roster, activity, failed, timeline, errors, kwBatches] = await Promise.all([
       api.jobsSummary(),
       api.jobsWorkerStats(),
       api.workersList().catch(() => ({ workers: [] })),
@@ -687,7 +687,9 @@ async function refreshDashboard() {
       api.failedJobs(state.activeBatch).catch(() => ({ rows: [] })),
       api.keywordsTimeline(state.activeBatch).catch(() => ({ buckets: [] })),
       api.activityErrors(state.activeBatch, 60).catch(() => ({ events: [] })),
+      api.keywordsBatches().catch(() => ({ batches: [] })),
     ]);
+    state.keywordBatches = kwBatches.batches || [];
     // Merge fleet: workers with jobs history (workers.workers) + workers
     // that only heartbeat but haven't claimed yet (roster.workers). The
     // roster ensures armed-idle workers are visible in the fleet — they
@@ -766,13 +768,32 @@ async function refreshDashboard() {
 }
 
 function populateBatchSelects() {
-  // Populate dashboard + config + downloads selects with current batches.
-  const opts = state.batches.map(b => `<option value="${esc(b.batch_id)}">${esc(b.batch_id)} — ${b.total} SKUs</option>`).join('');
-  for (const id of ['dashBatchSelect', 'pinBatchSelect', 'downloadBatchSelect', 'anBatchSelect', 'deleteBatchSelect']) {
+  // Batches with jobs (from summary).
+  const jobsBatchIds = new Set(state.batches.map(b => b.batch_id));
+  const jobsOpts = state.batches.map(b => `<option value="${esc(b.batch_id)}">${esc(b.batch_id)} — ${b.total} SKUs</option>`).join('');
+  // Batches that ONLY have keyword rows (orphans — jobs got wiped by reset
+  // while workers were still pushing results from their local state). Users
+  // still need to view/download these, so include them in the picker with
+  // a clear label.
+  const orphanOpts = (state.keywordBatches || [])
+    .filter(b => !jobsBatchIds.has(b.batch_id))
+    .map(b => `<option value="${esc(b.batch_id)}">${esc(b.batch_id)} — ${b.row_count} kw (orphan)</option>`)
+    .join('');
+  const allOpts = jobsOpts + orphanOpts;
+  // The delete/pin selects are for BATCHES WITH JOBS ONLY (you can't
+  // meaningfully pin an orphan batch — no work to hand to workers).
+  for (const id of ['dashBatchSelect', 'downloadBatchSelect', 'anBatchSelect']) {
     const el = $(id);
     if (!el) continue;
     const cur = el.value;
-    el.innerHTML = `<option value="">— none —</option>${opts}`;
+    el.innerHTML = `<option value="">— none —</option>${allOpts}`;
+    if (cur && Array.from(el.options).some(o => o.value === cur)) el.value = cur;
+  }
+  for (const id of ['pinBatchSelect', 'deleteBatchSelect']) {
+    const el = $(id);
+    if (!el) continue;
+    const cur = el.value;
+    el.innerHTML = `<option value="">— none —</option>${jobsOpts}`;
     if (cur && Array.from(el.options).some(o => o.value === cur)) el.value = cur;
   }
 }
@@ -1250,8 +1271,12 @@ async function refreshDownloadsTab() {
   const body = $('downloadListBody');
   const sub = $('downloadListSub');
   try {
-    const s = await api.jobsSummary();
+    const [s, kwB] = await Promise.all([
+      api.jobsSummary(),
+      api.keywordsBatches().catch(() => ({ batches: [] })),
+    ]);
     state.batches = s.batches || [];
+    state.keywordBatches = kwB.batches || [];
     populateBatchSelects();
     // Auto-select the only batch when there's exactly one, same as Analytics.
     const dSel = $('downloadBatchSelect');
@@ -1267,8 +1292,12 @@ async function refreshDownloadsTab() {
       </div>`;
       return;
     }
-    sub.textContent = `${state.batches.length}`;
-    body.innerHTML = state.batches.map(b => {
+    // Merge: batches with jobs + orphan batches (keywords only, no jobs).
+    const jobsIds = new Set(state.batches.map(b => b.batch_id));
+    const orphans = (state.keywordBatches || []).filter(b => !jobsIds.has(b.batch_id));
+    const totalListed = state.batches.length + orphans.length;
+    sub.textContent = `${totalListed}${orphans.length > 0 ? ` (${orphans.length} orphan)` : ''}`;
+    const jobBatchRows = state.batches.map(b => {
       const pct = b.total ? Math.round((b.done / b.total) * 100) : 0;
       return `
         <div style="padding: 8px 0; border-bottom: 1px solid var(--line-1); display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;">
@@ -1281,6 +1310,16 @@ async function refreshDownloadsTab() {
           <button class="small" data-download-batch="${esc(b.batch_id)}" title="Download all CSVs for this batch">📥 Download</button>
         </div>`;
     }).join('');
+    const orphanRows = orphans.map(b => `
+        <div style="padding: 8px 0; border-bottom: 1px solid var(--line-1); display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;" title="Orphan — keyword rows exist but the batch's jobs were wiped (usually by a reset while workers were still pushing).">
+          <div>
+            <div class="mono" style="font-size: 11px; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(b.batch_id)} <span style="color: var(--warn); font-size: 10px;">ORPHAN</span></div>
+            <div style="font-size: 10px; color: var(--text-3); margin-top: 2px;">${b.row_count.toLocaleString()} keyword rows · no jobs</div>
+          </div>
+          <div style="font-size: 11px; color: var(--text-3); font-family: var(--mono);">—</div>
+          <button class="small" data-download-batch="${esc(b.batch_id)}" title="Download the orphan keyword rows for this batch">📥 Download</button>
+        </div>`).join('');
+    body.innerHTML = jobBatchRows + orphanRows;
     body.querySelectorAll('button[data-download-batch]').forEach(btn => {
       btn.addEventListener('click', async () => {
         $('downloadBatchSelect').value = btn.dataset.downloadBatch;
@@ -1356,10 +1395,14 @@ const analytics = {
 };
 
 async function refreshAnalyticsTab() {
-  // Populate batch dropdown from current summary.
+  // Populate batch dropdown from current summary + orphan keyword batches.
   try {
-    const s = await api.jobsSummary();
+    const [s, kwB] = await Promise.all([
+      api.jobsSummary(),
+      api.keywordsBatches().catch(() => ({ batches: [] })),
+    ]);
     state.batches = s.batches || [];
+    state.keywordBatches = kwB.batches || [];
     populateBatchSelects();
     if (analytics.batchId && $('anBatchSelect')) $('anBatchSelect').value = analytics.batchId;
     // Auto-select: if there's exactly one batch and none is chosen yet,
