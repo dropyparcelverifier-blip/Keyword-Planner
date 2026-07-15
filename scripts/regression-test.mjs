@@ -915,6 +915,47 @@ async function run() {
   assert(appJs.body.includes('refreshBackupsList'),   '20o.15 backups refresher defined');
   assert(appJs.body.includes('quiescePollTimer'),     '20o.16 quiesce polls status every 3s');
 
+  // ===== 20p. WAKE-ON-LAN =====
+  // Heartbeat with MAC should store it
+  await req('POST', '/api/workers/heartbeat', { workerId: 'PC-WOL-TEST', mac: 'aa:bb:cc:dd:ee:ff', hostname: 'DESKTOP-WOL' });
+  const roster = await req('GET', '/api/workers/list');
+  const wolTest = (roster.data.workers || []).find(w => w.worker_id === 'PC-WOL-TEST');
+  assert(wolTest, '20p.1 heartbeat with MAC upserts worker');
+  assert(wolTest?.mac_address, '20p.2 MAC persisted in workers table');
+  assertEq(wolTest?.hostname, 'DESKTOP-WOL', '20p.3 hostname persisted');
+
+  // set-mac endpoint validates
+  const badMac = await req('POST', '/api/workers/set-mac', { workerId: 'PC-WOL-TEST', mac: 'garbage' });
+  assertEq(badMac.status, 400, '20p.4 invalid MAC rejected');
+  const goodMac = await req('POST', '/api/workers/set-mac', { workerId: 'PC-WOL-TEST', mac: '11:22:33:44:55:66' });
+  assertEq(goodMac.status, 200, '20p.5 valid MAC accepted');
+  assert(goodMac.data.mac === '112233445566', '20p.6 MAC normalized (colons stripped)');
+
+  // WOL endpoint
+  const wolNoMac = await req('POST', '/api/workers/wol', { workerId: 'PC-NO-MAC' });
+  assertEq(wolNoMac.status, 400, '20p.7 WOL rejects unknown worker without MAC');
+  const wol = await req('POST', '/api/workers/wol', { workerId: 'PC-WOL-TEST' });
+  assertEq(wol.status, 200, '20p.8 WOL sends magic packet when MAC known');
+  const wolExplicit = await req('POST', '/api/workers/wol', { mac: 'AA-BB-CC-DD-EE-FF' });
+  assertEq(wolExplicit.status, 200, '20p.9 WOL accepts explicit MAC (dash-separated normalized)');
+  const wolBadFormat = await req('POST', '/api/workers/wol', { mac: 'not-a-mac' });
+  assertEq(wolBadFormat.status, 400, '20p.10 WOL rejects malformed MAC');
+
+  // Installer captures MAC
+  assert(ps.body.includes('Get-NetAdapter'), '20p.11 installer reads primary NIC via Get-NetAdapter');
+  assert(ps.body.includes('mac          = $primaryMac'), '20p.12 installer bakes MAC into worker-config.json');
+
+  // Worker code path
+  const bgSrcP = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
+  assert(bgSrcP.includes('adbrainWorkerMac'),        '20p.13 worker stores MAC from cold-start config');
+  assert(bgSrcP.includes('adbrainWorkerHostname'),   '20p.14 worker stores hostname from cold-start config');
+  assert(bgSrcP.includes("mac: d.adbrainWorkerMac"), '20p.15 heartbeat call includes stored MAC');
+
+  // UI wiring
+  assert(appJs.body.includes('data-wol="1"'),        '20p.16 fleet grid has WOL button');
+  assert(appJs.body.includes('api.wakeOnLan'),       '20p.17 WOL button wired to endpoint');
+  assert(appJs.body.includes('api.setWorkerMac'),    '20p.18 UI can set MAC when unknown');
+
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
   const [s1, w1, a1] = await Promise.all([

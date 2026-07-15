@@ -68,6 +68,8 @@ export const api = {
   quiesceWorkers:    ()                => _fetch('/api/workers/quiesce', { method: 'POST', body: {} }),
   backupsList:       ()                => _fetch('/api/backups/list'),
   backupNow:         ()                => _fetch('/api/backups/create', { method: 'POST', body: {} }),
+  wakeOnLan:         (workerId, mac)   => _fetch('/api/workers/wol', { method: 'POST', body: { workerId, mac } }),
+  setWorkerMac:      (workerId, mac)   => _fetch('/api/workers/set-mac', { method: 'POST', body: { workerId, mac } }),
 };
 
 // Live keyword stats — mirrors the extension's dashboard fetchBatchKeywordStats.
