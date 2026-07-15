@@ -416,7 +416,7 @@ document.querySelectorAll('.tab').forEach(btn => {
     else stopDashPolling();
     if (btn.dataset.tab === 'upload') refreshUploadSidebar();
     if (btn.dataset.tab === 'analytics') refreshAnalyticsTab();
-    if (btn.dataset.tab === 'config') { loadConfigForm(); refreshOrphanCount(); }
+    if (btn.dataset.tab === 'config') { loadConfigForm(); refreshOrphanCount(); refreshBackupsList(); refreshQuiesceStatus(); }
     if (btn.dataset.tab === 'workers') refreshWorkersTab();
     if (btn.dataset.tab === 'downloads') refreshDownloadsTab();
   });
@@ -1245,6 +1245,86 @@ $('cleanupOrphansBtn')?.addEventListener('click', async () => {
     toast(e.message, 'err', { title: 'Cleanup failed' });
   }
 });
+// ─────────── Quiesce workers ───────────
+// Broadcasts pause + polls status every 3s while the poller is active.
+// Poller auto-stops when active-workers + claimed-now both hit 0.
+let quiescePollTimer = null;
+async function refreshQuiesceStatus() {
+  const sub = $('quiesceSub');
+  const status = $('quiesceStatus');
+  if (!sub || !status) return;
+  try {
+    // Reuses the /api/keywords/orphans endpoint which conveniently reports
+    // activeWorkers + claimedNow — no separate endpoint needed.
+    const r = await api.keywordsOrphans();
+    const quiet = r.activeWorkers === 0 && r.claimedNow === 0;
+    if (quiet) {
+      sub.textContent = 'quiet — safe to reset';
+      sub.style.color = 'var(--success)';
+      status.innerHTML = `<div class="banner ok">✓ No active workers, no in-flight jobs. Safe to reset or shut down without creating orphan keyword rows.</div>`;
+      if (quiescePollTimer) { clearInterval(quiescePollTimer); quiescePollTimer = null; }
+    } else {
+      sub.textContent = `${r.activeWorkers} worker(s), ${r.claimedNow} in-flight`;
+      sub.style.color = 'var(--warn)';
+      status.innerHTML = `<div class="banner warn">
+        <strong>Not yet quiet:</strong> ${r.activeWorkers} worker(s) online, ${r.claimedNow} job(s) currently claimed.
+        ${quiescePollTimer ? '<br><small>Waiting for workers to finish current SKU… (polling every 3s)</small>' : ''}
+      </div>`;
+    }
+  } catch (e) { sub.textContent = 'error'; sub.style.color = 'var(--danger)'; }
+}
+$('quiesceRefreshBtn')?.addEventListener('click', refreshQuiesceStatus);
+$('quiesceBtn')?.addEventListener('click', async () => {
+  if (!confirm('Send Pause to all workers? Each worker will finish its current SKU, push results, and stop claiming. This is safe (no data loss).')) return;
+  try {
+    const r = await api.quiesceWorkers();
+    toast(`Pause sent to workers. Active=${r.activeWorkers}, in-flight=${r.claimedNow}. Polling status every 3s.`, 'info', { title: 'Quiescing…' });
+    if (quiescePollTimer) clearInterval(quiescePollTimer);
+    quiescePollTimer = setInterval(refreshQuiesceStatus, 3000);
+    refreshQuiesceStatus();
+  } catch (e) { toast(e.message, 'err', { title: 'Quiesce failed' }); }
+});
+
+// ─────────── Backups ───────────
+async function refreshBackupsList() {
+  const list = $('backupsList');
+  const sub = $('backupsSub');
+  if (!list || !sub) return;
+  try {
+    const r = await api.backupsList();
+    const backups = r.backups || [];
+    const totalBytes = backups.reduce((a, b) => a + (b.size || 0), 0);
+    sub.textContent = `${backups.length} backup(s) · ${(totalBytes / 1024 / 1024).toFixed(1)} MB · keeping ${r.keepN}`;
+    if (backups.length === 0) {
+      list.innerHTML = `<div class="empty" style="padding: 12px 8px;">No backups yet.</div>`;
+      return;
+    }
+    list.innerHTML = `<table class="tbl">
+      <thead><tr><th>File</th><th>When</th><th class="num">Size</th></tr></thead>
+      <tbody>${backups.map(b => `
+        <tr>
+          <td class="mono" style="font-size: 11px;" title="${esc(b.path)}">${esc(b.name)}</td>
+          <td>${fmtTime(b.mtime)} <span style="color: var(--text-3); font-size: 10px;">(${fmtAgo(b.mtime)})</span></td>
+          <td class="num">${(b.size / 1024).toFixed(0)} KB</td>
+        </tr>`).join('')}
+      </tbody></table>
+      <div class="hint" style="margin-top: 8px;">Backups live at <code>${esc(r.dir)}</code> — copy them off-machine periodically for real disaster recovery.</div>`;
+  } catch (e) { sub.textContent = 'error'; }
+}
+$('backupsRefreshBtn')?.addEventListener('click', refreshBackupsList);
+$('backupNowBtn')?.addEventListener('click', async () => {
+  setResult($('backupResult'), 'Creating backup…', 'info');
+  try {
+    const r = await api.backupNow();
+    setResult($('backupResult'), `✓ Wrote ${r.path.split(/[\\/]/).pop()} (${(r.size / 1024).toFixed(0)} KB${r.pruned ? `, pruned ${r.pruned} older`  : ''})`, 'ok');
+    toast(`Backup written (${(r.size / 1024).toFixed(0)} KB)`, 'ok', { title: 'Backup complete' });
+    refreshBackupsList();
+  } catch (e) {
+    setResult($('backupResult'), `Backup failed: ${e.message}`, 'err');
+    toast(e.message, 'err', { title: 'Backup failed' });
+  }
+});
+
 $('cleanupBtn').addEventListener('click', async () => {
   const logDays = parseInt($('cleanupLogDays').value, 10) || 0;
   const cmdDays = parseInt($('cleanupCommandsDays').value, 10) || 0;
