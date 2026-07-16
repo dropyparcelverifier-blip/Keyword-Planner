@@ -20,6 +20,7 @@
   --accent-2:   #fbbf24;   /* bright amber (hover / active) */
   --accent-soft: rgba(245,158,11,0.14);
   --success:    #10b981;
+  --success-2:  #34d399;   /* brighter green — for gradients + emphasis */
   --success-soft: rgba(16,185,129,0.12);
   --warn:       #eab308;   /* yellow — distinct from amber accent */
   --warn-soft:  rgba(234,179,8,0.12);
@@ -284,17 +285,18 @@ body { min-height: 100vh; display: flex; flex-direction: column; }
   font-style: italic;
 }
 
-/* Two-column layout helper — sidebar right on wide, stacks on narrow */
-.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); align-items: start; }
-/* Three equal columns — used on the Workers tab so Uninstall / Setup /
-   Send-command land side-by-side instead of stacking under Install. */
-.three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3); align-items: start; }
-@media (max-width: 1100px) { .three-col { grid-template-columns: 1fr 1fr; } }
-@media (max-width: 700px)  { .three-col { grid-template-columns: 1fr; } }
-/* Legacy two-col with sidebar ratio — kept as .two-col-side for the few
-   places that actually want a 2:1 (main + sidebar) split. */
-.two-col-side { display: grid; grid-template-columns: 2fr 1fr; gap: var(--space-3); align-items: start; }
-@media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+/* Grid layout helpers. minmax(0, 1fr) so long content (URLs, tokens,
+   selects) can't blow out track widths — children's min-width: 0 flows
+   through. Base rules FIRST, breakpoint stack overrides LAST so
+   responsive collapse actually wins on narrow viewports. */
+.two-col      { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-3); align-items: start; }
+.three-col    { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-3); align-items: start; }
+.two-col-side { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: var(--space-3); align-items: start; }
+/* Responsive collapse — MUST come after the base rules so specificity
+   ties go to source order (the media query wins on matching viewports). */
+@media (max-width: 1100px) { .three-col { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+@media (max-width: 900px)  { .two-col, .two-col-side { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 700px)  { .three-col { grid-template-columns: minmax(0, 1fr); } }
 
 /* Info list — small right-hand sidebar of quick facts */
 .info-list { list-style: none; padding: 0; margin: 0; }
@@ -340,13 +342,8 @@ main {
 @media (max-width: 600px) { main { padding: var(--space-2); } }
 .panel { display: none; max-width: none; margin: 0; }
 .panel.active { display: block; }
-/* Prevent grid tracks from blowing out on long content (URLs, tokens,
-   selects). minmax(0, …) lets the child's min-width: 0 flow through. */
-.two-col      { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-.three-col    { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr); }
-.two-col-side { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
-/* Wide-desktop upgrade: below 900px stack; above 1600 the 3-col relaxes. */
-@media (min-width: 1600px) { .three-col { gap: var(--space-4); } }
+/* Wide-desktop upgrade: slightly bigger gaps on ultrawide. */
+@media (min-width: 1600px) { .three-col, .two-col { gap: var(--space-4); } }
 /* Force-narrow rescue — inputs, selects, textareas should never overflow
    their parent card even on very small viewports. */
 input, select, textarea { min-width: 0; max-width: 100%; box-sizing: border-box; }

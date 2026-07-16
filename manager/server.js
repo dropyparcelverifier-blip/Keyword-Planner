@@ -1389,8 +1389,11 @@ const server = http.createServer(async (req, res) => {
         if (flags.commands)     dCmd  = Q.wipeCommands.run().changes;
         if (flags.workers)      dWrk  = Q.wipeWorkersRoster.run().changes;
         if (flags.orphansOnly)  dOrph = Q.deleteOrphanKeywords.run().changes;
-        // Unpin active batch if we just wiped its jobs.
-        if (flags.jobs) {
+        // Unpin active batch ONLY if we actually deleted the pinned batch's
+        // full job set. failedJobsOnly=true short-circuits above and leaves
+        // pending/claimed/done intact — we must NOT unpin in that case
+        // (workers would abandon the batch on next poll). Guard on dJobs.
+        if (flags.jobs && !flags.failedJobsOnly && dJobs > 0) {
           const cfgRow = Q.getConfig.get();
           if (batchId && cfgRow?.active_batch_id === batchId) Q.setActiveBatch.run(null);
           if (!batchId) Q.setActiveBatch.run(null);

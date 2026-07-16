@@ -3111,19 +3111,90 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
     for (const t of toks) themes.set(t, (themes.get(t) || 0) + 1);
   }
   const topThemes = [...themes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([t, n]) => `${t} (${n})`);
+  // COMPETITOR ANALYSIS — parse sellers_on_serp across every keyword so
+  // Claude sees WHO we're trying to out-rank. Ranking-focused prompt.
+  const compCount = new Map();
+  for (const r of scored) {
+    const line = String(r.sellers_on_serp || '');
+    if (!line) continue;
+    for (const part of line.split('|')) {
+      const m = part.trim().match(/^([a-z0-9.-]+\.[a-z]{2,})/i);
+      if (m) {
+        const dom = m[1].toLowerCase().replace(/^www\./, '');
+        if (dom === 'dropy.in') continue; // skip ourselves
+        compCount.set(dom, (compCount.get(dom) || 0) + 1);
+      }
+    }
+  }
+  const topCompetitors = [...compCount.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+  // Categorize competitors so Claude knows the ranking archetype we're
+  // beating (marketplace vs brand vs D2C store).
+  const isMarketplace = d => /amazon|flipkart|myntra|nykaa|1mg|meesho|snapdeal|jiomart|blinkit|zepto|shop101/i.test(d);
+  const isBrand       = d => /\.com$|\.co$/.test(d) && !isMarketplace(d);
+  const marketplaces  = topCompetitors.filter(([d]) => isMarketplace(d));
+  const brands        = topCompetitors.filter(([d]) => isBrand(d));
 
   const L = [];
-  L.push('# SHOPIFY LISTING UPDATE — STRUCTURED OUTPUT REQUEST');
+  L.push('# SHOPIFY LISTING — RANK #1 ON GOOGLE FOR THIS PRODUCT');
   L.push('');
-  L.push('You are updating an existing Shopify product listing on **dropy.in** using fresh keyword research.');
+  L.push('## PRIMARY GOAL — READ CAREFULLY');
+  L.push('You are rewriting a **dropy.in** Shopify product page. The success criterion is **not** "good copy" — it is:');
   L.push('');
-  L.push('## ⚠ HARD CONSTRAINTS');
-  L.push('- **DO NOT** produce values for: `price`, `weight`, `weight_unit`, `location`, `inventory_quantity`, `variants`, `images`, `sku`. These fields are locked at the store level and the manager will REFUSE to push them.');
-  L.push('- **ONLY** produce values for the fields in the allowlist below. Any extra keys will be silently discarded server-side.');
-  L.push('- **Return format**: a single JSON object at the end of your response, inside a fenced ```json code block. NO other JSON blocks elsewhere. NO commentary after the block.');
-  L.push('- **Field priority**: field-impact hierarchy is provided — spend the most effort on `critical` fields.');
-  L.push('- **India-first tone**. Currency ₹. Pan-India shipping context. Natural, not spammy keyword usage.');
-  L.push('- **No invented claims** — no "clinically proven", certifications, or specifics not in the research data.');
+  L.push('> **For every keyword in the research pool, dropy.in\'s page must out-rank Amazon.in, the original brand\'s site, Flipkart, Nykaa, and every other seller listed as a competitor.**');
+  L.push('');
+  L.push('Every field you write is a lever to move that ranking. If a choice would produce prettier copy but lose to Amazon on relevance, choose the ranking one.');
+  L.push('');
+  L.push('## COMPETITIVE LANDSCAPE (who we\'re beating)');
+  L.push('Below are the domains that appeared MOST OFTEN in Google SERPs across our keyword research.');
+  L.push('These are the pages our copy has to displace.');
+  L.push('');
+  if (marketplaces.length) {
+    L.push('### Marketplaces (their weakness: generic titles, thin category-tag descriptions, low content depth)');
+    marketplaces.forEach(([d, n]) => L.push(`  · **${d}** — appeared on ${n} SERPs`));
+    L.push('');
+  }
+  if (brands.length) {
+    L.push('### Brand / official sites (their weakness: assume brand awareness, weak on India-specific search intent, no comparison content)');
+    brands.forEach(([d, n]) => L.push(`  · **${d}** — appeared on ${n} SERPs`));
+    L.push('');
+  }
+  L.push('**How to beat them (concretely):**');
+  L.push('- Amazon\'s page relies on brand-in-title + bullet points. You beat it with keyword-forward title + 800-1500 word structured content + FAQ schema.');
+  L.push('- Brand sites focus on brand story. You beat them on **long-tail buying-intent queries** (e.g. "chapstick for dry lips winter india", "aquaphor 10g price in india") where they don\'t bother to optimize.');
+  L.push('- Marketplaces skip **structured data**. You add `Product`, `FAQPage`, and `HowTo` JSON-LD in `body_html` to grab rich results.');
+  L.push('- **India-first specifics** they miss: INR pricing hint, pan-India shipping, COD, GST-invoice mention, regional use cases (Delhi winter, Mumbai monsoon, Bengaluru AC skin).');
+  L.push('- **Featured-snippet target**: include one 40-60 word paragraph directly under the first `<h2>` that answers the top question-shaped query verbatim. Google promotes that block to position zero.');
+  L.push('');
+  L.push('**DO NOT** mention competitor names in the copy itself. Above is competitive intelligence — never write "unlike Amazon" or "better than X" in the actual `body_html`.');
+  L.push('');
+  L.push('## RANKING PLAYBOOK (apply to every field)');
+  L.push('1. **Title (highest signal)** — primary keyword literally in the first 3 words. Then descriptor + benefit. e.g. `Aquaphor Lip Repair Balm 10g — Cracked Lip Overnight Fix, Ships Pan-India`. 60-70 chars. NOT `Buy Aquaphor Balm` (weak, generic).');
+  L.push('2. **Handle** — kebab-case slug MUST contain the primary keyword. If the current handle is generic (e.g. `product-1234`), replace it. If it already contains the primary keyword, KEEP IT (changing loses backlinks + existing SEO).');
+  L.push('3. **Meta title** — 55-60 chars. Different phrasing than title. Include the #1 buying-intent keyword + one benefit hook + `| dropy.in` at the end for brand-trust CTR.');
+  L.push('4. **Meta description** — 150-160 chars. Include primary keyword in first 60 chars. Include a CTA verb ("Shop", "Order", "Get"). Include a trust signal ("Pan-India delivery" / "COD available" / "Free shipping"). Never truncated — count chars.');
+  L.push('5. **Body HTML** — 800-1500 words, structured for scannability AND for Google. Required sections in this order:');
+  L.push('   - `<p>` opening — 2-3 sentences, primary keyword in the first sentence, benefit in the second. This is the ranking anchor.');
+  L.push('   - `<h2>` FEATURED-SNIPPET TARGET — 40-60 word direct answer to the highest-volume question-shaped query.');
+  L.push('   - `<h2>` Why it works — bullet list of 4-6 benefits, each with a **bold benefit** + supporting sentence.');
+  L.push('   - `<h2>` How to use — numbered `<ol>` with 3-5 steps. Google promotes this to a HowTo rich result if schema is present (include the JSON-LD, see below).');
+  L.push('   - `<h2>` Specifications / Ingredients — a `<table>` with 4-8 rows. Structured data helps rank.');
+  L.push('   - `<h2>` Who it\'s for — India-specific use cases (cold Delhi winter, Bengaluru AC skin, Mumbai humidity, Chennai heat). Rank on regional queries.');
+  L.push('   - `<h2>` FAQs — 5-8 `<details><summary>Q</summary>A</details>` blocks. Use the question-shaped queries below verbatim. Each answer 40-80 words.');
+  L.push('   - `<h2>` Shipping & returns — India-first: pan-India, COD, GST invoice, return policy. Trust signals.');
+  L.push('   - `<script type="application/ld+json">` block at the end with THREE schemas: `Product`, `FAQPage`, `HowTo`. Uses only fields you know for certain (no invented ratings/reviews).');
+  L.push('6. **Tags** — 10-15 tags. Include: primary keyword, category, use-case terms, top 5 themes below. Drives on-site search + auto-collections.');
+  L.push('7. **Product type** — the single most-searched category term (from the themes below).');
+  L.push('8. **Vendor** — keep current unless clearly wrong. Amazon/brand ranking depends on brand consistency.');
+  L.push('');
+  L.push('## HARD CONSTRAINTS');
+  L.push('- **NEVER produce**: `price`, `weight`, `weight_unit`, `location`, `inventory_quantity`, `variants`, `images`, `sku`. The manager strips them server-side; wasted output tokens.');
+  L.push('- **ONLY produce keys** from this allowlist: ' + allowlist.map(f => `\`${f}\``).join(', ') + '.');
+  L.push('- **Return format**: reasoning paragraph, then ONE fenced ```json``` block. No other JSON. No commentary after.');
+  L.push('- **India-first**. Currency ₹. Pan-India context. Every trust signal India-specific.');
+  L.push('- **No invented claims** — do not add "clinically proven", "dermatologist tested", certifications, awards, specific test results unless they appear in the research data.');
+  L.push('- **No competitor names in copy** — no "unlike Amazon", "similar to X brand". Never.');
+  L.push('- **Schema.org JSON-LD is REQUIRED**. `Product` + `FAQPage` + `HowTo`. Skipping them costs rich-result opportunities.');
+  L.push('- **No `<script>` tags in `body_html` EXCEPT** the one `application/ld+json` schema block. No inline JS.');
   L.push('');
   L.push('## FIELD ALLOWLIST + IMPACT HIERARCHY');
   L.push('| Priority | Field | Impact | Why it matters |');
@@ -3132,24 +3203,22 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
     L.push(`| ${r.impact} | \`${r.field}\` | ${r.impact.toUpperCase()} | ${r.why} |`);
   }
   L.push('');
-  L.push('Only these keys go into the JSON: ' + allowlist.map(f => `\`${f}\``).join(', ') + '.');
-  L.push('');
   L.push('## CURRENT SHOPIFY LISTING (before your changes)');
   L.push(`- **Product ID**: ${currentProduct.id}`);
   L.push(`- **Title**: ${currentProduct.title || '(blank)'}`);
-  L.push(`- **Handle**: \`${currentProduct.handle || '(blank)'}\` — do NOT change unless the current one is clearly wrong; changing the handle breaks existing SEO.`);
+  L.push(`- **Handle**: \`${currentProduct.handle || '(blank)'}\` — keep IF it already contains the primary keyword; replace IF it\'s generic.`);
   L.push(`- **Vendor**: ${currentProduct.vendor || '(blank)'}`);
   L.push(`- **Product type**: ${currentProduct.product_type || '(blank)'}`);
   L.push(`- **Tags** (current): ${currentProduct.tags || '(none)'}`);
   L.push(`- **Status**: ${currentProduct.status || '(unknown)'}`);
   L.push('');
-  L.push('**Current body_html** (may be blank / poor):');
+  L.push('**Current body_html** (may be blank / poor — this is what we\'re replacing):');
   L.push('```html');
   L.push((currentProduct.body_html || '(empty)').slice(0, 4000));
   L.push('```');
   L.push('');
   if (currentProduct.variants_readonly?.length) {
-    L.push('**READ-ONLY variant data** (for context — DO NOT include in your output):');
+    L.push('**READ-ONLY variant data** (for context — DO NOT include; also useful for accurate pack-size mentions in body):');
     for (const v of currentProduct.variants_readonly.slice(0, 8)) {
       L.push(`  · variant \`${v.sku || v.id}\` — ${v.title || '(no title)'} · ₹${v.price} · ${v.weight || 0}${v.weight_unit || 'g'} · inv ${v.inventory_quantity ?? '—'}`);
     }
@@ -3161,57 +3230,60 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
     L.push('');
   }
   L.push('## THIS SKU (research context)');
-  L.push(`- **SKU / handle scope**: ${contextRow.sku || analytics.sku}`);
+  L.push(`- **SKU / ASIN**: ${contextRow.sku || analytics.sku}`);
   L.push(`- **Product URL**: ${contextRow.product_url}`);
   L.push(`- **Product name (as scraped)**: ${contextRow.product_name || '(unknown)'}`);
   L.push('');
-  L.push('## KEYWORD RESEARCH (fresh)');
+  L.push('## KEYWORD RESEARCH (fresh) — the terms we must rank for');
   L.push(`Total keywords collected: **${rows.length}**. Below are the top-50 by opportunity score (log-volume × rating × image-matches, adjusted for competition + buying intent).`);
   L.push('');
-  L.push('### Top 50 opportunity keywords');
+  L.push('### Top 50 opportunity keywords (rank for these)');
   L.push('| # | Keyword | Volume | Comp | Intent | Imgs | Score |');
   L.push('|---|---|---|---|---|---|---|');
   top50.forEach((r, i) => {
     L.push(`| ${i+1} | ${r.keyword || ''} | ${r.avg_monthly_searches ?? '—'} | ${r.competition || '—'} | ${r.buying_intent || '—'} | ${r.image_count ?? '—'} | ${r._score.toFixed(1)} |`);
   });
   L.push('');
-  L.push(`### High buying-intent keywords (${highIntent.length})`);
-  L.push('*Use these in the TITLE, first 100 words of body_html, and SEO title.*');
+  L.push(`### High buying-intent keywords (${highIntent.length}) — TITLE + first 100 words + meta title MUST include the top 3`);
   L.push(highIntent.map(r => `- ${r.keyword} (${r.avg_monthly_searches ?? '—'} vol)`).join('\n') || '(none marked high-intent)');
   L.push('');
-  L.push(`### Question-shaped queries (${questions.length})`);
-  L.push('*Use these to seed FAQ content inside body_html.*');
+  L.push(`### Question-shaped queries (${questions.length}) — feed the FAQ + featured-snippet block verbatim`);
   L.push(questions.map(r => `- ${r.keyword}`).join('\n') || '(none detected)');
   L.push('');
-  L.push('### Top recurring themes / tokens');
+  L.push('### Top recurring themes / tokens (put these in tags + section headings)');
   L.push(topThemes.join(' · '));
   L.push('');
   L.push('## OUTPUT SPEC');
   L.push('Respond with:');
-  L.push('1. A one-paragraph **reasoning summary** (which keywords informed which field, what tradeoffs you made).');
-  L.push('2. A single fenced JSON code block containing ONLY these keys (all optional — omit anything you don\'t want to change):');
+  L.push('1. A one-paragraph **ranking rationale**: which competitor page you\'re primarily targeting, why your title/body_html beats it, which long-tail queries you\'re dominating.');
+  L.push('2. A single fenced ```json``` code block with ONLY these keys (all optional — omit anything you\'re not changing):');
   L.push('```json');
   L.push('{');
   L.push('  "title": "…",');
-  L.push('  "body_html": "…full HTML…",');
+  L.push('  "body_html": "…full HTML with all sections + JSON-LD…",');
   L.push('  "tags": "tag1, tag2, tag3",');
   L.push('  "product_type": "…",');
   L.push('  "vendor": "…",');
-  L.push('  "handle": "kebab-case-slug",');
-  L.push('  "metafields_global_title_tag": "SEO <title> (55-60 chars)",');
-  L.push('  "metafields_global_description_tag": "SEO <meta description> (150-160 chars)"');
+  L.push('  "handle": "kebab-case-slug-with-primary-keyword",');
+  L.push('  "metafields_global_title_tag": "SEO <title> (55-60 chars) | dropy.in",');
+  L.push('  "metafields_global_description_tag": "SEO <meta description> (150-160 chars, with CTA)"');
   L.push('}');
   L.push('```');
   L.push('');
-  L.push('### Character/format rules');
-  L.push('- `title`: 60-70 chars, keyword-forward, benefit-anchored. e.g. "Aquaphor Lip Repair Balm 10g — Cracked Lip Overnight Fix"');
-  L.push('- `handle`: kebab-case, ≤50 chars, no promo words, no ₹, no year. Skip this field entirely for existing products unless the current handle is broken.');
-  L.push('- `metafields_global_title_tag`: 55-60 chars — sharper than title, put brand at the end.');
-  L.push('- `metafields_global_description_tag`: 150-160 chars — different phrasing than the meta title, include CTA.');
-  L.push('- `body_html`: valid HTML. First `<p>` = 2-3 sentences, keyword-anchored, benefit-forward. Then `<h2>` sections for "Why it works", "How to use", "Ingredients / specs", "FAQs" (4-6 Q&A pairs from the questions above). Wrap FAQs in `<details><summary>Q</summary>A</details>` for accordion. No `<script>`, no external images.');
-  L.push('- `tags`: comma-separated, use themes above + category tags. 8-15 tags total.');
+  L.push('### Sanity checklist BEFORE returning');
+  L.push('- [ ] `title` contains the primary keyword in the first 3 words.');
+  L.push('- [ ] `handle` contains the primary keyword.');
+  L.push('- [ ] `metafields_global_title_tag` is 55-60 chars (count them).');
+  L.push('- [ ] `metafields_global_description_tag` is 150-160 chars (count them) and includes a CTA verb.');
+  L.push('- [ ] `body_html` has ≥ 800 words.');
+  L.push('- [ ] `body_html` has a featured-snippet block (40-60 words directly under the first `<h2>`).');
+  L.push('- [ ] `body_html` has 5-8 FAQ entries using `<details>` accordion.');
+  L.push('- [ ] `body_html` has a `<script type="application/ld+json">` block with Product + FAQPage + HowTo schemas.');
+  L.push('- [ ] `body_html` mentions India-specific trust signals (pan-India / COD / GST / regional).');
+  L.push('- [ ] `tags` has 10-15 entries.');
+  L.push('- [ ] Zero competitor brand names in the actual copy.');
   L.push('');
-  L.push('Begin now. Reasoning first, then the single JSON block.');
+  L.push('Begin. Ranking rationale first, then the single JSON block.');
   return L.join('\n');
 }
 function renderShopifyModalBody({ currentProduct, productUrl, prompt, impactRows, allowlist }) {

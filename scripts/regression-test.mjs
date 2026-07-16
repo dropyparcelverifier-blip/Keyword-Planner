@@ -857,9 +857,30 @@ async function run() {
   assertEq(wipeAct.status, 200, '20w.4 wipe-selective activity-only ok');
   const jobsStill = await req('GET', '/api/jobs/summary');
   assert(jobsStill.data.batches.length >= 0, '20w.5 wipe-selective activity-only left jobs alone');
-  // Nuke the wipe-test-batch entirely for cleanup.
+  // Regression: pin a batch, wipe only its failed jobs — the pin MUST
+  // survive. Previously an unpin was fired whenever flags.jobs was set,
+  // even though failedJobsOnly short-circuited the actual jobs delete.
+  await req('POST', '/api/jobs/upload', {
+    batchId: 'wipe-pin-test',
+    products: [{ url: 'https://dropy.in/products/pin-a', sku: 'PA' }],
+  });
+  await req('POST', '/api/config', { activeBatchId: 'wipe-pin-test' });
+  const preBefore = await req('GET', '/api/config');
+  assertEq(preBefore.data.active_batch_id, 'wipe-pin-test', '20w.6 pin set');
+  await req('POST', '/api/wipe-selective', {
+    confirm: 'WIPE', batchId: 'wipe-pin-test',
+    flags: { failedJobsOnly: true, jobs: true },
+  });
+  const preAfter = await req('GET', '/api/config');
+  assertEq(preAfter.data.active_batch_id, 'wipe-pin-test', '20w.7 pin SURVIVES failed-jobs-only wipe');
+  await req('POST', '/api/config', { activeBatchId: null });
+  // Nuke the wipe-test-batch + pin-test entirely for cleanup.
   await req('POST', '/api/wipe-selective', {
     confirm: 'WIPE', batchId: 'wipe-test-batch',
+    flags: { jobs: true, keywords: true, activity: true },
+  });
+  await req('POST', '/api/wipe-selective', {
+    confirm: 'WIPE', batchId: 'wipe-pin-test',
     flags: { jobs: true, keywords: true, activity: true },
   });
 
@@ -1473,6 +1494,15 @@ async function run() {
   assert(appFull.includes('function openShopifyModal'),                'SHOP.17 openShopifyModal defined');
   assert(appFull.includes('function buildShopifyClaudePrompt'),        'SHOP.18 Claude prompt builder for Shopify');
   assert(appFull.includes('function extractShopifyJson'),              'SHOP.19 JSON extractor from Claude output');
+  // RANKING-FOCUSED prompt: competitor analysis + schema.org + India-first.
+  assert(appFull.includes('sellers_on_serp'),                          'SHOP.20 competitor domains parsed from SERP');
+  assert(appFull.includes('marketplaces') && appFull.includes('isMarketplace'), 'SHOP.21 competitor marketplace classification');
+  assert(appFull.includes('COMPETITIVE LANDSCAPE'),                    'SHOP.22 prompt lists competitors');
+  assert(appFull.includes('Product') && appFull.includes('FAQPage') && appFull.includes('HowTo'), 'SHOP.23 schema.org JSON-LD instructed');
+  assert(appFull.includes('featured-snippet'),                         'SHOP.24 featured-snippet targeting');
+  assert(appFull.includes('India-first'),                              'SHOP.25 India-first localization');
+  assert(appFull.includes('RANK #1'),                                  'SHOP.26 explicit ranking goal in prompt');
+  assert(appFull.includes('out-rank Amazon.in'),                       'SHOP.27 explicit ranking targets (Amazon)');
 
   // Analytics tree structure.
   assert(htmlFull.includes('id="anRail"') && htmlFull.includes('id="anRailTree"'), 'TREE.1 tree rail container in HTML');
@@ -1495,7 +1525,7 @@ async function run() {
   assert(htmlFull.includes('<div class="an-layer-head">Install a new worker</div>'),  'POLISH.5 Workers has Install-a-new-worker section');
   assert(htmlFull.includes('<div class="an-layer-head">Connect &amp; manage</div>'), 'POLISH.6 Workers has Connect & manage section');
   // .two-col is now 1:1 (was 2:1 sidebar); .two-col-side kept for legacy.
-  assert(/\.two-col\s*\{\s*display: grid;\s*grid-template-columns: 1fr 1fr/.test(cssFull), 'POLISH.7 .two-col is now 1:1 grid');
+  assert(/\.two-col\s*\{\s*display: grid;\s*grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1fr\)/.test(cssFull), 'POLISH.7 .two-col is 1:1 minmax(0,1fr) grid');
   assert(cssFull.includes('.two-col-side'),                                       'POLISH.8 legacy .two-col-side kept for 2:1 layouts');
   // Worker popup polish.
   const popupHtmlPolish = readFileSync(resolve(REPO, 'popup.html'), 'utf-8');
