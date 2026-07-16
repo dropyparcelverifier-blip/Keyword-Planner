@@ -261,7 +261,8 @@
       <div class="an-layout">
         <aside class="an-rail" id="anRail">
           <div class="an-rail-head">
-            <input type="text" id="anRailSearch" placeholder="Search batches or SKUs…" autocomplete="off" />
+            <input type="text" id="anRailSearch" placeholder="Search…" autocomplete="off" />
+            <button class="tiny ghost" id="anRailToggle" title="Collapse this rail so the content pane goes full-width. Click the ▸ ribbon on the left edge to bring it back.">‹</button>
           </div>
           <div class="an-rail-tree" id="anRailTree"></div>
           <!-- Hidden legacy controls the filter pipeline still reads. -->
@@ -450,30 +451,25 @@
       </div>
 
       <!-- ─── LAYER: DISTRIBUTE — how the pool breaks down ──────────── -->
+      <!-- Coverage vs 100–300 gauge removed as duplicate: the hero
+           KEYWORDS card already shows target status ('in target range' /
+           'below 100' / 'above 300'). Source donut kept — nothing else
+           on the page shows the primary-source breakdown percentages. -->
       <div id="anLayerDistribute" class="an-layer" style="display:none;">
         <div class="an-layer-head">Distribution</div>
-        <div class="two-col">
-          <div class="card collapsible">
-            <div class="card-head">
-              <span class="card-icon">🥯</span>
-              <span class="card-title">Source distribution</span>
-              <span class="card-sub" id="anDonutSub">—</span>
-            </div>
-            <div class="card-body">
-              <div id="anDonut"></div>
-            </div>
+        <div class="card collapsible">
+          <div class="card-head">
+            <span class="card-icon">🥯</span>
+            <span class="card-title">Source distribution</span>
+            <span class="card-sub" id="anDonutSub">—</span>
           </div>
-          <div class="card collapsible">
-            <div class="card-head">
-              <span class="card-icon">🎚️</span>
-              <span class="card-title">Coverage vs 100–300 target</span>
-              <span class="card-sub" id="anGaugeSub">—</span>
-            </div>
-            <div class="card-body">
-              <div id="anGauge"></div>
-            </div>
+          <div class="card-body">
+            <div id="anDonut"></div>
           </div>
         </div>
+        <!-- Hidden legacy container — some code paths still reference #anGauge. -->
+        <div id="anGauge" style="display:none;"></div>
+        <span id="anGaugeSub" style="display:none;"></span>
       </div>
 
       <div id="anLayerContent" class="an-layer" style="display:none;">
