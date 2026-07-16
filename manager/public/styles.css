@@ -259,9 +259,40 @@ body { min-height: 100vh; display: flex; flex-direction: column; }
 /* Panels — every tab uses the full viewport. The 1400px cap was
    leaving 30–40% of horizontal space empty on wide monitors, which
    read as "small centred content in a big empty page". */
-main { flex: 1; padding: var(--space-3) var(--space-4); overflow: auto; }
+main {
+  flex: 1;
+  padding: var(--space-3) var(--space-4);
+  overflow: auto;
+  /* Cap on ultra-wide monitors so we don't stretch a 3-column card grid
+     across 3000px. On >1800px, keep centered with a comfortable max. */
+  max-width: min(100%, 1800px);
+  margin: 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+}
+/* Tighter horizontal padding on small screens so cards get the real estate. */
+@media (max-width: 900px) { main { padding: var(--space-2) var(--space-3); } }
+@media (max-width: 600px) { main { padding: var(--space-2); } }
 .panel { display: none; max-width: none; margin: 0; }
 .panel.active { display: block; }
+/* Prevent grid tracks from blowing out on long content (URLs, tokens,
+   selects). minmax(0, …) lets the child's min-width: 0 flow through. */
+.two-col      { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.three-col    { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr); }
+.two-col-side { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+/* Wide-desktop upgrade: below 900px stack; above 1600 the 3-col relaxes. */
+@media (min-width: 1600px) { .three-col { gap: var(--space-4); } }
+/* Force-narrow rescue — inputs, selects, textareas should never overflow
+   their parent card even on very small viewports. */
+input, select, textarea { min-width: 0; max-width: 100%; box-sizing: border-box; }
+/* Same for flex rows — long buttons / codes can't push siblings out. */
+.row > * { min-width: 0; }
+/* Card sizing scales with viewport — smaller radius / padding on mobile. */
+@media (max-width: 600px) {
+  .card { border-radius: 6px; }
+  .card-body { padding: var(--space-2); }
+  .card-head { padding: var(--space-2); }
+}
 
 /* Cards — unified sizing so every card in the app has the same header
    height, padding, and title weight. Prior state had cards with ad-hoc
@@ -1557,6 +1588,126 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
   background-size: 200% 100%;
   animation: shimmer 1.2s var(--ease-in) infinite;
   border-radius: inherit;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Shopify Integration card — split layout: fields left, safety/impact
+   panel right. Collapses to stacked on <900px.
+   ═══════════════════════════════════════════════════════════════ */
+.shopify-config {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+@media (max-width: 1100px) { .shopify-config { grid-template-columns: 1fr; } }
+.shopify-config-fields { min-width: 0; }
+.shopify-config-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+/* Safety guarantee banner — soft-danger tint, warm border, always visible
+   so users can't miss which fields are locked out. */
+.shopify-safety {
+  padding: 12px 14px;
+  background: linear-gradient(180deg, rgba(248,113,113,0.08) 0%, rgba(248,113,113,0.03) 100%);
+  border: 1px solid rgba(248,113,113,0.35);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-2);
+  box-shadow: inset 0 0 0 1px rgba(248,113,113,0.05);
+}
+.shopify-safety-title {
+  color: var(--danger);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  margin-bottom: 6px;
+}
+.shopify-strip-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+.strip-chip {
+  padding: 2px 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--danger);
+  background: rgba(248,113,113,0.10);
+  border: 1px solid rgba(248,113,113,0.30);
+  border-radius: 10px;
+  text-decoration: line-through;
+  text-decoration-color: rgba(248,113,113,0.55);
+  text-decoration-thickness: 1px;
+}
+/* Field-impact hierarchy sub-panel — priority-ordered list of fields
+   that CAN be updated, with color-coded impact badges. */
+.shopify-impact {
+  padding: 12px 14px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.shopify-impact-title {
+  color: var(--text-1);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  margin-bottom: 8px;
+}
+.impact-row {
+  display: grid;
+  grid-template-columns: 46px 130px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--line-1);
+}
+.impact-row:last-child { border-bottom: none; }
+.impact-row code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-1);
+  background: transparent;
+  padding: 0;
+}
+.impact-row .hint { font-size: 11px; color: var(--text-3); }
+.impact-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  border-radius: 4px;
+  text-align: center;
+}
+.impact-badge.crit { color: var(--danger);  background: rgba(248,113,113,0.14); border: 1px solid rgba(248,113,113,0.35); }
+.impact-badge.high { color: var(--warn);    background: rgba(251,191,36,0.14);  border: 1px solid rgba(251,191,36,0.35); }
+.impact-badge.med  { color: var(--accent);  background: rgba(90,140,255,0.14);  border: 1px solid rgba(90,140,255,0.35); }
+.impact-badge.low  { color: var(--text-3);  background: rgba(148,163,184,0.08); border: 1px solid rgba(148,163,184,0.25); }
+
+/* Card polish — subtle shadow + smoother hover so the Config tab feels
+   like a cohesive template rather than a stack of dividers. */
+.card {
+  box-shadow: 0 1px 2px rgba(0,0,0,0.20), 0 0 0 1px rgba(255,255,255,0.02) inset;
+  transition: border-color 140ms var(--ease), box-shadow 140ms var(--ease), transform 140ms var(--ease);
+}
+.card:hover {
+  border-color: var(--line-2);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.03) inset;
+}
+.card.collapsible.collapsed:hover { transform: translateY(-1px); }
+
+/* Focus rings — accessible + visually consistent. */
+input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* Selective-wipe modal rows — checkbox + label + live count in one grid row. */

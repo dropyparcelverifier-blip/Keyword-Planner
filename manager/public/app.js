@@ -1811,11 +1811,11 @@ async function loadConfigForm() {
 }
 // Shopify config save/clear/test.
 $('cfgShopifySaveBtn')?.addEventListener('click', async () => {
+  const btn = $('cfgShopifySaveBtn');
   const domain = $('cfgShopifyDomain').value.trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
   const tokenRaw = $('cfgShopifyToken').value.trim();
   const apiVersion = $('cfgShopifyApiVersion').value.trim() || '2024-10';
   if (!domain) { setResult($('cfgShopifyResult'), 'Shop domain required.', 'warn'); return; }
-  // If field is all dots, the user didn't retype — preserve existing token.
   const preserveToken = /^•+$/.test(tokenRaw);
   const patch = { shopify: { shopDomain: domain, apiVersion } };
   if (!preserveToken) patch.shopify.adminToken = tokenRaw;
@@ -1823,15 +1823,18 @@ $('cfgShopifySaveBtn')?.addEventListener('click', async () => {
     const cur = await api.configGet().catch(() => ({ config: {} }));
     patch.shopify.adminToken = cur.config?.shopify?.adminToken || '';
   }
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Saving…';
+  setResult($('cfgShopifyResult'), 'Saving…', 'info');
   try {
     await api.configPatch(patch);
-    setResult($('cfgShopifyResult'), '✓ Shopify config saved.', 'ok');
+    setResult($('cfgShopifyResult'), `✓ Saved for ${domain}. Token ${preserveToken ? 'preserved' : 'updated'}. API version ${apiVersion}.`, 'ok');
     toast('Shopify config saved.', 'ok');
     $('shopifyStatusSub').textContent = `configured (${domain})`;
   } catch (e) {
     setResult($('cfgShopifyResult'), `Save failed: ${e.message}`, 'err');
     toast(e.message, 'err');
-  }
+  } finally { btn.disabled = false; btn.textContent = orig; }
 });
 $('cfgShopifyClearBtn')?.addEventListener('click', async () => {
   if (!confirm('Clear Shopify credentials from the manager? The Analytics "Shopify update" flow will stop working until you re-enter them.')) return;
@@ -1846,25 +1849,30 @@ $('cfgShopifyClearBtn')?.addEventListener('click', async () => {
 });
 $('cfgShopifyTestBtn')?.addEventListener('click', async () => {
   const el = $('cfgShopifyTestResult');
+  const btn = $('cfgShopifyTestBtn');
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Testing…';
   el.textContent = 'testing…';
   el.style.color = 'var(--text-2)';
   try {
-    // Ping the Shopify shop info endpoint by making a dummy get-product
-    // call for a nonexistent handle. If creds work, we'll get 404 with a
-    // valid Shopify response envelope; if not, an auth or 502 error.
-    const r = await api.shopifyGetProduct('https://x/products/__connection_test__' + Date.now());
-    // Should not happen — but if it does, it means the handle exists.
-    el.textContent = '✓ connected (product also exists!)';
+    // Ping Shopify with a bogus handle. If creds are valid we get a 404
+    // "no such handle" from OUR server (after Shopify replied 200 with
+    // empty products list). If auth fails, we get a Shopify 401 error.
+    await api.shopifyGetProduct('https://x/products/__connection_test__' + Date.now());
+    el.textContent = '✓ connected (product also exists)';
     el.style.color = 'var(--success)';
+    setResult($('cfgShopifyResult'), '✓ Shopify auth verified.', 'ok');
   } catch (e) {
     if (String(e.message).includes('no Shopify product with handle')) {
       el.textContent = '✓ connected — auth OK';
       el.style.color = 'var(--success)';
+      setResult($('cfgShopifyResult'), '✓ Shopify auth verified. Try a real SKU from Analytics.', 'ok');
     } else {
-      el.textContent = `✗ ${e.message}`;
+      el.textContent = `✗ ${e.message.slice(0, 60)}`;
       el.style.color = 'var(--danger)';
+      setResult($('cfgShopifyResult'), `✗ Connection failed: ${e.message}`, 'err');
     }
-  }
+  } finally { btn.disabled = false; btn.textContent = orig; }
 });
 
 // ═══════════════════════════════════════════════════════════════
