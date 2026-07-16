@@ -2286,7 +2286,7 @@ async function renderAnalyticsTree() {
   }).join('');
   // Wire batch clicks — toggle expand + select as active batch.
   el.querySelectorAll('.tree-batch').forEach(btn => {
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', async (e) => {
       const bid = btn.dataset.batch;
       const expNow = _loadExpanded();
       const clickedCaret = e.target.classList?.contains('tree-caret');
