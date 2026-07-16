@@ -175,6 +175,11 @@ body { min-height: 100vh; display: flex; flex-direction: column; }
 
 /* Two-column layout helper — sidebar right on wide, stacks on narrow */
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); align-items: start; }
+/* Three equal columns — used on the Workers tab so Uninstall / Setup /
+   Send-command land side-by-side instead of stacking under Install. */
+.three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3); align-items: start; }
+@media (max-width: 1100px) { .three-col { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 700px)  { .three-col { grid-template-columns: 1fr; } }
 /* Legacy two-col with sidebar ratio — kept as .two-col-side for the few
    places that actually want a 2:1 (main + sidebar) split. */
 .two-col-side { display: grid; grid-template-columns: 2fr 1fr; gap: var(--space-3); align-items: start; }
@@ -802,15 +807,34 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
    so the section divider reads at a glance in a long-scroll page. */
 /* Section labels — quiet typography, no decorative underline or
    accent bar. Reads as a section break, not a design element. */
+/* Section labels — enough presence to actually read as a header,
+   not disappearing into the surrounding dark bg. Uses a bright text
+   color + subtle bottom border so it reads clearly on both the
+   Config/Workers layout (multiple sections in one panel) and inside
+   Analytics. */
 .an-layer { margin: var(--space-4) 0 var(--space-2); }
-.an-layer:first-of-type { margin-top: var(--space-2); }
+.an-layer:first-of-type { margin-top: 0; }
 .an-layer-head {
-  font-size: var(--text-md); font-weight: 600; letter-spacing: 0;
-  text-transform: none; color: var(--text-2);
-  padding: 0 0 var(--space-1);
-  margin-bottom: var(--space-2);
+  font-size: var(--text-md); font-weight: 700; letter-spacing: 0.2px;
+  text-transform: uppercase; color: var(--text-1);
+  padding: 0 0 var(--space-2);
+  margin-bottom: var(--space-3);
+  border-bottom: 1px solid var(--line-2);
 }
 .an-layer-hint { display: none; }
+
+/* Collapsed cards inside a two-col grid — when one card is expanded
+   and the neighbour is collapsed, the collapsed one shouldn't feel
+   like empty wasted space. Slight compact styling makes the header
+   read as a strip you'd click, not "abandoned card". */
+.two-col .card.collapsible.collapsed .card-head,
+.two-col-side .card.collapsible.collapsed .card-head {
+  border-bottom: none;
+}
+.two-col .card.collapsible.collapsed,
+.two-col-side .card.collapsible.collapsed {
+  background: var(--bg-1);
+}
 
 /* Cards inside layers get a subtle entry animation on first show —
    makes navigating between SKUs feel snappy instead of jarring. */
