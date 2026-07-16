@@ -752,7 +752,26 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
 .tbl.compact td.num > span { color: inherit; }
 /* Zero values (0, 0%, —) dim further so scanning the table for
    non-zero signals is instant. */
-.tbl.compact td.num[data-zero="1"] { color: var(--text-3); }
+.tbl.compact td.num[data-zero="1"] { color: var(--text-3); opacity: 0.55; }
+
+/* Row hover — subtle blue wash across the WHOLE row (was cell-level
+   only; users scanning the table couldn't tell which row their eye
+   was on when the mouse was over a numeric column). */
+.tbl.compact tbody tr:hover { background: rgba(90, 140, 255, 0.06); }
+.tbl.compact tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.015); }
+.tbl.compact tbody tr:nth-child(even):hover { background: rgba(90, 140, 255, 0.08); }
+
+/* KP-competition chips — Low/Medium/High as tone-tinted pills so
+   competition reads at a glance (was plain-text green/amber/red that
+   got lost among all the other numeric columns). */
+.comp-chip {
+  display: inline-block; padding: 1px 8px; border-radius: 3px;
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.comp-chip.chip-low  { background: var(--success-soft); color: var(--success); }
+.comp-chip.chip-med  { background: var(--warn-soft);    color: var(--warn); }
+.comp-chip.chip-high { background: var(--danger-soft);  color: var(--danger); }
 .tbl.compact td .chip {
   padding: 1px 6px;
   font-size: 9px;
