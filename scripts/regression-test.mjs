@@ -1397,8 +1397,8 @@ async function run() {
   assert(htmlFull.includes('<div class="an-layer-head">Worker pipeline</div>'),   'POLISH.2 Config has Worker pipeline section');
   assert(htmlFull.includes('<div class="an-layer-head">Maintenance</div>'),       'POLISH.3 Config has Maintenance section');
   assert(htmlFull.includes('Danger zone</div>'),                                  'POLISH.4 Config has Danger zone section');
-  assert(htmlFull.includes('<div class="an-layer-head">Add a new worker</div>'),  'POLISH.5 Workers has Add-a-new-worker section');
-  assert(htmlFull.includes('<div class="an-layer-head">Connect + manage workers</div>'), 'POLISH.6 Workers has Connect+manage section');
+  assert(htmlFull.includes('<div class="an-layer-head">Install a new worker</div>'),  'POLISH.5 Workers has Install-a-new-worker section');
+  assert(htmlFull.includes('<div class="an-layer-head">Connect &amp; manage</div>'), 'POLISH.6 Workers has Connect & manage section');
   // .two-col is now 1:1 (was 2:1 sidebar); .two-col-side kept for legacy.
   assert(/\.two-col\s*\{\s*display: grid;\s*grid-template-columns: 1fr 1fr/.test(cssFull), 'POLISH.7 .two-col is now 1:1 grid');
   assert(cssFull.includes('.two-col-side'),                                       'POLISH.8 legacy .two-col-side kept for 2:1 layouts');

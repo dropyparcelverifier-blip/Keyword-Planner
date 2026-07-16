@@ -186,8 +186,35 @@
               <span class="card-title">Output uploaded to manager</span>
               <span class="card-sub" id="outputStatsHeader">—</span>
             </div>
-            <div class="card-body" style="max-height: 400px; overflow: auto;">
+            <div class="card-body" style="max-height: 240px; overflow: auto;">
               <div id="outputStatsPanel"><div class="empty">Pick a batch above.</div></div>
+            </div>
+          </div>
+
+          <!-- Errors + Failed live in the left column so they fill the
+               empty space next to the tall Activity log (was: right column
+               only, leaving a huge gap under Output uploaded). -->
+          <div class="card" id="errorsCard" style="display:none;">
+            <div class="card-head">
+              <span class="card-icon">🐛</span>
+              <span class="card-title" style="color: var(--danger);">Errors reported by workers</span>
+              <span class="card-sub" id="errorsSub">—</span>
+              <button class="small ghost" id="errorsClearBtn" style="margin-left:auto;" title="Clear all error-level log entries (info + warn events are kept).">🗑 Clear errors</button>
+            </div>
+            <div class="card-body" style="max-height: 280px; overflow: auto; padding: 6px 12px;">
+              <div id="errorsList"></div>
+            </div>
+          </div>
+
+          <div class="card" id="failedCard" style="display:none;">
+            <div class="card-head">
+              <span class="card-icon">✗</span>
+              <span class="card-title" style="color: var(--danger);">Failed jobs</span>
+              <span class="card-sub" id="failedSub">—</span>
+              <button class="small danger" id="requeueAllFailedBtn" style="margin-left:auto;">↻ Re-queue all failed</button>
+            </div>
+            <div class="card-body" style="max-height: 220px; overflow: auto;">
+              <div id="failedList"></div>
             </div>
           </div>
         </div>
@@ -217,30 +244,6 @@
             </div>
             <div class="card-body">
               <div class="log" id="activityLog"><div class="empty">No activity yet.</div></div>
-            </div>
-          </div>
-
-          <div class="card" id="failedCard" style="display:none;">
-            <div class="card-head">
-              <span class="card-icon">✗</span>
-              <span class="card-title" style="color: var(--danger);">Failed jobs</span>
-              <span class="card-sub" id="failedSub">—</span>
-              <button class="small danger" id="requeueAllFailedBtn" style="margin-left:auto;">↻ Re-queue all failed</button>
-            </div>
-            <div class="card-body" style="max-height: 220px; overflow: auto;">
-              <div id="failedList"></div>
-            </div>
-          </div>
-
-          <div class="card" id="errorsCard" style="display:none;">
-            <div class="card-head">
-              <span class="card-icon">🐛</span>
-              <span class="card-title" style="color: var(--danger);">Errors reported by workers</span>
-              <span class="card-sub" id="errorsSub">—</span>
-              <button class="small ghost" id="errorsClearBtn" style="margin-left:auto;" title="Clear all error-level log entries (info + warn events are kept).">🗑 Clear errors</button>
-            </div>
-            <div class="card-body" style="max-height: 280px; overflow: auto; padding: 6px 12px;">
-              <div id="errorsList"></div>
             </div>
           </div>
         </div>
@@ -770,107 +773,112 @@
     <!-- ================= WORKERS ================= -->
     <section class="panel" id="panel-workers">
       <div class="an-layer">
-        <div class="an-layer-head">Add a new worker</div>
-        <div class="two-col">
-      <div class="card">
-        <div class="card-head">
-          <span class="card-icon">📥</span>
-          <span class="card-title">Install worker on a new PC (one command)</span>
-          <span class="card-sub">PowerShell — Windows only</span>
-        </div>
-        <div class="card-body">
-          <div class="hint">Run this ONCE on the worker PC in PowerShell. It downloads the extension, sets up a dedicated Chrome profile, and adds a Windows Startup shortcut so Chrome auto-launches on login with the extension loaded.</div>
-          <div class="row" style="margin-top: 10px;">
-            <div class="setup-code" id="installOneLiner" style="flex: 1; min-width: 300px;">Loading…</div>
-            <button id="copyInstallBtn">Copy</button>
+        <div class="an-layer-head">Install a new worker</div>
+        <div class="card">
+          <div class="card-head">
+            <span class="card-icon">📥</span>
+            <span class="card-title">Install worker on a new PC (one command)</span>
+            <span class="card-sub">PowerShell — Windows only</span>
           </div>
-          <div style="margin-top: 10px; padding: 10px; background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 6px; font-size: 12px; color: var(--text-2);">
-            <strong style="color: var(--text-1);">One-time step after the script finishes:</strong>
-            <ol style="margin: 6px 0 0 20px; padding: 0;">
-              <li>Chrome opens automatically → visit <code>chrome://extensions</code></li>
-              <li>Toggle <strong>Developer mode</strong> on (top-right)</li>
-              <li>Click <strong>Load unpacked</strong> → pick <code>%LOCALAPPDATA%\AdBrainWorker\extension</code></li>
-              <li>That's it — extension auto-arms from bundled config.</li>
-            </ol>
-            <div style="margin-top: 8px; color: var(--success);">✓ From then on, every login auto-launches Chrome with the extension armed. No clicks needed.</div>
+          <div class="card-body">
+            <div class="row" style="margin-bottom: var(--space-3);">
+              <div class="setup-code" id="installOneLiner" style="flex: 1; min-width: 300px;">Loading…</div>
+              <button id="copyInstallBtn">Copy</button>
+            </div>
+            <div class="two-col">
+              <div style="padding: var(--space-3); background: var(--bg-3); border: 1px solid var(--line-2); border-radius: var(--radius-sm); font-size: 12px; color: var(--text-2);">
+                <strong style="color: var(--text-1);">One-time step after the script finishes:</strong>
+                <ol style="margin: 6px 0 0 20px; padding: 0;">
+                  <li>Chrome opens automatically → visit <code>chrome://extensions</code></li>
+                  <li>Toggle <strong>Developer mode</strong> on (top-right)</li>
+                  <li>Click <strong>Load unpacked</strong> → pick <code>%LOCALAPPDATA%\AdBrainWorker\extension</code></li>
+                </ol>
+                <div style="margin-top: 8px; color: var(--success);">✓ Every login after that auto-launches Chrome with the extension armed.</div>
+              </div>
+              <div style="padding: var(--space-3); background: var(--warn-soft); border: 1px solid var(--warn); border-radius: var(--radius-sm); font-size: 12px; color: var(--text-1);">
+                <strong style="color: var(--warn);">Reinstall / update?</strong>
+                Re-running the command above is safe. The installer wipes the old
+                <code>extension/</code> folder, re-downloads the current version, and rewrites
+                <code>worker-config.json</code>. Then click ↻ reload on the AdBrain card in
+                <code>chrome://extensions</code>.
+              </div>
+            </div>
           </div>
-          <div style="margin-top: 10px; padding: 10px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 6px; font-size: 12px; color: var(--text-1);">
-            <strong style="color: var(--warn);">🔄 Reinstall / update?</strong>
-            Re-running the command above is safe. The installer detects existing files, wipes the old <code>extension/</code> folder, re-downloads the current version, and rewrites <code>worker-config.json</code>. Then just click ↻ reload on the AdBrain card in <code>chrome://extensions</code>.
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-head">
-          <span class="card-icon">🗑</span>
-          <span class="card-title" style="color: var(--danger);">Uninstall worker</span>
-          <span class="card-sub">removes files + Startup shortcut on the worker PC</span>
-        </div>
-        <div class="card-body">
-          <div class="hint">Run this on the worker PC to fully remove the extension files, Startup auto-launch shortcut, and (optionally) the dedicated Chrome profile. After it finishes you still need to open <code>chrome://extensions</code> and click <strong>Remove</strong> on the AdBrain card.</div>
-          <div class="row" style="margin-top: 10px;">
-            <div class="setup-code" id="uninstallOneLiner" style="flex: 1; min-width: 300px;">Loading…</div>
-            <button id="copyUninstallBtn" class="secondary">Copy</button>
-          </div>
-          <div class="hint" style="margin-top: 8px;">Or wipe the Chrome profile too (Google login state, cookies) — copy this variant instead:
-            <div class="setup-code" id="uninstallFullOneLiner" style="margin-top: 6px;">Loading…</div>
-          </div>
-        </div>
-      </div>
-
         </div>
       </div>
 
       <div class="an-layer">
-        <div class="an-layer-head">Connect + manage workers</div>
-        <div class="two-col">
-      <div class="card">
-        <div class="card-head">
-          <span class="card-icon">🔗</span>
-          <span class="card-title">Generate setup code for a worker</span>
-        </div>
-        <div class="card-body">
-          <div class="hint">Workers paste this into the extension's popup <strong>Apply setup code</strong> box to connect. Also carries the KP URL you saved above so workers don't have to configure that themselves.</div>
-          <label class="field">
-            <span class="lbl">Manager URL (used by workers)</span>
-            <input type="text" id="workerManagerUrl" placeholder="http://this-pc.tailnet.ts.net:8787" />
-            <div class="hint">Auto-filled with this browser's URL. Change if workers reach the manager via a different hostname/IP.</div>
-          </label>
-          <div class="row">
-            <button id="genSetupBtn">Generate setup code</button>
-            <button class="secondary" id="copySetupBtn" disabled>Copy</button>
+        <div class="an-layer-head">Connect &amp; manage</div>
+        <div class="three-col">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">🔗</span>
+              <span class="card-title">Generate setup code</span>
+            </div>
+            <div class="card-body">
+              <div class="hint">Workers paste this into their extension's <strong>Apply setup code</strong> box. Carries the KP URL too.</div>
+              <label class="field">
+                <span class="lbl">Manager URL</span>
+                <input type="text" id="workerManagerUrl" placeholder="http://this-pc.tailnet.ts.net:8787" />
+              </label>
+              <div class="row">
+                <button id="genSetupBtn">Generate</button>
+                <button class="secondary" id="copySetupBtn" disabled>Copy</button>
+              </div>
+              <div id="setupCodeWrap" style="margin-top: var(--space-2);"></div>
+              <div class="banner warn" style="margin-top: var(--space-2); display:none;" id="setupCodeWarn">
+                ⚠ Contains your manager token. Share over encrypted channels only.
+              </div>
+            </div>
           </div>
-          <div id="setupCodeWrap" style="margin-top: 10px;"></div>
-          <div class="banner warn" style="margin-top: 10px; display:none;" id="setupCodeWarn">
-            ⚠ Code contains your manager token. Share over encrypted channels only — Signal, WhatsApp, Telegram secret chat. Treat it like a password.
-          </div>
-        </div>
-      </div>
 
-      <div class="card">
-        <div class="card-head">
-          <span class="card-icon">📡</span>
-          <span class="card-title">Send command to worker(s)</span>
-        </div>
-        <div class="card-body">
-          <div class="row">
-            <select id="cmdWorker">
-              <option value="">All workers (broadcast)</option>
-            </select>
-            <select id="cmdName">
-              <option value="wake">Wake — start claiming work</option>
-              <option value="reconnect">Force reconnect — override manual Stop</option>
-              <option value="pause">Pause — stop after current SKU</option>
-              <option value="resume">Resume — continue</option>
-              <option value="stop">Stop — cancel and disarm</option>
-              <option value="release_claims">Release claims — hand SKUs back to queue</option>
-            </select>
-            <button id="sendCmdBtn">Send</button>
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">🗑</span>
+              <span class="card-title" style="color: var(--danger);">Uninstall worker</span>
+            </div>
+            <div class="card-body">
+              <div class="hint">Removes extension files + Startup shortcut. You still need to click <strong>Remove</strong> on the AdBrain card in <code>chrome://extensions</code>.</div>
+              <div class="row" style="margin-top: var(--space-2);">
+                <div class="setup-code" id="uninstallOneLiner" style="flex: 1; min-width: 200px;">Loading…</div>
+                <button id="copyUninstallBtn" class="secondary">Copy</button>
+              </div>
+              <div class="hint" style="margin-top: var(--space-2);">Wipe Chrome profile too (login state, cookies):
+                <div class="setup-code" id="uninstallFullOneLiner" style="margin-top: 4px;">Loading…</div>
+              </div>
+            </div>
           </div>
-          <div id="sendCmdResult"></div>
-        </div>
-      </div>
+
+          <div class="card">
+            <div class="card-head">
+              <span class="card-icon">📡</span>
+              <span class="card-title">Send command to worker(s)</span>
+            </div>
+            <div class="card-body">
+              <div class="hint">Broadcast to all workers or target one. Use ⟳ Reconnect if Wake gets ignored (worker was manually stopped).</div>
+              <label class="field">
+                <span class="lbl">Target</span>
+                <select id="cmdWorker">
+                  <option value="">All workers (broadcast)</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="lbl">Command</span>
+                <select id="cmdName">
+                  <option value="wake">Wake — start claiming work</option>
+                  <option value="reconnect">Force reconnect — override manual Stop</option>
+                  <option value="pause">Pause — stop after current SKU</option>
+                  <option value="resume">Resume — continue</option>
+                  <option value="stop">Stop — cancel and disarm</option>
+                  <option value="release_claims">Release claims — hand SKUs back to queue</option>
+                </select>
+              </label>
+              <div class="row">
+                <button id="sendCmdBtn">Send</button>
+              </div>
+              <div id="sendCmdResult"></div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
