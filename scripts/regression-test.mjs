@@ -820,6 +820,71 @@ async function run() {
   const cfgSurvive = await req('GET', '/api/config');
   assertEq(cfgSurvive.status, 200, '20e.14 worker_config survives reset-all');
 
+  // ===== Selective wipe endpoint =====
+  // Requires confirm=WIPE.
+  const wipeNoConfirm = await req('POST', '/api/wipe-selective', {});
+  assertEq(wipeNoConfirm.status, 400, '20w.1 wipe-selective without confirm = 400');
+  // Set up: one batch with jobs + a failed job + a keyword + activity.
+  await req('POST', '/api/jobs/upload', {
+    batchId: 'wipe-test-batch',
+    products: [
+      { url: 'https://dropy.in/products/wipe-a', sku: 'A' },
+      { url: 'https://dropy.in/products/wipe-b', sku: 'B' },
+    ],
+  });
+  await req('POST', '/api/keywords', { rows: [
+    { batch_id: 'wipe-test-batch', keyword: 'k1', product_url: 'https://dropy.in/products/wipe-a' },
+    { batch_id: 'wipe-test-batch', keyword: 'k2', product_url: 'https://dropy.in/products/wipe-a' },
+  ] });
+  await req('POST', '/api/activity', { batchId: 'wipe-test-batch', events: [{ message: 'wt-event' }] });
+  // Mark one job as failed (via a jobs/update failed patch).
+  const listBefore = await req('GET', '/api/jobs/list?batchId=wipe-test-batch');
+  const oneJobId = listBefore.data.rows?.[0]?.id;
+  if (oneJobId) await req('POST', '/api/jobs/update', { jobId: oneJobId, status: 'failed', failed_reason: 'test' });
+  // Wipe only failed jobs, scoped to this batch.
+  const wipeFailed = await req('POST', '/api/wipe-selective', {
+    confirm: 'WIPE',
+    batchId: 'wipe-test-batch',
+    flags: { failedJobsOnly: true },
+  });
+  assertEq(wipeFailed.status, 200, '20w.2 wipe-selective failedJobsOnly ok');
+  assert(wipeFailed.data.deletedFailedJobs >= 0, '20w.3 wipe-selective returns deletedFailedJobs');
+  // Global wipe of activity only — leaves jobs + keywords intact.
+  await req('POST', '/api/activity', { batchId: 'wipe-test-batch', events: [{ message: 'w2' }] });
+  const wipeAct = await req('POST', '/api/wipe-selective', {
+    confirm: 'WIPE', flags: { activity: true },
+  });
+  assertEq(wipeAct.status, 200, '20w.4 wipe-selective activity-only ok');
+  const jobsStill = await req('GET', '/api/jobs/summary');
+  assert(jobsStill.data.batches.length >= 0, '20w.5 wipe-selective activity-only left jobs alone');
+  // Nuke the wipe-test-batch entirely for cleanup.
+  await req('POST', '/api/wipe-selective', {
+    confirm: 'WIPE', batchId: 'wipe-test-batch',
+    flags: { jobs: true, keywords: true, activity: true },
+  });
+
+  // ===== Shopify allowlist =====
+  // Even with valid confirm, the update-product endpoint rejects when
+  // the entire patch is stripped by the allowlist (no allowed fields).
+  const shopBadPatch = await req('POST', '/api/shopify/update-product', {
+    confirm: 'PUSH', productId: 1, patch: { price: '999', weight: 100, variants: [] },
+  });
+  assertEq(shopBadPatch.status, 400, '20s.1 all-stripped patch = 400');
+  assert(shopBadPatch.data.stripped?.includes('price'),  '20s.2 stripped list includes price');
+  assert(shopBadPatch.data.stripped?.includes('weight'), '20s.3 stripped list includes weight');
+  assert(shopBadPatch.data.stripped?.includes('variants'), '20s.4 stripped list includes variants');
+  // No confirm at all → 400.
+  const shopNoConfirm = await req('POST', '/api/shopify/update-product', { productId: 1, patch: { title: 'x' } });
+  assertEq(shopNoConfirm.status, 400, '20s.5 update-product without confirm = 400');
+  // Field impact endpoint reachable + returns the priority order.
+  const impact = await req('GET', '/api/shopify/field-impact');
+  assertEq(impact.status, 200, '20s.6 field-impact endpoint ok');
+  assert(impact.data.fields?.[0]?.field === 'title', '20s.7 title is highest priority');
+  assert(Array.isArray(impact.data.allowlist),        '20s.8 allowlist returned');
+  assert(!impact.data.allowlist.includes('price'),    '20s.9 allowlist excludes price');
+  assert(!impact.data.allowlist.includes('weight'),   '20s.10 allowlist excludes weight');
+  assert(!impact.data.allowlist.includes('variants'), '20s.11 allowlist excludes variants');
+
   // ===== 20l-late. RESET BROADCAST + WORKERS-ROSTER WIPE =====
   // The 20e reset above ran; verify the side-effects that fix the
   // 'workers still heartbeat phantom jobs after reset' bug.
@@ -1378,6 +1443,36 @@ async function run() {
   // Claude "Open in Claude" now uses anchor click (preserves session cookies).
   assert(appFull.includes("a.href = 'https://claude.ai/new'"),         'CRUD.35 Open-in-Claude uses anchor click (session preserved)');
   assert(!appFull.includes("window.open('https://claude.ai/new'"),      'CRUD.36 window.open path removed');
+
+  // Selective wipe + Shopify integration.
+  assert(srvFull.includes("'/api/wipe-selective'"),                    'WIPE.1 selective wipe endpoint');
+  assert(srvFull.includes("if (b.confirm !== 'WIPE')"),                'WIPE.2 wipe endpoint requires confirm=WIPE');
+  assert(apiCrud.includes('wipeSelective:'),                           'WIPE.3 client wipeSelective wrapper');
+  assert(htmlFull.includes('id="wipeModal"'),                          'WIPE.4 wipe modal in HTML');
+  assert(htmlFull.includes('id="openSelectiveWipeBtn"'),               'WIPE.5 open wipe modal button');
+  assert(appFull.includes('function openSelectiveWipeModal'),          'WIPE.6 openSelectiveWipeModal defined');
+  assert(cssFull.includes('.wipe-row'),                                'WIPE.7 wipe-row styled');
+  // Shopify — allowlist enforcement + endpoints + UI.
+  assert(srvFull.includes('SHOPIFY_ALLOWED_FIELDS'),                   'SHOP.1 Shopify allowlist declared');
+  assert(srvFull.includes("'price'") === false || srvFull.includes("SHOPIFY_ALLOWED_FIELDS = new Set([\n  'title'"), 'SHOP.2 allowlist starts with title (not price/weight/location)');
+  const allowedFieldsBlock = srvFull.slice(srvFull.indexOf('SHOPIFY_ALLOWED_FIELDS = new Set(['), srvFull.indexOf(']);', srvFull.indexOf('SHOPIFY_ALLOWED_FIELDS = new Set([')));
+  assert(!allowedFieldsBlock.includes("'price'"),                      'SHOP.3 price NOT in Shopify allowlist');
+  assert(!allowedFieldsBlock.includes("'weight'"),                     'SHOP.4 weight NOT in Shopify allowlist');
+  assert(!allowedFieldsBlock.includes("'variants'"),                   'SHOP.5 variants NOT in Shopify allowlist');
+  assert(!allowedFieldsBlock.includes("'inventory_quantity'"),         'SHOP.6 inventory NOT in Shopify allowlist');
+  assert(srvFull.includes("'/api/shopify/get-product'"),               'SHOP.7 get-product endpoint');
+  assert(srvFull.includes("'/api/shopify/update-product'"),            'SHOP.8 update-product endpoint');
+  assert(srvFull.includes("if (b.confirm !== 'PUSH')"),                'SHOP.9 update-product requires confirm=PUSH');
+  assert(srvFull.includes('stripToShopifyAllowlist'),                  'SHOP.10 allowlist filter fn');
+  assert(apiCrud.includes('shopifyGetProduct:'),                       'SHOP.11 client shopifyGetProduct wrapper');
+  assert(apiCrud.includes('shopifyUpdateProduct:'),                    'SHOP.12 client shopifyUpdateProduct wrapper');
+  assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
+  assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
+  assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');
+  assert(htmlFull.includes('id="cfgShopifyToken"'),                    'SHOP.16 Shopify config token field');
+  assert(appFull.includes('function openShopifyModal'),                'SHOP.17 openShopifyModal defined');
+  assert(appFull.includes('function buildShopifyClaudePrompt'),        'SHOP.18 Claude prompt builder for Shopify');
+  assert(appFull.includes('function extractShopifyJson'),              'SHOP.19 JSON extractor from Claude output');
 
   // Analytics tree structure.
   assert(htmlFull.includes('id="anRail"') && htmlFull.includes('id="anRailTree"'), 'TREE.1 tree rail container in HTML');

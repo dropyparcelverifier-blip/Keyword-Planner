@@ -1789,6 +1789,13 @@ async function loadConfigForm() {
     if (cfg.match_profile) $('cfgMatchProfile').value = cfg.match_profile;
     if (Number.isFinite(cfg.chunk_size)) $('cfgChunkSize').value = cfg.chunk_size;
     if (Number.isFinite(cfg.clip_threshold)) $('cfgClipThreshold').value = cfg.clip_threshold;
+    // Shopify creds — token echoed back masked, domain visible.
+    const sh = cfg.shopify || {};
+    if ($('cfgShopifyDomain')) $('cfgShopifyDomain').value = sh.shopDomain || '';
+    if ($('cfgShopifyToken'))  $('cfgShopifyToken').value  = sh.adminToken ? '•'.repeat(Math.min(sh.adminToken.length, 32)) : '';
+    if ($('cfgShopifyApiVersion')) $('cfgShopifyApiVersion').value = sh.apiVersion || '';
+    const statusSub = $('shopifyStatusSub');
+    if (statusSub) statusSub.textContent = (sh.shopDomain && sh.adminToken) ? `configured (${sh.shopDomain})` : 'not configured';
     state.activeBatchPinned = r.active_batch_id || null;
     if (state.activeBatchPinned) $('pinBatchSelect').value = state.activeBatchPinned;
   } catch (e) {
@@ -1802,6 +1809,167 @@ async function loadConfigForm() {
     if (state.activeBatchPinned) $('pinBatchSelect').value = state.activeBatchPinned;
   } catch {}
 }
+// Shopify config save/clear/test.
+$('cfgShopifySaveBtn')?.addEventListener('click', async () => {
+  const domain = $('cfgShopifyDomain').value.trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  const tokenRaw = $('cfgShopifyToken').value.trim();
+  const apiVersion = $('cfgShopifyApiVersion').value.trim() || '2024-10';
+  if (!domain) { setResult($('cfgShopifyResult'), 'Shop domain required.', 'warn'); return; }
+  // If field is all dots, the user didn't retype — preserve existing token.
+  const preserveToken = /^•+$/.test(tokenRaw);
+  const patch = { shopify: { shopDomain: domain, apiVersion } };
+  if (!preserveToken) patch.shopify.adminToken = tokenRaw;
+  else {
+    const cur = await api.configGet().catch(() => ({ config: {} }));
+    patch.shopify.adminToken = cur.config?.shopify?.adminToken || '';
+  }
+  try {
+    await api.configPatch(patch);
+    setResult($('cfgShopifyResult'), '✓ Shopify config saved.', 'ok');
+    toast('Shopify config saved.', 'ok');
+    $('shopifyStatusSub').textContent = `configured (${domain})`;
+  } catch (e) {
+    setResult($('cfgShopifyResult'), `Save failed: ${e.message}`, 'err');
+    toast(e.message, 'err');
+  }
+});
+$('cfgShopifyClearBtn')?.addEventListener('click', async () => {
+  if (!confirm('Clear Shopify credentials from the manager? The Analytics "Shopify update" flow will stop working until you re-enter them.')) return;
+  try {
+    await api.configPatch({ shopify: null });
+    $('cfgShopifyDomain').value = '';
+    $('cfgShopifyToken').value  = '';
+    $('cfgShopifyApiVersion').value = '';
+    $('shopifyStatusSub').textContent = 'not configured';
+    setResult($('cfgShopifyResult'), '✓ Cleared.', 'ok');
+  } catch (e) { setResult($('cfgShopifyResult'), `Clear failed: ${e.message}`, 'err'); }
+});
+$('cfgShopifyTestBtn')?.addEventListener('click', async () => {
+  const el = $('cfgShopifyTestResult');
+  el.textContent = 'testing…';
+  el.style.color = 'var(--text-2)';
+  try {
+    // Ping the Shopify shop info endpoint by making a dummy get-product
+    // call for a nonexistent handle. If creds work, we'll get 404 with a
+    // valid Shopify response envelope; if not, an auth or 502 error.
+    const r = await api.shopifyGetProduct('https://x/products/__connection_test__' + Date.now());
+    // Should not happen — but if it does, it means the handle exists.
+    el.textContent = '✓ connected (product also exists!)';
+    el.style.color = 'var(--success)';
+  } catch (e) {
+    if (String(e.message).includes('no Shopify product with handle')) {
+      el.textContent = '✓ connected — auth OK';
+      el.style.color = 'var(--success)';
+    } else {
+      el.textContent = `✗ ${e.message}`;
+      el.style.color = 'var(--danger)';
+    }
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  Selective wipe modal
+// ═══════════════════════════════════════════════════════════════
+async function openSelectiveWipeModal() {
+  // Populate batch scope + live counts.
+  const sel = $('wipeBatchScope');
+  sel.innerHTML = '<option value="">— all batches (global) —</option>' +
+    (state.batches || []).map(b => `<option value="${esc(b.batch_id)}">${esc(b.batch_id)} · ${b.total} SKU</option>`).join('');
+  $('wipeConfirmInput').value = '';
+  $('wipeGoBtn').disabled = true;
+  $('wipeResult').innerHTML = '';
+  document.querySelectorAll('#wipeChecklist input[type=checkbox]').forEach(cb => cb.checked = false);
+  document.querySelectorAll('.wipe-count').forEach(sp => sp.textContent = '—');
+  $('wipeModal').style.display = 'flex';
+  await refreshWipeCounts();
+  // Refresh counts on scope change.
+  sel.onchange = refreshWipeCounts;
+}
+async function refreshWipeCounts() {
+  const batchId = $('wipeBatchScope').value || null;
+  try {
+    const [summary, orphans, failed] = await Promise.all([
+      api.jobsSummary().catch(() => ({ batches: [] })),
+      api.keywordsOrphans().catch(() => ({ orphanCount: 0 })),
+      api.failedJobs(batchId).catch(() => ({ rows: [] })),
+    ]);
+    // Jobs + keywords + activity: derive from summary if scoped, else sum.
+    let jobs = 0, keywords = 0, activity = '?';
+    if (batchId) {
+      const b = (summary.batches || []).find(x => x.batch_id === batchId);
+      if (b) { jobs = b.total || 0; }
+      // Keyword count per batch requires the /api/keywords endpoint,
+      // avoid it for perf — leave a hint.
+      keywords = '?';
+      activity = '?';
+    } else {
+      jobs = (summary.batches || []).reduce((a, b) => a + (b.total || 0), 0);
+      keywords = '?';
+      activity = '?';
+    }
+    setWipeCount('jobs', jobs);
+    setWipeCount('keywords', keywords);
+    setWipeCount('activity', activity);
+    setWipeCount('failedJobsOnly', (failed.rows || []).length);
+    setWipeCount('orphansOnly', orphans.orphanCount ?? '?');
+    // Global-only rows: disable when a batch is selected.
+    document.querySelectorAll('#wipeChecklist .wipe-global input[type=checkbox]').forEach(cb => {
+      cb.disabled = !!batchId;
+      if (batchId) cb.checked = false;
+    });
+    document.querySelectorAll('#wipeChecklist .wipe-global').forEach(row => {
+      row.style.opacity = batchId ? '0.4' : '1';
+    });
+    setWipeCount('commands', '(global)');
+    setWipeCount('workers', '(global)');
+  } catch (e) { /* ignore */ }
+}
+function setWipeCount(flag, val) {
+  const el = document.querySelector(`.wipe-count[data-count="${flag}"]`);
+  if (el) el.textContent = typeof val === 'number' ? `~${val.toLocaleString()}` : String(val);
+}
+$('openSelectiveWipeBtn')?.addEventListener('click', openSelectiveWipeModal);
+$('wipeConfirmInput')?.addEventListener('input', () => {
+  const anyChecked = [...document.querySelectorAll('#wipeChecklist input[type=checkbox]:checked')].length > 0;
+  $('wipeGoBtn').disabled = !(anyChecked && $('wipeConfirmInput').value === 'WIPE');
+});
+document.querySelectorAll('#wipeChecklist input[type=checkbox]').forEach(cb => {
+  cb.addEventListener('change', () => {
+    const anyChecked = [...document.querySelectorAll('#wipeChecklist input[type=checkbox]:checked')].length > 0;
+    $('wipeGoBtn').disabled = !(anyChecked && $('wipeConfirmInput').value === 'WIPE');
+  });
+});
+$('wipeGoBtn')?.addEventListener('click', async () => {
+  const flags = {};
+  document.querySelectorAll('#wipeChecklist input[type=checkbox]:checked').forEach(cb => {
+    flags[cb.dataset.flag] = true;
+  });
+  const batchId = $('wipeBatchScope').value || null;
+  const scopeLabel = batchId ? `batch ${batchId}` : 'ALL batches';
+  const flagList = Object.keys(flags).join(', ');
+  if (!confirm(`Wipe [${flagList}] from ${scopeLabel}? This cannot be undone.`)) return;
+  try {
+    const r = await api.wipeSelective(flags, batchId);
+    const parts = [];
+    if (r.deletedJobs)       parts.push(`${r.deletedJobs} jobs`);
+    if (r.deletedKeywords)   parts.push(`${r.deletedKeywords} keywords`);
+    if (r.deletedActivity)   parts.push(`${r.deletedActivity} activity`);
+    if (r.deletedCommands)   parts.push(`${r.deletedCommands} commands`);
+    if (r.deletedWorkers)    parts.push(`${r.deletedWorkers} workers`);
+    if (r.deletedFailedJobs) parts.push(`${r.deletedFailedJobs} failed jobs`);
+    if (r.deletedOrphans)    parts.push(`${r.deletedOrphans} orphans`);
+    const msg = parts.length ? parts.join(' · ') : 'nothing matched — no rows deleted.';
+    $('wipeResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ ${msg}</div>`;
+    toast(msg, 'ok', { title: 'Wiped' });
+    $('wipeConfirmInput').value = '';
+    $('wipeGoBtn').disabled = true;
+    document.querySelectorAll('#wipeChecklist input[type=checkbox]').forEach(cb => cb.checked = false);
+    await loadConfigForm();
+  } catch (e) {
+    $('wipeResult').innerHTML = `<div class="hint" style="color: var(--danger);">Wipe failed: ${e.message}</div>`;
+    toast(e.message, 'err', { title: 'Wipe failed' });
+  }
+});
 $('saveConfigBtn').addEventListener('click', async () => {
   const cfg = {
     kp_url:              $('cfgKpUrl').value.trim(),
@@ -2853,6 +3021,341 @@ function openClaudePromptModal() {
   $('claudeModal').style.display = 'flex';
 }
 $('anClaudeBtn')?.addEventListener('click', openClaudePromptModal);
+
+// ================================================================
+// Shopify sync — per-SKU flow
+// ================================================================
+// 1. Fetch the CURRENT product from Shopify by URL handle (needs
+//    shop domain + admin token wired up in Config → Shopify).
+// 2. Build a Claude prompt that includes:
+//    - Field-impact hierarchy (what carries most rank/CTR weight)
+//    - Current Shopify listing (title/desc/tags/vendor/type/handle)
+//    - Read-only variants list (price/weight/inventory shown so
+//      Claude sees them but is told NOT to touch — the manager
+//      would strip them anyway, but avoiding wasted output tokens)
+//    - Complete keyword research from this session
+// 3. User runs the prompt in Claude → pastes Claude's JSON back.
+// 4. Preview shows: which fields will be sent (allowlist-passing)
+//    vs stripped (blocked by the server-side allowlist).
+// 5. Push → server filters against SHOPIFY_ALLOWED_FIELDS again
+//    (belt + suspenders) and PUTs to Shopify.
+async function openShopifyModal() {
+  if (!analytics.sku) { toast('Pick a SKU first.', 'warn'); return; }
+  const rows = analytics.allRows.filter(r => (r.sku || r.product_url) === analytics.sku);
+  if (rows.length === 0) { toast('No keywords for this SKU yet.', 'warn'); return; }
+  const ctxRow = rows.find(r => r.product_name || r.product_url) || rows[0];
+  const productUrl = ctxRow.product_url;
+  if (!productUrl || !/\/products\//i.test(productUrl)) {
+    toast(`This SKU's product URL doesn't look like a Shopify /products/<handle> URL: ${productUrl}`, 'err', { title: 'Not a Shopify URL' });
+    return;
+  }
+  const body = $('shopifyModalBody');
+  const sub = $('shopifyModalSub');
+  sub.textContent = `${ctxRow.sku || analytics.sku} · fetching current listing…`;
+  body.innerHTML = `<div class="empty">Loading current product from Shopify…<br><span class="hint" style="margin-top:8px; display:block;">${productUrl}</span></div>`;
+  $('shopifyModal').style.display = 'flex';
+  try {
+    const [prodR, impactR] = await Promise.all([
+      api.shopifyGetProduct(productUrl),
+      api.shopifyFieldImpact(),
+    ]);
+    const cur = prodR.product;
+    const impactRows = impactR.fields || [];
+    const allowlist = impactR.allowlist || [];
+    // Build the prompt.
+    const prompt = buildShopifyClaudePrompt({
+      keywordRows: rows,
+      contextRow: ctxRow,
+      currentProduct: cur,
+      impactRows,
+      allowlist,
+    });
+    sub.textContent = `${ctxRow.sku || analytics.sku} · id ${cur.id} · ${rows.length} keyword(s)`;
+    body.innerHTML = renderShopifyModalBody({
+      currentProduct: cur,
+      productUrl,
+      prompt,
+      impactRows,
+      allowlist,
+    });
+    wireShopifyModalHandlers(cur.id, allowlist);
+  } catch (e) {
+    body.innerHTML = `<div class="hint" style="color: var(--danger); padding: 20px 0;">
+      Failed to load: ${e.message}<br><br>
+      <strong>Common causes:</strong><br>
+      · Shopify not configured yet — go to <strong>Config → Shopify integration</strong> and add your shop domain + admin token.<br>
+      · Domain wrong — must be either your custom domain (e.g. <code>dropy.in</code>) or the <code>*.myshopify.com</code> URL.<br>
+      · Token missing <code>write_products</code> scope.<br>
+      · The URL isn't a real Shopify product URL — needs to look like <code>https://your-shop/products/&lt;handle&gt;</code>.
+    </div>`;
+    sub.textContent = '— fetch failed';
+  }
+}
+function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, impactRows, allowlist }) {
+  const rows = keywordRows.slice();
+  const scored = rows.map(r => ({ ...r, _score: opportunityScore(r) })).sort((a, b) => b._score - a._score);
+  const top50 = scored.slice(0, 50);
+  const highIntent = scored.filter(r => (r.buying_intent || '').toLowerCase() === 'high').slice(0, 20);
+  const questions = scored.filter(r => /\b(how|what|why|when|where|which|is|are|do|does|can)\b/i.test(r.keyword || '')).slice(0, 15);
+  const themes = new Map();
+  for (const r of scored) {
+    const toks = String(r.keyword || '').toLowerCase().split(/\s+/).filter(t => t.length > 3);
+    for (const t of toks) themes.set(t, (themes.get(t) || 0) + 1);
+  }
+  const topThemes = [...themes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([t, n]) => `${t} (${n})`);
+
+  const L = [];
+  L.push('# SHOPIFY LISTING UPDATE — STRUCTURED OUTPUT REQUEST');
+  L.push('');
+  L.push('You are updating an existing Shopify product listing on **dropy.in** using fresh keyword research.');
+  L.push('');
+  L.push('## ⚠ HARD CONSTRAINTS');
+  L.push('- **DO NOT** produce values for: `price`, `weight`, `weight_unit`, `location`, `inventory_quantity`, `variants`, `images`, `sku`. These fields are locked at the store level and the manager will REFUSE to push them.');
+  L.push('- **ONLY** produce values for the fields in the allowlist below. Any extra keys will be silently discarded server-side.');
+  L.push('- **Return format**: a single JSON object at the end of your response, inside a fenced ```json code block. NO other JSON blocks elsewhere. NO commentary after the block.');
+  L.push('- **Field priority**: field-impact hierarchy is provided — spend the most effort on `critical` fields.');
+  L.push('- **India-first tone**. Currency ₹. Pan-India shipping context. Natural, not spammy keyword usage.');
+  L.push('- **No invented claims** — no "clinically proven", certifications, or specifics not in the research data.');
+  L.push('');
+  L.push('## FIELD ALLOWLIST + IMPACT HIERARCHY');
+  L.push('| Priority | Field | Impact | Why it matters |');
+  L.push('|---|---|---|---|');
+  for (const r of impactRows) {
+    L.push(`| ${r.impact} | \`${r.field}\` | ${r.impact.toUpperCase()} | ${r.why} |`);
+  }
+  L.push('');
+  L.push('Only these keys go into the JSON: ' + allowlist.map(f => `\`${f}\``).join(', ') + '.');
+  L.push('');
+  L.push('## CURRENT SHOPIFY LISTING (before your changes)');
+  L.push(`- **Product ID**: ${currentProduct.id}`);
+  L.push(`- **Title**: ${currentProduct.title || '(blank)'}`);
+  L.push(`- **Handle**: \`${currentProduct.handle || '(blank)'}\` — do NOT change unless the current one is clearly wrong; changing the handle breaks existing SEO.`);
+  L.push(`- **Vendor**: ${currentProduct.vendor || '(blank)'}`);
+  L.push(`- **Product type**: ${currentProduct.product_type || '(blank)'}`);
+  L.push(`- **Tags** (current): ${currentProduct.tags || '(none)'}`);
+  L.push(`- **Status**: ${currentProduct.status || '(unknown)'}`);
+  L.push('');
+  L.push('**Current body_html** (may be blank / poor):');
+  L.push('```html');
+  L.push((currentProduct.body_html || '(empty)').slice(0, 4000));
+  L.push('```');
+  L.push('');
+  if (currentProduct.variants_readonly?.length) {
+    L.push('**READ-ONLY variant data** (for context — DO NOT include in your output):');
+    for (const v of currentProduct.variants_readonly.slice(0, 8)) {
+      L.push(`  · variant \`${v.sku || v.id}\` — ${v.title || '(no title)'} · ₹${v.price} · ${v.weight || 0}${v.weight_unit || 'g'} · inv ${v.inventory_quantity ?? '—'}`);
+    }
+    L.push('');
+  }
+  if (currentProduct.images?.length) {
+    L.push(`**Images** (${currentProduct.images.length} — READ-ONLY, do NOT include):`);
+    for (const im of currentProduct.images.slice(0, 4)) L.push(`  · ${im.src}  ${im.alt ? '— alt: ' + im.alt : ''}`);
+    L.push('');
+  }
+  L.push('## THIS SKU (research context)');
+  L.push(`- **SKU / handle scope**: ${contextRow.sku || analytics.sku}`);
+  L.push(`- **Product URL**: ${contextRow.product_url}`);
+  L.push(`- **Product name (as scraped)**: ${contextRow.product_name || '(unknown)'}`);
+  L.push('');
+  L.push('## KEYWORD RESEARCH (fresh)');
+  L.push(`Total keywords collected: **${rows.length}**. Below are the top-50 by opportunity score (log-volume × rating × image-matches, adjusted for competition + buying intent).`);
+  L.push('');
+  L.push('### Top 50 opportunity keywords');
+  L.push('| # | Keyword | Volume | Comp | Intent | Imgs | Score |');
+  L.push('|---|---|---|---|---|---|---|');
+  top50.forEach((r, i) => {
+    L.push(`| ${i+1} | ${r.keyword || ''} | ${r.avg_monthly_searches ?? '—'} | ${r.competition || '—'} | ${r.buying_intent || '—'} | ${r.image_count ?? '—'} | ${r._score.toFixed(1)} |`);
+  });
+  L.push('');
+  L.push(`### High buying-intent keywords (${highIntent.length})`);
+  L.push('*Use these in the TITLE, first 100 words of body_html, and SEO title.*');
+  L.push(highIntent.map(r => `- ${r.keyword} (${r.avg_monthly_searches ?? '—'} vol)`).join('\n') || '(none marked high-intent)');
+  L.push('');
+  L.push(`### Question-shaped queries (${questions.length})`);
+  L.push('*Use these to seed FAQ content inside body_html.*');
+  L.push(questions.map(r => `- ${r.keyword}`).join('\n') || '(none detected)');
+  L.push('');
+  L.push('### Top recurring themes / tokens');
+  L.push(topThemes.join(' · '));
+  L.push('');
+  L.push('## OUTPUT SPEC');
+  L.push('Respond with:');
+  L.push('1. A one-paragraph **reasoning summary** (which keywords informed which field, what tradeoffs you made).');
+  L.push('2. A single fenced JSON code block containing ONLY these keys (all optional — omit anything you don\'t want to change):');
+  L.push('```json');
+  L.push('{');
+  L.push('  "title": "…",');
+  L.push('  "body_html": "…full HTML…",');
+  L.push('  "tags": "tag1, tag2, tag3",');
+  L.push('  "product_type": "…",');
+  L.push('  "vendor": "…",');
+  L.push('  "handle": "kebab-case-slug",');
+  L.push('  "metafields_global_title_tag": "SEO <title> (55-60 chars)",');
+  L.push('  "metafields_global_description_tag": "SEO <meta description> (150-160 chars)"');
+  L.push('}');
+  L.push('```');
+  L.push('');
+  L.push('### Character/format rules');
+  L.push('- `title`: 60-70 chars, keyword-forward, benefit-anchored. e.g. "Aquaphor Lip Repair Balm 10g — Cracked Lip Overnight Fix"');
+  L.push('- `handle`: kebab-case, ≤50 chars, no promo words, no ₹, no year. Skip this field entirely for existing products unless the current handle is broken.');
+  L.push('- `metafields_global_title_tag`: 55-60 chars — sharper than title, put brand at the end.');
+  L.push('- `metafields_global_description_tag`: 150-160 chars — different phrasing than the meta title, include CTA.');
+  L.push('- `body_html`: valid HTML. First `<p>` = 2-3 sentences, keyword-anchored, benefit-forward. Then `<h2>` sections for "Why it works", "How to use", "Ingredients / specs", "FAQs" (4-6 Q&A pairs from the questions above). Wrap FAQs in `<details><summary>Q</summary>A</details>` for accordion. No `<script>`, no external images.');
+  L.push('- `tags`: comma-separated, use themes above + category tags. 8-15 tags total.');
+  L.push('');
+  L.push('Begin now. Reasoning first, then the single JSON block.');
+  return L.join('\n');
+}
+function renderShopifyModalBody({ currentProduct, productUrl, prompt, impactRows, allowlist }) {
+  const impactHtml = impactRows.map(r => {
+    const color = r.impact === 'critical' ? 'var(--danger)' : r.impact === 'high' ? 'var(--warn)' : r.impact === 'medium' ? 'var(--accent)' : 'var(--text-3)';
+    return `<div style="display:grid; grid-template-columns: 80px 220px 1fr; gap: 8px; padding: 4px 0; border-bottom: 1px dashed var(--line-1); font-size: 12px;">
+      <span style="color: ${color}; font-weight: 700; text-transform: uppercase;">${r.impact}</span>
+      <code>${r.field}</code>
+      <span class="hint" style="color: var(--text-2);">${r.why}</span>
+    </div>`;
+  }).join('');
+  const readOnlyVariants = (currentProduct.variants_readonly || []).slice(0, 6).map(v =>
+    `<div class="hint" style="font-family: var(--mono); font-size: 11px; margin: 2px 0;">
+      <span style="color: var(--text-3);">${v.sku || v.id}</span> · ${v.title || '(no title)'} · <span style="color: var(--danger);">₹${v.price}</span> · <span style="color: var(--danger);">${v.weight || 0}${v.weight_unit || 'g'}</span> · inv ${v.inventory_quantity ?? '—'}
+    </div>`
+  ).join('');
+  return `
+    <div class="hint" style="margin-bottom: 12px; padding: 10px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 6px;">
+      <strong style="color: var(--warn);">Safety guarantee:</strong>
+      The manager only PUTs these ${allowlist.length} fields to Shopify: ${allowlist.map(f => `<code>${f}</code>`).join(', ')}.
+      Anything else in Claude's JSON — including price, weight, location, inventory, variants — is stripped server-side before the request leaves this process.
+      The read-only variant data below is shown only so you (and Claude) can SEE what's being excluded.
+    </div>
+
+    <details style="margin-bottom: 10px;">
+      <summary style="cursor: pointer; padding: 8px; background: var(--bg-3); border-radius: 6px;"><strong>Current Shopify listing</strong> · id <code>${currentProduct.id}</code> · <a href="${productUrl}" target="_blank" rel="noopener">open in browser →</a></summary>
+      <div style="padding: 10px; background: var(--bg-3); margin-top: 4px; border-radius: 6px;">
+        <div class="hint"><strong>Title:</strong> ${currentProduct.title || '(blank)'}</div>
+        <div class="hint"><strong>Handle:</strong> <code>${currentProduct.handle}</code></div>
+        <div class="hint"><strong>Vendor:</strong> ${currentProduct.vendor || '(blank)'} · <strong>Type:</strong> ${currentProduct.product_type || '(blank)'}</div>
+        <div class="hint"><strong>Tags:</strong> ${currentProduct.tags || '(none)'}</div>
+        <div class="hint"><strong>Status:</strong> ${currentProduct.status}</div>
+        <div class="hint" style="margin-top: 6px;"><strong>Read-only variants</strong> (price/weight/inventory — WILL NOT be updated):</div>
+        ${readOnlyVariants || '<div class="hint">(no variants)</div>'}
+      </div>
+    </details>
+
+    <details style="margin-bottom: 10px;">
+      <summary style="cursor: pointer; padding: 8px; background: var(--bg-3); border-radius: 6px;"><strong>Field-impact hierarchy</strong> — Claude is told to prioritize the top items</summary>
+      <div style="padding: 10px; background: var(--bg-3); margin-top: 4px; border-radius: 6px;">${impactHtml}</div>
+    </details>
+
+    <div class="hint" style="margin: 12px 0 6px 0;"><strong>Step 1 —</strong> Copy the prompt below and paste into Claude.</div>
+    <textarea id="shopifyPromptText" spellcheck="false" style="width:100%; min-height: 240px; font-family: var(--mono); font-size: 11px; padding: 10px; background: var(--bg-input); color: var(--text-1); border: 1px solid var(--line-2); border-radius: 6px; resize: vertical;">${prompt.replace(/</g, '&lt;')}</textarea>
+    <div class="row" style="margin-top: 8px;">
+      <button id="shopifyCopyPromptBtn">📋 Copy prompt</button>
+      <button class="secondary" id="shopifyOpenClaudeBtn">🚀 Open in Claude</button>
+      <span class="spacer" style="flex:1;"></span>
+      <span class="hint">${(prompt.length / 1024).toFixed(1)} KB</span>
+    </div>
+
+    <div class="hint" style="margin: 16px 0 6px 0;"><strong>Step 2 —</strong> Paste Claude's JSON response below. The manager will parse out the \`\`\`json block, filter against the allowlist, and show a preview of exactly what will be sent.</div>
+    <textarea id="shopifyJsonInput" spellcheck="false" placeholder='Paste Claude&#39;s full response OR just the JSON block. Both work.' style="width:100%; min-height: 160px; font-family: var(--mono); font-size: 11px; padding: 10px; background: var(--bg-input); color: var(--text-1); border: 1px solid var(--line-2); border-radius: 6px; resize: vertical;"></textarea>
+    <div class="row" style="margin-top: 8px;">
+      <button id="shopifyPreviewBtn">👁 Preview what will be pushed</button>
+      <span class="spacer" style="flex:1;"></span>
+    </div>
+
+    <div id="shopifyPreviewBox" style="margin-top: 12px;"></div>
+  `;
+}
+function wireShopifyModalHandlers(productId, allowlist) {
+  $('shopifyCopyPromptBtn')?.addEventListener('click', async () => {
+    const t = $('shopifyPromptText').value;
+    if (await copyToClipboard(t)) toast('Prompt copied — paste into Claude.', 'ok', { title: 'Copied' });
+    else { $('shopifyPromptText').select(); toast('Copy failed — text is selected, press Ctrl+C.', 'warn'); }
+  });
+  $('shopifyOpenClaudeBtn')?.addEventListener('click', async () => {
+    await copyToClipboard($('shopifyPromptText').value);
+    toast('Prompt on clipboard — paste into Claude.', 'ok');
+    // Anchor-click pattern (not window.open) so session cookies survive —
+    // same reasoning as the Claude-brief modal.
+    const a = document.createElement('a');
+    a.href = 'https://claude.ai/new';
+    a.target = '_blank';
+    a.rel = 'noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+  $('shopifyPreviewBtn')?.addEventListener('click', () => {
+    const raw = $('shopifyJsonInput').value;
+    const parsed = extractShopifyJson(raw);
+    const box = $('shopifyPreviewBox');
+    if (!parsed.ok) {
+      box.innerHTML = `<div class="hint" style="color: var(--danger); padding: 10px; background: var(--danger-soft); border-radius: 6px;">Could not parse JSON: ${parsed.error}</div>`;
+      return;
+    }
+    const kept = {}, stripped = {};
+    for (const [k, v] of Object.entries(parsed.data)) {
+      if (allowlist.includes(k)) kept[k] = v; else stripped[k] = v;
+    }
+    const keptEntries = Object.entries(kept);
+    const stripEntries = Object.entries(stripped);
+    const renderKeptField = ([k, v]) => {
+      const preview = typeof v === 'string' ? v.slice(0, 500) : JSON.stringify(v);
+      return `<div style="padding: 8px 0; border-bottom: 1px dashed var(--line-1);">
+        <div style="display: flex; gap: 8px; align-items: baseline;">
+          <code style="color: var(--success);">${k}</code>
+          <span class="hint">(${typeof v === 'string' ? v.length + ' chars' : typeof v})</span>
+        </div>
+        <div class="hint" style="margin-top: 4px; white-space: pre-wrap; font-family: var(--mono); font-size: 11px;">${preview.replace(/</g, '&lt;')}${(typeof v === 'string' && v.length > 500) ? '…' : ''}</div>
+      </div>`;
+    };
+    box.innerHTML = `
+      <div style="padding: 10px; background: ${keptEntries.length > 0 ? 'var(--success-soft)' : 'var(--warn-soft)'}; border: 1px solid ${keptEntries.length > 0 ? 'var(--success)' : 'var(--warn)'}; border-radius: 6px;">
+        <div style="display: flex; align-items: baseline; gap: 12px;">
+          <strong style="color: ${keptEntries.length > 0 ? 'var(--success)' : 'var(--warn)'};">${keptEntries.length} field(s) will be pushed to Shopify</strong>
+          ${stripEntries.length > 0 ? `<span class="hint" style="color: var(--danger);">${stripEntries.length} stripped by allowlist</span>` : ''}
+        </div>
+        <div style="margin-top: 8px;">${keptEntries.map(renderKeptField).join('') || '<div class="hint">nothing to send</div>'}</div>
+        ${stripEntries.length > 0 ? `<div class="hint" style="margin-top: 8px; color: var(--danger);"><strong>Stripped:</strong> ${stripEntries.map(([k]) => `<code>${k}</code>`).join(', ')}</div>` : ''}
+        <div class="row" style="margin-top: 12px;">
+          <button class="danger" id="shopifyPushBtn" ${keptEntries.length === 0 ? 'disabled' : ''}>Push to Shopify now</button>
+        </div>
+        <div id="shopifyPushResult" style="margin-top: 8px;"></div>
+      </div>
+    `;
+    $('shopifyPushBtn')?.addEventListener('click', async () => {
+      const btn = $('shopifyPushBtn');
+      btn.disabled = true; btn.textContent = 'Pushing…';
+      try {
+        const r = await api.shopifyUpdateProduct(productId, kept);
+        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${Object.keys(r.sent || {}).map(k => `<code>${k}</code>`).join(', ') || '(none)'}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}</div>`;
+        toast('Shopify listing updated.', 'ok', { title: 'Pushed' });
+      } catch (e) {
+        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--danger);">Push failed: ${e.message}</div>`;
+        toast(e.message, 'err', { title: 'Push failed' });
+      } finally { btn.disabled = false; btn.textContent = 'Push to Shopify now'; }
+    });
+  });
+}
+// Extract a JSON object from either a bare JSON string OR a markdown
+// response containing one or more ```json fenced blocks. If a fenced
+// block exists, use the LAST one (Claude tends to put the final answer
+// last). Otherwise try to parse the whole thing.
+function extractShopifyJson(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return { ok: false, error: 'empty input' };
+  const fenceRe = /```(?:json)?\s*\n?([\s\S]*?)\n?```/gi;
+  const fences = [...s.matchAll(fenceRe)].map(m => m[1].trim()).filter(Boolean);
+  const candidates = fences.length ? [fences[fences.length - 1]] : [s];
+  for (const c of candidates) {
+    try {
+      const j = JSON.parse(c);
+      if (j && typeof j === 'object' && !Array.isArray(j)) return { ok: true, data: j };
+    } catch (e) { /* try next */ }
+  }
+  return { ok: false, error: 'no valid JSON object found (Claude should emit a ```json { … } ``` block)' };
+}
+$('anShopifyBtn')?.addEventListener('click', openShopifyModal);
+
 // Copy top-N keywords (scored, deduped, one per line). N = 25 by default —
 // enough to seed an ad group or meta-keywords block without dumping the
 // whole 480-row pool.
@@ -3150,6 +3653,10 @@ function filterAndRenderAnalytics() {
   if (claudeBtn) claudeBtn.disabled = source.length === 0;
   const copyKwBtn = $('anCopyKwBtn');
   if (copyKwBtn) copyKwBtn.disabled = source.length === 0;
+  // Shopify sync button only makes sense when we're focused on ONE SKU —
+  // fetching from Shopify by handle needs a specific product URL.
+  const shopBtn = $('anShopifyBtn');
+  if (shopBtn) shopBtn.disabled = !(analytics.sku && source.length > 0);
   // Action-bar hint tracks selection state.
   const hint = $('anActionHint');
   if (hint) {

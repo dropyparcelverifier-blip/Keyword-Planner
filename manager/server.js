@@ -19,11 +19,88 @@
 'use strict';
 
 const http = require('http');
+const https = require('https');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 const dgram = require('dgram');
+
+// ---------- Shopify Admin API helpers ----------
+// STRICT ALLOWLIST for Shopify product updates. Everything NOT in this list
+// is stripped server-side before we PUT to Shopify — even if the client
+// puts price/weight/location/variants/inventory in the payload, they will
+// NEVER leave this process. This is the safety guarantee the user asked for:
+// "not price, weight, location etc should not be updated."
+const SHOPIFY_ALLOWED_FIELDS = new Set([
+  'title',
+  'body_html',
+  'tags',
+  'product_type',
+  'vendor',
+  'handle',
+  'metafields_global_title_tag',
+  'metafields_global_description_tag',
+]);
+// Field-impact hierarchy (surfaces to the UI + prompt). Ordered by ranking/
+// visibility impact — Claude is told to spend the most effort on the top
+// items, and the manager UI shows the same order in previews.
+const SHOPIFY_FIELD_IMPACT = [
+  { field: 'title',                              impact: 'critical', why: 'primary rank signal + SERP snippet + cart title' },
+  { field: 'handle',                             impact: 'critical', why: 'URL slug; changing an existing product\'s handle breaks SEO — only regenerate when intentional' },
+  { field: 'metafields_global_title_tag',        impact: 'critical', why: '<title> tag Google shows; 55-60 chars, keyword + benefit + brand' },
+  { field: 'metafields_global_description_tag',  impact: 'high',     why: '<meta description>; drives SERP CTR; 150-160 chars, hook + benefit + CTA' },
+  { field: 'body_html',                          impact: 'high',     why: 'first 100 words = ranking anchor; include secondary keywords + FAQ + buying-intent phrases' },
+  { field: 'tags',                               impact: 'medium',   why: 'on-site search + auto-collections; use themes here' },
+  { field: 'product_type',                       impact: 'medium',   why: 'categorization; filters + auto-collections' },
+  { field: 'vendor',                             impact: 'low',      why: 'brand filter; rarely changes' },
+];
+function stripToShopifyAllowlist(payload) {
+  const out = {};
+  const stripped = [];
+  for (const [k, v] of Object.entries(payload || {})) {
+    if (SHOPIFY_ALLOWED_FIELDS.has(k)) out[k] = v;
+    else stripped.push(k);
+  }
+  return { safe: out, stripped };
+}
+// Extract Shopify product handle from a URL like
+// https://dropy.in/products/<handle> or /products/<handle>?variant=…
+function extractShopifyHandle(url) {
+  if (!url) return null;
+  const m = String(url).match(/\/products\/([^/?#]+)/i);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function shopifyRequest({ shopDomain, adminToken, method, apiPath, body }) {
+  return new Promise((resolve, reject) => {
+    if (!shopDomain || !adminToken) return reject(new Error('Shopify creds missing (configure Shopify domain + admin token in Config → Shopify)'));
+    const domain = String(shopDomain).replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    const reqBody = body ? Buffer.from(JSON.stringify(body)) : null;
+    const req = https.request({
+      hostname: domain,
+      path: apiPath.startsWith('/') ? apiPath : `/${apiPath}`,
+      method,
+      headers: {
+        'X-Shopify-Access-Token': adminToken,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        ...(reqBody ? { 'Content-Length': reqBody.length } : {}),
+      },
+    }, (r) => {
+      const chunks = [];
+      r.on('data', (c) => chunks.push(c));
+      r.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let json = null; try { json = raw ? JSON.parse(raw) : null; } catch {}
+        if (r.statusCode >= 200 && r.statusCode < 300) return resolve({ ok: true, status: r.statusCode, data: json });
+        resolve({ ok: false, status: r.statusCode, error: json?.errors || raw || `HTTP ${r.statusCode}`, data: json });
+      });
+    });
+    req.on('error', reject);
+    if (reqBody) req.write(reqBody);
+    req.end();
+  });
+}
 
 // Wake-on-LAN — send a magic packet to the given MAC. The magic packet
 // is: 6 bytes of 0xFF followed by 16 repetitions of the target MAC.
@@ -1200,6 +1277,132 @@ const server = http.createServer(async (req, res) => {
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
       return send(res, 200, { ok: true, batchId, deletedJobs: j, deletedKeywords: k, deletedActivity: a });
+    }
+    // ---------- Shopify integration ----------
+    // Returns the field-impact hierarchy (what carries most SEO/CTR weight).
+    // UI uses this to render a priority list; the Claude prompt inlines it too.
+    if (m === 'GET' && p === '/api/shopify/field-impact') {
+      return send(res, 200, { ok: true, fields: SHOPIFY_FIELD_IMPACT, allowlist: [...SHOPIFY_ALLOWED_FIELDS] });
+    }
+    // GET current product from Shopify by URL. Extracts the handle, calls
+    // /admin/api/2024-10/products.json?handle=… . Returns the current
+    // title, body_html, tags, vendor, product_type, handle, SEO meta,
+    // images (readonly for context), variants (readonly for context only —
+    // NEVER round-tripped to update). Used to build the Claude prompt.
+    if (m === 'GET' && p === '/api/shopify/get-product') {
+      const url = new URL(req.url, 'http://x');
+      const productUrl = url.searchParams.get('url') || '';
+      const handle = extractShopifyHandle(productUrl);
+      if (!handle) return send(res, 400, { ok: false, error: `could not extract Shopify product handle from URL: ${productUrl}` });
+      const cfgRow = Q.getConfig.get();
+      const cfg = cfgRow?.config ? JSON.parse(cfgRow.config) : {};
+      const shop = cfg.shopify || {};
+      const apiVer = shop.apiVersion || '2024-10';
+      const r = await shopifyRequest({
+        shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+        method: 'GET', apiPath: `/admin/api/${apiVer}/products.json?handle=${encodeURIComponent(handle)}`,
+      });
+      if (!r.ok) return send(res, r.status || 502, { ok: false, error: `Shopify API: ${JSON.stringify(r.error)}` });
+      const prod = (r.data?.products || [])[0];
+      if (!prod) return send(res, 404, { ok: false, error: `no Shopify product with handle "${handle}"` });
+      return send(res, 200, {
+        ok: true, handle,
+        product: {
+          id: prod.id,
+          title: prod.title || '',
+          body_html: prod.body_html || '',
+          tags: prod.tags || '',
+          vendor: prod.vendor || '',
+          product_type: prod.product_type || '',
+          handle: prod.handle || '',
+          status: prod.status || '',
+          created_at: prod.created_at || null,
+          updated_at: prod.updated_at || null,
+          // SEO metafields don't come in the base product payload; fetch
+          // separately if needed via /admin/api/.../products/<id>/metafields.json.
+          // For now show empty and let Claude generate fresh.
+          seo_title: '',
+          seo_description: '',
+          // Images/variants included READ-ONLY for prompt context. Never
+          // round-tripped to update — the allowlist has no room for them.
+          images: (prod.images || []).map(im => ({ id: im.id, src: im.src, alt: im.alt || '' })),
+          variants_readonly: (prod.variants || []).map(v => ({
+            id: v.id, sku: v.sku, title: v.title,
+            price: v.price, weight: v.weight, weight_unit: v.weight_unit,
+            inventory_quantity: v.inventory_quantity, inventory_management: v.inventory_management,
+          })),
+        },
+      });
+    }
+    // Update a Shopify product. Client sends {productId, patch}. Patch is
+    // filtered against SHOPIFY_ALLOWED_FIELDS BEFORE the PUT; stripped
+    // fields are returned in the response so the UI can show
+    // "these were dropped, will not be sent" — the safety guarantee.
+    if (m === 'POST' && p === '/api/shopify/update-product') {
+      const b = await readJson(req);
+      const productId = Number(b.productId);
+      if (!productId) return send(res, 400, { ok: false, error: 'productId required' });
+      if (!b.patch || typeof b.patch !== 'object') return send(res, 400, { ok: false, error: 'patch object required' });
+      if (b.confirm !== 'PUSH') return send(res, 400, { ok: false, error: "safety: send {confirm:'PUSH'} to proceed" });
+      const { safe, stripped } = stripToShopifyAllowlist(b.patch);
+      if (Object.keys(safe).length === 0) {
+        return send(res, 400, { ok: false, error: 'no allowlisted fields in patch (all were stripped)', stripped });
+      }
+      const cfgRow = Q.getConfig.get();
+      const cfg = cfgRow?.config ? JSON.parse(cfgRow.config) : {};
+      const shop = cfg.shopify || {};
+      const apiVer = shop.apiVersion || '2024-10';
+      const r = await shopifyRequest({
+        shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+        method: 'PUT', apiPath: `/admin/api/${apiVer}/products/${productId}.json`,
+        body: { product: { id: productId, ...safe } },
+      });
+      if (!r.ok) return send(res, r.status || 502, { ok: false, error: `Shopify API: ${JSON.stringify(r.error)}`, stripped, sent: safe });
+      return send(res, 200, { ok: true, productId, sent: safe, stripped, product: r.data?.product || null });
+    }
+    // Selective wipe — user picks which categories to nuke, optionally
+    // scoped to one batch. Client sends {confirm:'WIPE', flags:{...}, batchId?}.
+    // Flags: jobs, keywords, activity, commands, workers, failedJobsOnly,
+    // orphansOnly. batchId scopes {jobs, keywords, activity, failedJobsOnly}
+    // to that batch; global-only flags (commands/workers/orphansOnly) ignore
+    // batchId. Returns per-category delete counts.
+    if (m === 'POST' && p === '/api/wipe-selective') {
+      const b = await readJson(req);
+      if (b.confirm !== 'WIPE') return send(res, 400, { ok: false, error: "safety: send {confirm:'WIPE'} to proceed" });
+      const flags = b.flags || {};
+      const batchId = (b.batchId && String(b.batchId).trim()) || null;
+      let dJobs=0, dKw=0, dAct=0, dCmd=0, dWrk=0, dFail=0, dOrph=0;
+      db.exec('BEGIN');
+      try {
+        // failedJobsOnly wins over the 'jobs' flag (it's a narrower delete).
+        if (flags.failedJobsOnly) {
+          const stmt = batchId
+            ? db.prepare(`DELETE FROM jobs WHERE status='failed' AND batch_id=?`)
+            : db.prepare(`DELETE FROM jobs WHERE status='failed'`);
+          dFail = (batchId ? stmt.run(batchId) : stmt.run()).changes;
+        } else if (flags.jobs) {
+          dJobs = batchId ? Q.deleteBatchJobs.run(batchId).changes : Q.wipeJobs.run().changes;
+        }
+        if (flags.keywords) dKw  = batchId ? Q.deleteBatchKeywords.run(batchId).changes : Q.wipeKeywords.run().changes;
+        if (flags.activity) dAct = batchId ? Q.deleteBatchActivity.run(batchId).changes : Q.wipeActivity.run().changes;
+        // Global-only flags — batchId doesn't apply.
+        if (flags.commands)     dCmd  = Q.wipeCommands.run().changes;
+        if (flags.workers)      dWrk  = Q.wipeWorkersRoster.run().changes;
+        if (flags.orphansOnly)  dOrph = Q.deleteOrphanKeywords.run().changes;
+        // Unpin active batch if we just wiped its jobs.
+        if (flags.jobs) {
+          const cfgRow = Q.getConfig.get();
+          if (batchId && cfgRow?.active_batch_id === batchId) Q.setActiveBatch.run(null);
+          if (!batchId) Q.setActiveBatch.run(null);
+        }
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      return send(res, 200, {
+        ok: true, batchId,
+        deletedJobs: dJobs, deletedKeywords: dKw, deletedActivity: dAct,
+        deletedCommands: dCmd, deletedWorkers: dWrk,
+        deletedFailedJobs: dFail, deletedOrphans: dOrph,
+      });
     }
     // ----- Destructive: nuke everything except worker_config -----
     if (m === 'POST' && p === '/api/reset-all') {
