@@ -1559,6 +1559,30 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
   border-radius: inherit;
 }
 
+/* Selective-wipe modal rows — checkbox + label + live count in one grid row. */
+.wipe-row {
+  display: grid;
+  grid-template-columns: 24px 1fr 120px;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+}
+.wipe-row:hover { border-color: var(--line-2); background: var(--bg-2); }
+.wipe-row input[type=checkbox]:checked ~ span:first-of-type { color: var(--danger); }
+.wipe-row:has(input[type=checkbox]:checked) { border-color: var(--danger); background: var(--danger-soft); }
+.wipe-row .wipe-count {
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
+.wipe-row.wipe-global { border-style: dashed; }
+
 /* Motion-reduced users — respect the OS setting. Kills animation, keeps
    layout / color transitions instant. */
 @media (prefers-reduced-motion: reduce) {

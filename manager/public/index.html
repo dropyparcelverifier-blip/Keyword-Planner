@@ -282,6 +282,7 @@
             <div class="an-actionbar-hint" id="anActionHint">Pick a batch to begin.</div>
             <span class="spacer" style="flex:1;"></span>
             <button class="small" id="anClaudeBtn" disabled title="Assemble a Claude prompt from this SKU's keyword research (title, subtitle, description, ingredients, how-to-use, FAQs, SEO, ad copy).">Claude brief</button>
+            <button class="small" id="anShopifyBtn" disabled title="Fetch this SKU's current Shopify listing, merge with keyword research, generate a Claude prompt, then push Claude's structured JSON back to Shopify (price/weight/location stripped server-side).">🛍 Shopify update</button>
             <button class="small secondary" id="anCopyKwBtn" disabled title="Copy top-25 keywords by opportunity score to clipboard (one per line).">Copy top keywords</button>
             <button class="small secondary" id="anExportBtn" disabled>Export CSV</button>
           </div>
@@ -308,6 +309,74 @@
               <span class="spacer" style="flex:1;"></span>
               <span id="claudePromptStats" class="hint"></span>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Selective-wipe modal — pick exactly which data categories to
+           delete, optionally scoped to a batch. Requires typing WIPE to
+           confirm. Shows a live count next to each checkbox. -->
+      <div id="wipeModal" class="modal-root" style="display:none;">
+        <div class="modal-backdrop" data-close-modal="1"></div>
+        <div class="modal-card">
+          <div class="modal-head">
+            <span class="modal-title">🎯 Selective wipe</span>
+            <span class="hint" style="margin-left: 8px;">tick what to delete — the rest stays intact</span>
+            <span class="spacer" style="flex:1;"></span>
+            <button class="small secondary" data-close-modal="1">Close</button>
+          </div>
+          <div class="modal-body">
+            <div class="hint" style="margin-bottom: 10px;">
+              <strong>Scope:</strong> leave batch as <em>all batches</em> for global wipe, or pick one batch to scope job/keyword/activity deletes to that batch only. Commands, workers roster, and orphan cleanup always run globally.
+            </div>
+            <div class="row" style="margin-bottom: 12px;">
+              <label style="flex:1;">
+                <div class="hint">Batch scope</div>
+                <select id="wipeBatchScope" style="width:100%;">
+                  <option value="">— all batches (global) —</option>
+                </select>
+              </label>
+            </div>
+            <div id="wipeChecklist" style="display: grid; gap: 8px;">
+              <label class="wipe-row"><input type="checkbox" data-flag="jobs"        /><span><strong>Jobs</strong> — the queue rows (pending/claimed/done/failed)</span><span class="wipe-count" data-count="jobs">—</span></label>
+              <label class="wipe-row"><input type="checkbox" data-flag="keywords"    /><span><strong>Keyword rows</strong> — everything scraped (Analytics data)</span><span class="wipe-count" data-count="keywords">—</span></label>
+              <label class="wipe-row"><input type="checkbox" data-flag="activity"    /><span><strong>Activity log</strong> — worker events, errors, info</span><span class="wipe-count" data-count="activity">—</span></label>
+              <label class="wipe-row"><input type="checkbox" data-flag="failedJobsOnly" /><span><strong>Failed jobs only</strong> — keep pending/claimed/done; drop just the failures</span><span class="wipe-count" data-count="failedJobsOnly">—</span></label>
+              <label class="wipe-row"><input type="checkbox" data-flag="orphansOnly" /><span><strong>Orphan keywords</strong> — keyword rows whose batch is gone</span><span class="wipe-count" data-count="orphansOnly">—</span></label>
+              <label class="wipe-row wipe-global"><input type="checkbox" data-flag="commands"    /><span><strong>Commands</strong> — worker command bus history <em>(global only)</em></span><span class="wipe-count" data-count="commands">—</span></label>
+              <label class="wipe-row wipe-global"><input type="checkbox" data-flag="workers"     /><span><strong>Workers roster</strong> — the list of registered worker PCs <em>(global only — they re-register on next heartbeat)</em></span><span class="wipe-count" data-count="workers">—</span></label>
+            </div>
+            <div class="row" style="margin-top: 14px; align-items: center;">
+              <label style="flex:1; font-size: 12px; color: var(--text-2);">
+                Type <code style="color: var(--danger);">WIPE</code> to enable:
+                <input type="text" id="wipeConfirmInput" placeholder="WIPE" style="margin-top: 4px;" autocomplete="off" />
+              </label>
+              <button class="danger" id="wipeGoBtn" disabled>Wipe selected</button>
+            </div>
+            <div id="wipeResult" style="margin-top: 10px;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Shopify sync modal — per-SKU flow. Fetches the current product
+           from Shopify (title/desc/tags/vendor/product_type/etc), merges
+           with the SKU's keyword research data, builds a structured Claude
+           prompt. User runs prompt in Claude → pastes JSON back here →
+           manager filters against SHOPIFY_ALLOWED_FIELDS server-side (price/
+           weight/location/variants/inventory literally cannot leave the
+           process) → PUTs to Shopify. Read-only variant data shown for
+           context so the user can SEE what's being excluded. -->
+      <div id="shopifyModal" class="modal-root" style="display:none;">
+        <div class="modal-backdrop" data-close-modal="1"></div>
+        <div class="modal-card" style="max-width: 1080px;">
+          <div class="modal-head">
+            <span class="modal-title">🛍 Shopify listing sync</span>
+            <span id="shopifyModalSub" class="hint" style="margin-left: 8px;">—</span>
+            <span class="spacer" style="flex:1;"></span>
+            <button class="small secondary" data-close-modal="1">Close</button>
+          </div>
+          <div class="modal-body" id="shopifyModalBody">
+            <div class="empty">Loading current product from Shopify…</div>
           </div>
         </div>
       </div>
@@ -649,6 +718,51 @@
       </div>
 
       <div class="an-layer">
+        <div class="an-layer-head">Shopify integration</div>
+        <div class="card collapsible">
+          <div class="card-head">
+            <span class="card-icon">🛍</span>
+            <span class="card-title">Shopify Admin API</span>
+            <span class="card-sub" id="shopifyStatusSub">not configured</span>
+          </div>
+          <div class="card-body">
+            <div class="hint">
+              Wire up dropy.in so Analytics can pull the current Shopify listing and (after a Claude pass) push back an updated one.
+              <strong>Price, weight, location, inventory, and variant data are literally stripped server-side</strong> — they cannot leave this process no matter what payload arrives. See the field-impact list under any SKU's "Generate Shopify update" for what actually gets sent.
+            </div>
+            <div class="grid-2" style="margin-top: 10px;">
+              <label class="field">
+                <span class="lbl">Shop domain</span>
+                <input type="text" id="cfgShopifyDomain" placeholder="dropy.in  or  your-shop.myshopify.com" autocomplete="off" />
+                <div class="hint">Use your custom domain OR the <code>*.myshopify.com</code> shop URL. The <code>https://</code> is optional.</div>
+              </label>
+              <label class="field">
+                <span class="lbl">Admin API access token</span>
+                <input type="password" id="cfgShopifyToken" placeholder="shpat_…" autocomplete="new-password" />
+                <div class="hint">Create a custom app in Shopify admin → Apps → Develop apps → Configuration → grant <code>write_products</code>. Copy the Admin API access token here.</div>
+              </label>
+            </div>
+            <div class="grid-2" style="margin-top: 6px;">
+              <label class="field">
+                <span class="lbl">API version</span>
+                <input type="text" id="cfgShopifyApiVersion" placeholder="2024-10" />
+                <div class="hint">Leave blank for <code>2024-10</code>. Update when Shopify deprecates.</div>
+              </label>
+              <div class="field">
+                <span class="lbl">Connection test</span>
+                <div class="row"><button class="secondary" id="cfgShopifyTestBtn">Test connection</button><span id="cfgShopifyTestResult" class="hint" style="margin-left: 8px;">not tested</span></div>
+              </div>
+            </div>
+            <div class="row" style="margin-top: 10px;">
+              <button id="cfgShopifySaveBtn">Save Shopify config</button>
+              <button class="secondary" id="cfgShopifyClearBtn">Clear credentials</button>
+            </div>
+            <div id="cfgShopifyResult"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="an-layer">
         <div class="an-layer-head">Maintenance</div>
         <div class="two-col">
           <div class="card collapsible">
@@ -729,6 +843,19 @@
       <div class="an-layer">
         <div class="an-layer-head" style="color: var(--danger);">Danger zone</div>
         <div class="two-col">
+          <div class="card collapsible collapsed">
+            <div class="card-head">
+              <span class="card-icon">🎯</span>
+              <span class="card-title">Selective wipe</span>
+              <span class="card-sub">pick exactly what to delete</span>
+            </div>
+            <div class="card-body">
+              <div class="hint">A checkbox for each data category, optionally scoped to one batch. Deletes only what you tick. Useful when you want to wipe activity but keep keywords, or delete failed jobs only, etc.</div>
+              <div class="row" style="margin-top: 10px;">
+                <button class="danger" id="openSelectiveWipeBtn">Open selective wipe…</button>
+              </div>
+            </div>
+          </div>
           <div class="card collapsible collapsed">
             <div class="card-head">
               <span class="card-icon">🗑</span>

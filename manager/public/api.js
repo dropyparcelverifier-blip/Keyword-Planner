@@ -87,6 +87,10 @@ export const api = {
   setWorkerMac:      (workerId, mac)   => _fetch('/api/workers/set-mac', { method: 'POST', body: { workerId, mac } }),
   batchNames:        ()                => _fetch('/api/batches/names'),
   renameBatch:       (batchId, name)   => _fetch('/api/batches/rename', { method: 'POST', body: { batchId, name } }),
+  wipeSelective:     (flags, batchId)  => _fetch('/api/wipe-selective', { method: 'POST', body: { confirm: 'WIPE', flags, batchId: batchId || null } }),
+  shopifyFieldImpact:  ()              => _fetch('/api/shopify/field-impact'),
+  shopifyGetProduct:   (productUrl)    => _fetch(`/api/shopify/get-product?url=${encodeURIComponent(productUrl)}`),
+  shopifyUpdateProduct:(productId, patch) => _fetch('/api/shopify/update-product', { method: 'POST', body: { confirm: 'PUSH', productId, patch } }),
 };
 
 // Live keyword stats — mirrors the extension's dashboard fetchBatchKeywordStats.
