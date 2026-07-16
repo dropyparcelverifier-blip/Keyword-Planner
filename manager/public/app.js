@@ -4119,11 +4119,12 @@ function renderAnalyticsTable(rows) {
       }
       if (c.kind === 'imgs') {
         const n = toNum(v);
-        return `<td class="num" style="color:${(n||0) > 0 ? 'var(--success)' : 'var(--text-3)'};">${n ?? 0}</td>`;
+        const isZero = !n || n === 0;
+        return `<td class="num" ${isZero ? 'data-zero="1"' : ''} style="color:${isZero ? 'var(--text-3)' : 'var(--success)'}; font-weight:${isZero ? '400' : '600'};">${n ?? 0}</td>`;
       }
       if (c.kind === 'rating') {
         const n = toNum(v);
-        if (n == null) return `<td class="num" style="color:var(--text-3);">—</td>`;
+        if (n == null) return `<td class="num" data-zero="1">—</td>`;
         const color = n >= 7 ? 'var(--success)' : n >= 4 ? 'var(--warn)' : 'var(--text-3)';
         return `<td class="num" style="color:${color};">${n.toFixed(1)}</td>`;
       }
@@ -4152,28 +4153,38 @@ function renderAnalyticsTable(rows) {
       }
       if (c.kind === 'comp') {
         const s = String(v || '').toLowerCase();
-        if (!s || s === '—') return `<td class="num" style="color:var(--text-3);">—</td>`;
-        const color = s === 'high' ? 'var(--danger)' : s === 'medium' ? 'var(--warn)' : 'var(--success)';
-        return `<td style="color:${color};">${esc(v)}</td>`;
+        if (!s || s === '—') return `<td class="num" data-zero="1">—</td>`;
+        // Chip-style pill so KP competition reads instantly:
+        // Low = green (easy target), Medium = amber (moderate),
+        // High = red (crowded). Text-only rendering blended in with
+        // all the other numeric columns.
+        const cls = s === 'high' ? 'chip-high' : s === 'medium' ? 'chip-med' : 'chip-low';
+        return `<td><span class="comp-chip ${cls}">${esc(v)}</span></td>`;
       }
       if (c.kind === 'money') {
         const n = toNum(v);
-        if (n == null || n === 0) return `<td class="num" style="color:var(--text-3);">—</td>`;
-        return `<td class="num">₹${n.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>`;
+        if (n == null || n === 0) return `<td class="num" data-zero="1">—</td>`;
+        return `<td class="num" style="color:var(--text-1); font-weight:600;">₹${n.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>`;
       }
       if (c.kind === 'pct') {
         const n = toNum(v);
-        if (n == null || n === 0) return `<td class="num" style="color:var(--text-3);">—</td>`;
+        if (n == null || n === 0) return `<td class="num" data-zero="1">—</td>`;
+        // Visibility % is one of the most actionable signals — make
+        // high values pop visually with weight + color.
         const color = n >= 50 ? 'var(--success)' : n >= 20 ? 'var(--warn)' : 'var(--text-2)';
-        return `<td class="num" style="color:${color};">${n.toFixed(0)}%</td>`;
+        const weight = n >= 50 ? 700 : n >= 20 ? 600 : 400;
+        return `<td class="num" style="color:${color}; font-weight:${weight};">${n.toFixed(0)}%</td>`;
       }
       if (c.kind === 'yesno') {
         const yes = String(v || '').toLowerCase() === 'yes' || v === true || v === 1;
-        return yes ? `<td class="num" style="color:var(--success);">✓</td>` : `<td class="num" style="color:var(--text-3);">·</td>`;
+        return yes ? `<td class="num" style="color:var(--success); font-weight:700;">✓</td>` : `<td class="num" data-zero="1">·</td>`;
       }
       if (c.kind === 'num') {
         const n = toNum(v);
-        return `<td class="num">${n != null ? n.toLocaleString() : '<span style="color:var(--text-3);">—</span>'}</td>`;
+        if (n == null) return `<td class="num" data-zero="1">—</td>`;
+        // Zero numbers are visible but dimmed so 0 vs non-zero reads at
+        // a glance in a wide table of numeric columns.
+        return `<td class="num" ${n === 0 ? 'data-zero="1"' : ''}>${n.toLocaleString()}</td>`;
       }
       if (c.kind === 'details') {
         // Rendered as a button with data-row-idx so the row's full data is

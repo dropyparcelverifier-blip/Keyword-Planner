@@ -502,9 +502,10 @@
       </div>
 
       <!-- ─── LAYER: DEEP DIVE — the full sortable/filterable table ──── -->
-      <div id="anLayerDeepDive" class="an-layer" style="display:none;">
-        <div class="an-layer-head">Keywords</div>
-      </div>
+      <!-- Empty layer wrapper kept so JS show/hide toggles still work.
+           The 'Keywords' section header is redundant with the card's
+           own 'Keywords' title inside anTableCard. -->
+      <div id="anLayerDeepDive" class="an-layer" style="display:none;"></div>
       <div id="anTableCard" style="display:none;">
         <div class="card collapsible">
           <div class="card-head">
