@@ -173,6 +173,52 @@ body { min-height: 100vh; display: flex; flex-direction: column; }
    pill instead of a card-with-empty-body. */
 .card.collapsible.collapsed .card-head { border-bottom: none; }
 
+/* Hover-peek: hovering over a collapsed card's header temporarily
+   reveals the body as an overlay so users can preview content
+   without permanently expanding. Click to keep it open (regular
+   collapse toggle). Uses position: relative on the collapsed card
+   so the overlay body positions absolute against it. */
+.card.collapsible.collapsed { position: relative; }
+.card.collapsible.collapsed:hover { z-index: 5; }
+.card.collapsible.collapsed:hover .card-head {
+  border-bottom: 1px solid var(--line-1);
+  background: var(--bg-hover);
+}
+.card.collapsible.collapsed:hover .card-body {
+  display: block;
+  position: absolute;
+  left: 0; right: 0; top: 100%;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-top: none;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  max-height: 480px;
+  overflow-y: auto;
+  animation: peekIn 120ms var(--ease) both;
+}
+@keyframes peekIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+/* Tiny chevron→eye tint on hover so users can see the peek is a
+   real interaction, not just a colour twitch. */
+.card.collapsible.collapsed:hover .card-head::after {
+  color: var(--accent);
+}
+/* When the peek is open, add a subtle "hover to keep · click to
+   expand" hint — appended via ::before on the peeking card-body. */
+.card.collapsible.collapsed:hover .card-body::before {
+  content: 'previewing · click header to keep open';
+  display: block;
+  padding: 4px var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  background: var(--bg-3);
+  border-bottom: 1px solid var(--line-1);
+  font-style: italic;
+}
+
 /* Two-column layout helper — sidebar right on wide, stacks on narrow */
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); align-items: start; }
 /* Three equal columns — used on the Workers tab so Uninstall / Setup /
