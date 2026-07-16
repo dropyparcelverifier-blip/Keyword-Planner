@@ -496,29 +496,55 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
    with content. Rail is sticky + scrolls independently; pane fills
    remaining width.
    ═════════════════════════════════════════════════════════════════════ */
+/* Two-column layout: 280px rail + fluid pane. When .rail-collapsed is
+   set on the layout, the rail column collapses to zero and a slim
+   ribbon appears on the left edge of the pane so users can restore it. */
 .an-layout {
   display: grid;
   grid-template-columns: 280px 1fr;
   gap: var(--space-3);
   align-items: start;
+  position: relative;
 }
+.an-layout.rail-collapsed {
+  grid-template-columns: 0 1fr;
+  gap: 0;
+}
+.an-layout.rail-collapsed .an-rail { display: none; }
+/* Ribbon on the left edge of the pane when collapsed — click to restore. */
+.an-layout .an-rail-restore {
+  display: none;
+  position: fixed; top: 50%; left: 0; transform: translateY(-50%);
+  padding: 12px 4px; background: var(--bg-3); border: 1px solid var(--line-2);
+  border-left: none; border-radius: 0 4px 4px 0;
+  color: var(--text-2); font-size: 14px; cursor: pointer; z-index: 5;
+}
+.an-layout .an-rail-restore:hover { color: var(--accent); background: var(--bg-hover); }
+.an-layout.rail-collapsed .an-rail-restore { display: block; }
+
 .an-rail {
   position: sticky; top: 0;
   max-height: calc(100vh - 120px);
   display: flex; flex-direction: column;
   background: var(--bg-2);
   border: 1px solid var(--line-2);
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 .an-rail-head {
   padding: var(--space-2);
   border-bottom: 1px solid var(--line-1);
   background: var(--bg-1);
+  display: flex; gap: var(--space-1);
 }
 .an-rail-head input[type="text"] {
-  width: 100%; font-size: var(--text-sm); padding: 5px 8px;
+  flex: 1; font-size: var(--text-sm); padding: 5px 8px;
 }
+#anRailToggle {
+  padding: 2px 8px; font-size: 14px; line-height: 1; color: var(--text-3);
+  background: transparent; border: 1px solid var(--line-2);
+}
+#anRailToggle:hover { color: var(--accent); background: var(--bg-hover); }
 .an-rail-tree {
   flex: 1; overflow-y: auto;
   padding: var(--space-2) 0;
@@ -815,6 +841,29 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
 .scatter circle      { cursor: pointer; transition: r 120ms, stroke-width 120ms; }
 .scatter circle:hover { stroke-width: 2; stroke: #fff; }
 .scatter-legend { display: flex; gap: 12px; font-size: 10px; color: var(--text-2); margin-top: 8px; flex-wrap: wrap; }
+/* Placeholder shown INSTEAD of the scatter chart when the data can't
+   support a meaningful plot (no KP volume + low image-count variety).
+   Was previously rendering as ugly vertical columns. */
+.scatter-placeholder {
+  padding: var(--space-5) var(--space-4);
+  background: var(--bg-input);
+  border: 1px dashed var(--line-2);
+  border-radius: var(--radius-sm);
+  text-align: center;
+}
+.scatter-placeholder-title {
+  font-size: var(--text-md); font-weight: 600; color: var(--text-2);
+  margin-bottom: var(--space-2);
+}
+.scatter-placeholder-body {
+  font-size: var(--text-sm); color: var(--text-3); line-height: 1.6;
+  max-width: 620px; margin: 0 auto;
+}
+.scatter-placeholder-body code {
+  background: var(--bg-3); padding: 1px 6px; border-radius: 3px;
+  font-family: var(--mono); font-size: var(--text-xs); color: var(--text-1);
+}
+
 .scatter-tt {
   position: absolute; z-index: 20; pointer-events: none;
   background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 6px;

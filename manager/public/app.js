@@ -2289,22 +2289,31 @@ async function renderAnalyticsTree() {
     btn.addEventListener('click', async () => {
       const bid = btn.dataset.batch;
       const expNow = _loadExpanded();
-      const wasActive = bid === analytics.batchId;
-      // First click on an inactive batch → select it (don't toggle expand).
-      // Subsequent click on the active batch → toggle expand.
-      if (!wasActive) {
+      const clickedCaret = e.target.classList?.contains('tree-caret');
+      // Caret click ALWAYS toggles expand (no side-effects on selection).
+      // Anywhere else on the row selects the batch WITHOUT touching
+      // expand state — users said batches shouldn't auto-expand.
+      if (clickedCaret) {
+        if (expNow.has(bid)) expNow.delete(bid); else expNow.add(bid);
+        _saveExpanded(expNow);
+        // Also load the batch if we're expanding an unloaded one — SKUs
+        // come from analytics.allRows which requires loadAnalyticsBatch.
+        if (expNow.has(bid) && analytics.batchId !== bid) {
+          analytics.batchId = bid;
+          analytics.sku = '';
+          $('anBatchSelect').value = bid;
+          await loadAnalyticsBatch(bid);
+        }
+        await renderAnalyticsTree();
+        return;
+      }
+      // Row click (not caret): select only. Batch stays collapsed.
+      if (bid !== analytics.batchId) {
         analytics.batchId = bid;
         analytics.sku = '';
         $('anBatchSelect').value = bid;
-        // Auto-expand on select if not already expanded.
-        if (!expNow.has(bid)) { expNow.add(bid); _saveExpanded(expNow); }
         await loadAnalyticsBatch(bid);
         await renderAnalyticsTree();
-      } else {
-        // Toggle expand.
-        if (expNow.has(bid)) expNow.delete(bid); else expNow.add(bid);
-        _saveExpanded(expNow);
-        renderAnalyticsTree();
       }
     });
   });
@@ -2450,6 +2459,37 @@ function wirePickerSearch() {
   });
 }
 wirePickerSearch();
+
+// Rail collapse toggle — persists state to localStorage. Also injects
+// the restore-ribbon element on first setup so users can click ▸ on
+// the left edge to bring the rail back.
+(function wireRailToggle() {
+  const layout = document.querySelector('.an-layout');
+  if (!layout) return;
+  // Inject restore ribbon (positioned by CSS; only visible when collapsed).
+  if (!layout.querySelector('.an-rail-restore')) {
+    const rib = document.createElement('button');
+    rib.className = 'an-rail-restore';
+    rib.title = 'Restore navigation rail';
+    rib.textContent = '▸';
+    layout.appendChild(rib);
+    rib.addEventListener('click', () => {
+      layout.classList.remove('rail-collapsed');
+      try { localStorage.setItem('adbrainAnRailCollapsed', '0'); } catch {}
+    });
+  }
+  // Restore persisted state on load.
+  try {
+    if (localStorage.getItem('adbrainAnRailCollapsed') === '1') {
+      layout.classList.add('rail-collapsed');
+    }
+  } catch {}
+  const btn = document.getElementById('anRailToggle');
+  if (btn) btn.addEventListener('click', () => {
+    layout.classList.add('rail-collapsed');
+    try { localStorage.setItem('adbrainAnRailCollapsed', '1'); } catch {}
+  });
+})();
 $('anBatchSelect').addEventListener('change', async () => {
   analytics.batchId = $('anBatchSelect').value;
   analytics.sku = '';
@@ -3077,6 +3117,33 @@ function renderScatter(rows) {
   })).filter(r => r.score > 0);
 
   if (scored.length === 0) { el.innerHTML = `<div class="hint">No scored keywords yet.</div>`; if (sub) sub.textContent = '—'; return; }
+
+  // Sanity gate: the scatter is only useful when the X-axis has enough
+  // real variance to spread dots. With no KP volume AND a low image_count
+  // spread, the chart collapses to a few vertical columns of stacked
+  // dots — visually degenerate. Users said 'not useful' in that state.
+  // Show an actionable placeholder instead.
+  const volRows = scored.filter(r => r.vol > 0).length;
+  const distinctImg = new Set(scored.map(r => r.imgs)).size;
+  const looksUseful = volRows >= 5 || distinctImg >= 8;
+  if (!looksUseful) {
+    el.innerHTML = `
+      <div class="scatter-placeholder">
+        <div class="scatter-placeholder-title">Score × Volume scatter unavailable</div>
+        <div class="scatter-placeholder-body">
+          This chart needs either <strong>KP monthly-volume data</strong> (5+ rows)
+          or <strong>image-match variety</strong> (8+ distinct counts) to plot meaningfully.
+          Right now: <strong>${volRows}</strong> rows with KP volume,
+          <strong>${distinctImg}</strong> distinct image-match counts.
+          <br><br>
+          Fix: enable <code>backfillKpMetrics</code> in Config → Worker config, then re-run this batch.
+          Meanwhile the Top-10 ranking below and the Deep-dive table are unaffected.
+        </div>
+      </div>`;
+    if (title) title.textContent = 'Score × Volume — needs KP data';
+    if (sub) sub.textContent = 'scatter hidden (would render as columns)';
+    return;
+  }
 
   // X-axis pick — MUST be independent of Score (which weights AdRating
   // heavily). Falling back to AdRating produced a useless diagonal line
