@@ -2554,36 +2554,12 @@ function wirePickerSearch() {
 }
 wirePickerSearch();
 
-// Rail collapse toggle — persists state to localStorage. Also injects
-// the restore-ribbon element on first setup so users can click ▸ on
-// the left edge to bring the rail back.
-(function wireRailToggle() {
-  const layout = document.querySelector('.an-layout');
-  if (!layout) return;
-  // Inject restore ribbon (positioned by CSS; only visible when collapsed).
-  if (!layout.querySelector('.an-rail-restore')) {
-    const rib = document.createElement('button');
-    rib.className = 'an-rail-restore';
-    rib.title = 'Restore navigation rail';
-    rib.textContent = '▸';
-    layout.appendChild(rib);
-    rib.addEventListener('click', () => {
-      layout.classList.remove('rail-collapsed');
-      try { localStorage.setItem('adbrainAnRailCollapsed', '0'); } catch {}
-    });
-  }
-  // Restore persisted state on load.
-  try {
-    if (localStorage.getItem('adbrainAnRailCollapsed') === '1') {
-      layout.classList.add('rail-collapsed');
-    }
-  } catch {}
-  const btn = document.getElementById('anRailToggle');
-  if (btn) btn.addEventListener('click', () => {
-    layout.classList.add('rail-collapsed');
-    try { localStorage.setItem('adbrainAnRailCollapsed', '1'); } catch {}
-  });
-})();
+// One-time repair: clear any stale rail-collapse flag from earlier
+// versions that had a collapse toggle. Users who clicked collapse
+// before we removed the feature would otherwise see a broken layout
+// with rail fragments visible on the left edge on next visit.
+try { localStorage.removeItem('adbrainAnRailCollapsed'); } catch {}
+try { document.querySelector('.an-layout')?.classList.remove('rail-collapsed'); } catch {}
 $('anBatchSelect').addEventListener('change', async () => {
   analytics.batchId = $('anBatchSelect').value;
   analytics.sku = '';
@@ -3212,32 +3188,22 @@ function renderScatter(rows) {
 
   if (scored.length === 0) { el.innerHTML = `<div class="hint">No scored keywords yet.</div>`; if (sub) sub.textContent = '—'; return; }
 
-  // Sanity gate: the scatter is only useful when the X-axis has enough
-  // real variance to spread dots. With no KP volume AND a low image_count
-  // spread, the chart collapses to a few vertical columns of stacked
-  // dots — visually degenerate. Users said 'not useful' in that state.
-  // Show an actionable placeholder instead.
+  // Sanity gate: scatter is only meaningful with REAL KP volume on the
+  // X-axis. Falling back to integer image_count produces vertical columns
+  // of stacked dots — the user called this out as "useless, remove it".
+  // Hide the whole card in that state; the Top-10 + Deep-dive still work.
   const volRows = scored.filter(r => r.vol > 0).length;
-  const distinctImg = new Set(scored.map(r => r.imgs)).size;
-  const looksUseful = volRows >= 5 || distinctImg >= 8;
-  if (!looksUseful) {
-    el.innerHTML = `
-      <div class="scatter-placeholder">
-        <div class="scatter-placeholder-title">Score × Volume scatter unavailable</div>
-        <div class="scatter-placeholder-body">
-          This chart needs either <strong>KP monthly-volume data</strong> (5+ rows)
-          or <strong>image-match variety</strong> (8+ distinct counts) to plot meaningfully.
-          Right now: <strong>${volRows}</strong> rows with KP volume,
-          <strong>${distinctImg}</strong> distinct image-match counts.
-          <br><br>
-          Fix: enable <code>backfillKpMetrics</code> in Config → Worker config, then re-run this batch.
-          Meanwhile the Top-10 ranking below and the Deep-dive table are unaffected.
-        </div>
-      </div>`;
-    if (title) title.textContent = 'Score × Volume — needs KP data';
-    if (sub) sub.textContent = 'scatter hidden (would render as columns)';
+  if (volRows < 5) {
+    // Hide the whole card so the layout doesn't leave an empty rectangle.
+    const card = el.closest('.card');
+    if (card) card.style.display = 'none';
+    if (sub) sub.textContent = '';
+    if (title) title.textContent = '';
     return;
   }
+  // Restore card visibility for subsequent renders that DO have volume data.
+  const card = el.closest('.card');
+  if (card) card.style.display = '';
 
   // X-axis pick — MUST be independent of Score (which weights AdRating
   // heavily). Falling back to AdRating produced a useless diagonal line

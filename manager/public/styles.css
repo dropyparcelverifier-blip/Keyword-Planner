@@ -501,31 +501,17 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
    with content. Rail is sticky + scrolls independently; pane fills
    remaining width.
    ═════════════════════════════════════════════════════════════════════ */
-/* Two-column layout: 280px rail + fluid pane. When .rail-collapsed is
-   set on the layout, the rail column collapses to zero and a slim
-   ribbon appears on the left edge of the pane so users can restore it. */
+/* Two-column layout: 260px tree rail + fluid content pane.
+   Collapse toggle was removed — it caused a broken layout on some
+   states (rail partially hidden with fragments leaking through) and
+   the tree is narrow enough that always showing it costs almost
+   nothing. Simpler is better. */
 .an-layout {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 260px 1fr;
   gap: var(--space-3);
   align-items: start;
-  position: relative;
 }
-.an-layout.rail-collapsed {
-  grid-template-columns: 0 1fr;
-  gap: 0;
-}
-.an-layout.rail-collapsed .an-rail { display: none; }
-/* Ribbon on the left edge of the pane when collapsed — click to restore. */
-.an-layout .an-rail-restore {
-  display: none;
-  position: fixed; top: 50%; left: 0; transform: translateY(-50%);
-  padding: 12px 4px; background: var(--bg-3); border: 1px solid var(--line-2);
-  border-left: none; border-radius: 0 4px 4px 0;
-  color: var(--text-2); font-size: 14px; cursor: pointer; z-index: 5;
-}
-.an-layout .an-rail-restore:hover { color: var(--accent); background: var(--bg-hover); }
-.an-layout.rail-collapsed .an-rail-restore { display: block; }
 
 .an-rail {
   position: sticky; top: 0;
@@ -695,6 +681,31 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
   .exec-bullet { grid-template-columns: 1fr; gap: 4px; }
 }
 
+/* Deep-dive filter row — inline layout (was stacking because global
+   'select { width: 100% }' fought the flex row). Grid gives every field
+   an explicit column so nothing wraps to full-width. */
+.filter-row {
+  display: grid;
+  grid-template-columns: 1fr 160px 180px auto auto;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  align-items: center;
+}
+.filter-row input[type="text"],
+.filter-row select {
+  width: 100%; padding: 5px 8px; font-size: var(--text-sm);
+}
+.filter-row .filter-num,
+.filter-row .filter-chk {
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--text-xs); color: var(--text-2); white-space: nowrap;
+}
+.filter-row .filter-num input[type="number"] { width: 56px; padding: 4px 6px; font-size: var(--text-sm); }
+@media (max-width: 900px) {
+  .filter-row { grid-template-columns: 1fr 1fr; }
+  .filter-row .filter-num, .filter-row .filter-chk { grid-column: span 2; }
+}
+
 /* Compact keyword table — deep-dive grid with 15+ columns. Rules:
    1. Headers never wrap (multi-line headers destroy scannability).
    2. Fixed 32px row height — chips inside cells shrink instead of stacking.
@@ -733,6 +744,15 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
 }
 .tbl.compact td.num,
 .tbl.compact th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+/* Numeric cells default to dim so ONLY the highlighted signal cells
+   (score bar green, chip cells with tone, colored ratings) stand out.
+   The uniform-green treatment users saw before drowned the eye in
+   noise — every number looked equally important. */
+.tbl.compact td.num { color: var(--text-2); }
+.tbl.compact td.num > span { color: inherit; }
+/* Zero values (0, 0%, —) dim further so scanning the table for
+   non-zero signals is instant. */
+.tbl.compact td.num[data-zero="1"] { color: var(--text-3); }
 .tbl.compact td .chip {
   padding: 1px 6px;
   font-size: 9px;

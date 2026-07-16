@@ -264,8 +264,7 @@
       <div class="an-layout">
         <aside class="an-rail" id="anRail">
           <div class="an-rail-head">
-            <input type="text" id="anRailSearch" placeholder="Search…" autocomplete="off" />
-            <button class="tiny ghost" id="anRailToggle" title="Collapse this rail so the content pane goes full-width. Click the ▸ ribbon on the left edge to bring it back.">‹</button>
+            <input type="text" id="anRailSearch" placeholder="Search batches or SKUs…" autocomplete="off" />
           </div>
           <div class="an-rail-tree" id="anRailTree"></div>
           <!-- Hidden legacy controls the filter pipeline still reads. -->
@@ -422,14 +421,14 @@
         </div>
       </div>
 
-      <!-- ─── LAYER: CONTENT PLAN — what to write ──────────────────── -->
       <!-- ─── LAYER: PRIORITIZE — what to act on first ─────────────── -->
-      <!-- Scatter is the visual centerpiece: full-width, tall, so users
-           can actually see the quick-wins quadrant. Top-10 bar chart
-           lives BELOW as a companion ranking. -->
+      <!-- Scatter (when KP volume available) takes a full-width row.
+           Below: Top-10 ranking + Source donut side by side (both are
+           short ranking/breakdown lists, waste horizontal space at
+           full-width). Coverage gauge removed earlier as duplicate. -->
       <div id="anLayerPrioritize" class="an-layer" style="display:none;">
         <div class="an-layer-head">Prioritize</div>
-        <div class="card">
+        <div class="card" id="anScatterCard">
           <div class="card-head">
             <span class="card-icon">💎</span>
             <span class="card-title" id="anScatterTitle">Quick-wins quadrant</span>
@@ -439,41 +438,38 @@
             <div id="anScatter" class="scatter-full"></div>
           </div>
         </div>
-        <div id="anTopChartCard" style="display:none;">
+        <div class="two-col">
+          <div id="anTopChartCard" style="display:none;">
+            <div class="card collapsible">
+              <div class="card-head">
+                <span class="card-icon">🏆</span>
+                <span class="card-title">Top 10 by opportunity score</span>
+                <span class="card-sub" id="anTopChartSub">—</span>
+              </div>
+              <div class="card-body">
+                <div id="anTopChart"></div>
+              </div>
+            </div>
+          </div>
           <div class="card collapsible">
             <div class="card-head">
-              <span class="card-icon">🏆</span>
-              <span class="card-title">Top 10 by opportunity score</span>
-              <span class="card-sub" id="anTopChartSub">—</span>
+              <span class="card-icon">🥯</span>
+              <span class="card-title">Source distribution</span>
+              <span class="card-sub" id="anDonutSub">—</span>
             </div>
             <div class="card-body">
-              <div id="anTopChart"></div>
+              <div id="anDonut"></div>
             </div>
           </div>
         </div>
-      </div>
-
-      <!-- ─── LAYER: DISTRIBUTE — how the pool breaks down ──────────── -->
-      <!-- Coverage vs 100–300 gauge removed as duplicate: the hero
-           KEYWORDS card already shows target status ('in target range' /
-           'below 100' / 'above 300'). Source donut kept — nothing else
-           on the page shows the primary-source breakdown percentages. -->
-      <div id="anLayerDistribute" class="an-layer" style="display:none;">
-        <div class="an-layer-head">Distribution</div>
-        <div class="card collapsible">
-          <div class="card-head">
-            <span class="card-icon">🥯</span>
-            <span class="card-title">Source distribution</span>
-            <span class="card-sub" id="anDonutSub">—</span>
-          </div>
-          <div class="card-body">
-            <div id="anDonut"></div>
-          </div>
-        </div>
-        <!-- Hidden legacy container — some code paths still reference #anGauge. -->
+        <!-- Hidden legacy containers — some code paths still reference these. -->
         <div id="anGauge" style="display:none;"></div>
         <span id="anGaugeSub" style="display:none;"></span>
       </div>
+
+      <!-- Distribute layer folded into Prioritize (donut moved up alongside Top-10).
+           Keeping the anLayerDistribute id so JS show/hide toggles still work. -->
+      <div id="anLayerDistribute" style="display:none;"></div>
 
       <div id="anLayerContent" class="an-layer" style="display:none;">
         <div class="an-layer-head">Content plan</div>
@@ -523,9 +519,9 @@
                  on. Users click a group chip to reveal its columns; state
                  persists to localStorage. -->
             <div id="anColGroups" class="col-group-strip"></div>
-            <div class="row" style="margin-bottom: 10px;">
-              <input type="text" id="anSearch" placeholder="Filter keywords…" style="flex: 1; min-width: 220px;" />
-              <select id="anSource" style="min-width: 150px;">
+            <div class="filter-row">
+              <input type="text" id="anSearch" placeholder="Filter keywords…" />
+              <select id="anSource">
                 <option value="">All sources</option>
                 <option value="kp">KP</option>
                 <option value="autosuggest">Autosuggest</option>
@@ -534,18 +530,18 @@
                 <option value="related">Related</option>
                 <option value="amazon">Amazon</option>
               </select>
-              <select id="anIntent" style="min-width: 150px;">
+              <select id="anIntent">
                 <option value="">All intents</option>
                 <option value="high">High buying intent</option>
                 <option value="medium">Medium</option>
                 <option value="low">Low</option>
                 <option value="informational">Informational</option>
               </select>
-              <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-2);">
+              <label class="filter-num">
                 Min AdRating
-                <input type="number" id="anMinRating" min="0" max="10" step="1" value="0" style="width: 60px;" />
+                <input type="number" id="anMinRating" min="0" max="10" step="1" value="0" />
               </label>
-              <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-2);">
+              <label class="filter-chk">
                 <input type="checkbox" id="anOnlyImgMatches" />
                 Only with image matches
               </label>
