@@ -942,6 +942,31 @@ async function pollWorkerCommands() {
           }).catch(() => {});
           bufferActivity({ level: 'ok', source: 'cmd', message: `Reconnect command received — force-armed (userStoppedArm cleared). Will auto-claim next chunk.` });
           setTimeout(() => workerAutoPollTick().catch(() => {}), 200);
+        } else if (c.command === 'hard_reset') {
+          // NUCLEAR OPTION for stuck engines.
+          //
+          // Reconnect only clears flags — it can't abort a hung `await`
+          // inside the engine loop (e.g., a SERP tab that never fires
+          // ready, a fetch that never resolves). When the fleet-grid
+          // frozen-engine detector fires, the manager sends this
+          // command instead of reconnect. chrome.runtime.reload() kills
+          // the current SW + all its pending microtasks and reloads
+          // the entire extension. Storage state (workerId, config,
+          // claimed jobs, pending pushes) survives; the frozen engine
+          // loop does not.
+          //
+          // Ack the command BEFORE reloading, otherwise the ack never
+          // sends and the manager will re-send this every poll cycle.
+          try { await acknowledgeCommand(c.id, state.workerId); } catch {}
+          bufferActivity({ level: 'warn', source: 'cmd', message: `Hard-reset command received — reloading extension to unstick frozen engine.` });
+          // Flush the activity buffer so the manager sees the reload
+          // event before the SW dies.
+          try { await flushActivityBuffer(); } catch {}
+          // Small delay so buffered writes settle to storage.
+          setTimeout(() => { try { chrome.runtime.reload(); } catch {} }, 200);
+          // Continue the loop; the reload will kill us shortly. Don't
+          // fall through to the shared acknowledgeCommand below.
+          continue;
         } else if (c.command === 'wake') {
           // Manager broadcast "wake up and check for work". Triggers an
           // immediate auto-poll tick — but does NOT override an

@@ -689,7 +689,9 @@ async function run() {
   const bgSrcK = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
   assert(bgSrcK.includes('async function _doAutoConnectWorker'), '20k.1 _doAutoConnectWorker extracted');
   // workerAutoPollTick should now await the direct call, not sendMessage.
-  const pollTickBody = bgSrcK.substring(bgSrcK.indexOf('async function workerAutoPollTick'));
+  // Normalize CRLF so \n}\n matches on Windows too.
+  const bgSrcKNorm = bgSrcK.replace(/\r\n/g, '\n');
+  const pollTickBody = bgSrcKNorm.substring(bgSrcKNorm.indexOf('async function workerAutoPollTick'));
   const pollTickEnd = pollTickBody.indexOf('\n}\n');
   const pollTickFn = pollTickBody.substring(0, pollTickEnd);
   assert(pollTickFn.includes('await _doAutoConnectWorker'),
@@ -1195,8 +1197,9 @@ async function run() {
   assert(!appFull.includes('function renderSkuPreview'), 'DS.25 SKU preview function removed — hero owns identity');
   // Collapsible cards + persistence.
   assert(htmlFull.includes('<div id="anInsightsCard">\n          <div class="card collapsible">'), 'DS.29 Insights card collapsible');
-  assert(htmlFull.includes('<div id="anThemesCard">\n          <div class="card collapsible">'),   'DS.30 Themes card collapsible');
-  assert(htmlFull.includes('<div id="anGapCard">\n          <div class="card collapsible">'),       'DS.31 Gap card collapsible');
+  // Themes + Gap moved into a two-col grid; indentation grew by 2 spaces.
+  assert(/<div id="anThemesCard">\s*<div class="card collapsible">/.test(htmlFull), 'DS.30 Themes card collapsible');
+  assert(/<div id="anGapCard">\s*<div class="card collapsible">/.test(htmlFull),    'DS.31 Gap card collapsible');
   assert(htmlFull.includes('<div id="anTableCard" style="display:none;">\n        <div class="card collapsible">'), 'DS.32 Deep-dive keyword table collapsible');
   assert(appFull.includes('adbrainCollapsedCards'), 'DS.33 collapsed state persisted to localStorage');
   // Scatter fallback + KP diagnostic banner + verify-on-connect.

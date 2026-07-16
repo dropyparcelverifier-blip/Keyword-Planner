@@ -810,12 +810,20 @@ async function refreshDashboard() {
     // Uses the whole-log fetch (activity.events) rather than a separate
     // per-worker call — cheap because it's one API call already made.
     const lastByWorker = new Map();
+    const lastEngineByWorker = new Map();
     for (const ev of (activity.events || [])) {
       if (!ev.worker_id) continue;
       if (!lastByWorker.has(ev.worker_id)) lastByWorker.set(ev.worker_id, ev);
+      // Also track the last ENGINE event (source != 'cmd') so the
+      // frozen-detector can spot workers whose SW is still polling
+      // for commands but whose engine loop hasn't produced anything.
+      if (ev.source !== 'cmd' && !lastEngineByWorker.has(ev.worker_id)) {
+        lastEngineByWorker.set(ev.worker_id, ev);
+      }
     }
     for (const w of state.workers) {
       w._lastActivity = lastByWorker.get(w.worker_id) || null;
+      w._lastEngineActivity = lastEngineByWorker.get(w.worker_id) || null;
     }
     // Emit toast notifications for passive events (SKU done, batch
     // complete, worker offline, etc.) that happened since the last
@@ -1282,12 +1290,17 @@ function renderWorkerFleet() {
       const ago = Date.now() - hb;
       if (!hb || ago > 5 * 60 * 1000) return { label: 'OFFLINE', color: 'var(--danger)' };
       if (ago > 3 * 60 * 1000)        return { label: 'stale (no heartbeat)', color: 'var(--warn)' };
-      // Stuck-engine detection: heartbeat is fresh BUT no new activity
-      // for 5+ minutes AND the worker is holding claims (so it SHOULD
-      // be doing something). The SW is alive (heartbeat) but the engine
-      // loop has frozen — most commonly on a hung SERP, a KP page that
-      // never fires the ready signal, or a network stall inside pushToAdBrain.
-      const lastActTs = act ? Number(new Date(act.ts).getTime() || 0) : 0;
+      // Stuck-engine detection: heartbeat is fresh BUT no new ENGINE
+      // activity for 5+ minutes AND the worker is holding claims.
+      // Look at the last ENGINE-produced event, not just any event —
+      // command acks (source='cmd') don't count because a stuck engine
+      // still keeps polling for + acking commands via the SW alarm,
+      // making the raw "last activity" reset every time reconnect fires.
+      // We use the enriched _lastEngineActivity (fetched in
+      // refreshDashboard) which is the newest non-cmd row for this
+      // worker; fall back to _lastActivity if empty.
+      const eAct = worker._lastEngineActivity || (act && act.source !== 'cmd' ? act : null);
+      const lastActTs = eAct ? Number(new Date(eAct.ts).getTime() || 0) : 0;
       const actAgo = lastActTs > 0 ? Date.now() - lastActTs : Infinity;
       const inFlight = Number(worker.in_flight || 0);
       if (actAgo > 5 * 60 * 1000 && inFlight > 0) {
@@ -1351,9 +1364,9 @@ function renderWorkerFleet() {
         <strong>${frozen.length} worker${frozen.length > 1 ? 's' : ''} STUCK — heartbeat is fine, but the engine has stopped producing activity</strong>
         (${frozen.map(w => `${w.worker_id} · last activity ${fmtAgo(w._lastActivity?.ts)}`).join(', ')}).
         Most common cause: a SERP/KP tab hung, or a network stall in the push queue.
-        Try Force reconnect first; if that doesn't unstick it, Stop then re-Connect on the worker PC.
+        Reconnect can't fix this — it doesn't abort a hung await. Hard-reset reloads the extension SW.
       </div>
-      <button id="reconnectAllFrozenBtn" class="small" style="background:var(--warn); color:#000;">⟳ Reconnect all frozen</button>
+      <button id="reconnectAllFrozenBtn" class="small danger">Hard reset all frozen</button>
     </div>` : '';
 
   el.innerHTML = frozenBanner + stuckBanner + `<table class="tbl">
@@ -1424,20 +1437,20 @@ function renderWorkerFleet() {
     toast(`Released ${total} SKU(s) — active workers will pick them up on the next claim cycle.`, 'ok', { title: '↻ All locked SKUs released' });
     refreshDashboard();
   });
-  // Reconnect-all-frozen button. Sends 'reconnect' to every frozen
-  // worker — this overrides any user-stopped flag and re-arms the engine
-  // loop. If the worker was mid-SKU with a hung SERP tab, reconnect
-  // won't fix that — user still needs to close the tab manually — but
-  // 90% of "frozen" cases are transient (SW alarm race, network stall)
-  // and reconnect brings them back.
+  // Hard-reset all frozen — sends 'hard_reset' command which reloads
+  // the extension SW on each worker via chrome.runtime.reload(). This
+  // is the only way to abort a truly hung `await` inside the engine
+  // loop (reconnect only clears flags — it can't break the deadlock).
+  // Worker acks the command BEFORE reloading so the manager sees the
+  // event land; then the SW dies and re-spawns with fresh state.
   $('reconnectAllFrozenBtn')?.addEventListener('click', async () => {
-    if (!confirm(`Send Force reconnect to ${frozen.length} frozen worker(s)? If this doesn't unstick them within ~60s, physically visit the worker PC and Stop → Connect.`)) return;
+    if (!confirm(`Send HARD RESET to ${frozen.length} frozen worker(s)?\n\nThis reloads the extension service worker — the ONLY way to break a hung engine loop. Storage state (worker id, config, claimed jobs, pending pushes) is preserved. Reconnect alone can't fix this because it doesn't abort a hung await.`)) return;
     let sent = 0;
     for (const w of frozen) {
-      try { await api.commandsSend(w.worker_id, 'reconnect', {}); sent++; } catch {}
+      try { await api.commandsSend(w.worker_id, 'hard_reset', {}); sent++; } catch {}
     }
-    toast(`Reconnect sent to ${sent} worker(s). Give them ~60s to re-arm.`, 'info', { title: '⟳ Reconnect broadcast' });
-    setTimeout(refreshDashboard, 3000);
+    toast(`Hard-reset sent to ${sent} worker(s). Extension SWs will reload within ~30s (next command-poll tick).`, 'info', { title: 'Hard reset broadcast' });
+    setTimeout(refreshDashboard, 5000);
   });
   // Click worker ID -> filter activity log to that worker.
   el.querySelectorAll('a[data-filter-worker]').forEach(a => {
@@ -2307,6 +2320,10 @@ async function renderAnalyticsTree() {
     });
   });
 }
+// Per-batch job list cache — populated by loadAnalyticsBatch and reused
+// by the tree renderer to show zero-kw SKUs alongside kw-rich ones.
+const _treeJobCache = new Map();
+
 function _renderTreeSkusCached(batchId) {
   // Only render SKUs if we've loaded them into analytics.allRows already.
   // Otherwise return a placeholder — loadAnalyticsBatch() populates it,
@@ -2314,22 +2331,44 @@ function _renderTreeSkusCached(batchId) {
   if (analytics.batchId !== batchId || !analytics.allRows.length) {
     return `<div class="tree-empty" style="padding: 6px 8px; font-size: 10px;">Select this batch to load its SKUs.</div>`;
   }
-  // Group allRows by SKU key.
+  // Group allRows by SKU key — these are SKUs that produced keywords.
   const bySku = new Map();
   for (const r of analytics.allRows) {
     const key = r.sku || r.product_url || 'unknown';
-    if (!bySku.has(key)) bySku.set(key, { key, name: r.product_name || '', count: 0 });
+    if (!bySku.has(key)) bySku.set(key, { key, name: r.product_name || '', count: 0, status: 'done' });
     bySku.get(key).count++;
+  }
+  // Merge in ALL jobs from the batch — includes SKUs marked done/failed
+  // that produced ZERO keyword rows. Without this, the "21 done" stat
+  // vs "12 SKUs in tree" mismatch is invisible to users.
+  const jobs = _treeJobCache.get(batchId) || [];
+  for (const j of jobs) {
+    const key = j.sku || j.product_url || 'unknown';
+    if (!bySku.has(key)) {
+      bySku.set(key, {
+        key, name: j.product_name || '', count: 0, status: j.status || 'pending',
+      });
+    } else {
+      // enrich with job status so we know done vs failed
+      const rec = bySku.get(key);
+      if (!rec.status || rec.status === 'done') rec.status = j.status || rec.status;
+    }
   }
   const skus = Array.from(bySku.values()).sort((a, b) => b.count - a.count);
   if (skus.length === 0) return `<div class="tree-empty" style="padding:6px 8px; font-size:10px;">No SKUs.</div>`;
   return skus.map(s => {
     const isActive = s.key === analytics.sku;
     const display = s.name || s.key;
+    const zeroKw = s.count === 0;
+    // Zero-kw SKUs get a warn tint + status suffix so the user can see
+    // exactly which SKUs completed but produced nothing.
+    const statusTag = zeroKw
+      ? `<span class="tree-sku-zero" title="This SKU completed with 0 keyword rows — usually KP failed or every candidate was filtered out.">${esc(s.status || 'done')} · 0</span>`
+      : `<span class="tree-sku-count">${s.count}</span>`;
     return `
-      <div class="tree-sku${isActive ? ' active' : ''}" data-sku="${esc(s.key)}" title="${esc(display)}">
+      <div class="tree-sku${isActive ? ' active' : ''}${zeroKw ? ' zero-kw' : ''}" data-sku="${esc(s.key)}" title="${esc(display)}${zeroKw ? ' (0 keyword rows produced)' : ''}">
         <span class="tree-sku-name">${esc(display)}</span>
-        <span class="tree-sku-count">${s.count}</span>
+        ${statusTag}
       </div>`;
   }).join('');
 }
@@ -2784,7 +2823,14 @@ async function loadAnalyticsBatch(batchId) {
   }
   summary.innerHTML = `<div class="empty">Loading batch data…</div>`;
   try {
-    const r = await api.keywordsGet(batchId);
+    // Fetch keywords AND job list in parallel — job list drives the
+    // tree's zero-kw SKU display (SKUs marked done/failed but that
+    // produced no keyword rows would otherwise be invisible).
+    const [r, jr] = await Promise.all([
+      api.keywordsGet(batchId),
+      api.jobsPerProduct(batchId).catch(() => ({ rows: [] })),
+    ]);
+    _treeJobCache.set(batchId, jr.rows || []);
     analytics.allRows = r.rows || [];
     // Column set for the CSV export — union of keys across all rows.
     analytics.columnSet = new Set();
