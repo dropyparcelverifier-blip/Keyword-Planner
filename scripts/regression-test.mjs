@@ -1399,6 +1399,15 @@ async function run() {
   // .two-col is now 1:1 (was 2:1 sidebar); .two-col-side kept for legacy.
   assert(/\.two-col\s*\{\s*display: grid;\s*grid-template-columns: 1fr 1fr/.test(cssFull), 'POLISH.7 .two-col is now 1:1 grid');
   assert(cssFull.includes('.two-col-side'),                                       'POLISH.8 legacy .two-col-side kept for 2:1 layouts');
+  // Worker popup polish.
+  const popupHtmlPolish = readFileSync(resolve(REPO, 'popup.html'), 'utf-8');
+  assert(popupHtmlPolish.includes('--space-1: 4px'),                                    'POLISH.9 popup uses spacing tokens');
+  assert(popupHtmlPolish.includes('button:focus-visible'),                              'POLISH.10 popup has keyboard focus rings');
+  assert(!/pauseBtn[^>]*>⏸ Pause/.test(popupHtmlPolish),                                'POLISH.11 popup Pause button no longer uses emoji prefix');
+  assert(!/resumeBtn[^>]*>▶ Resume/.test(popupHtmlPolish),                              'POLISH.12 popup Resume button no longer uses emoji prefix');
+  assert(!/stopBtn[^>]*>■ Stop/.test(popupHtmlPolish),                                  'POLISH.13 popup Stop button no longer uses emoji prefix');
+  assert(!/linear-gradient\(180deg, var\(--bg-1\)/.test(popupHtmlPolish),               'POLISH.14 popup hero no longer uses gradient background');
+  assert(popupHtmlPolish.includes('button.warn  { color: var(--warn)'),                 'POLISH.15 popup Pause button uses warn-outline style');
   assert(cssFull.includes('.scatter-full'),                        'DS.26 full-width scatter variant defined');
   assert(htmlFull.includes('scatter-full'),                        'DS.27 scatter uses full-width layout');
   assert(/\.card-title\s*\{[\s\S]{0,120}font-size:\s*var\(--text-md\)/.test(cssFull), 'DS.28 unified card-title sizing');

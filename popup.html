@@ -10,8 +10,10 @@
       --bg-2:       #161e35;
       --bg-3:       #1d2742;
       --bg-input:   #0e1424;
+      --bg-hover:   #202c4a;
       --line-1:     #1f2942;
       --line-2:     #2a3658;
+      --line-3:     #3a4775;
       --text-0:     #f1f4fb;
       --text-1:     #d8dff0;
       --text-2:     #9aa6c3;
@@ -28,6 +30,11 @@
       --info:       #60a5fa;
       --info-soft:  rgba(96,165,250,0.10);
       --mono: 'JetBrains Mono','Fira Code',Consolas,monospace;
+      --space-1: 4px;
+      --space-2: 8px;
+      --space-3: 12px;
+      --space-4: 16px;
+      --space-5: 24px;
     }
     * { box-sizing: border-box; }
     html, body {
@@ -35,6 +42,10 @@
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       font-size: 13px; line-height: 1.5;
       min-width: 380px;
+    }
+    /* Keyboard focus rings — accessibility. */
+    button:focus-visible, a:focus-visible {
+      outline: none; box-shadow: 0 0 0 3px rgba(90,140,255,0.35);
     }
 
     /* ─────────── Compact top bar ─────────── */
@@ -50,10 +61,11 @@
 
     /* ─────────── Hero status block ─────────── */
     /* Big prominent "what am I doing right now" readout — the first
-       thing the user sees when they open the popup. */
+       thing the user sees when they open the popup. Flat background
+       (no gradient) so it reads as data, not a hero-ad. */
     .hero {
-      padding: 16px 16px 14px;
-      background: linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%);
+      padding: var(--space-4) var(--space-4) var(--space-3);
+      background: var(--bg-1);
       border-bottom: 1px solid var(--line-1);
     }
     .hero-status {
@@ -119,17 +131,19 @@
     }
 
     /* ─────────── Body / cards ─────────── */
-    .body { padding: 12px 14px; }
+    /* Cards are tighter than the manager — the popup is a narrow
+       380px window, every pixel of vertical space matters. */
+    .body { padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
     .card {
       background: var(--bg-2); border: 1px solid var(--line-2);
-      border-radius: 8px; margin-bottom: 10px;
+      border-radius: 6px;
     }
     .card-head {
-      padding: 8px 12px; border-bottom: 1px solid var(--line-1);
-      display: flex; align-items: center; gap: 8px;
+      padding: 6px var(--space-3); border-bottom: 1px solid var(--line-1);
+      display: flex; align-items: center; gap: var(--space-2);
       font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-2);
     }
-    .card-body { padding: 8px 12px; }
+    .card-body { padding: var(--space-2) var(--space-3); }
 
     /* ─────────── Error banner ─────────── */
     /* Full-width red bar between hero and body when connection is unhealthy. */
@@ -205,21 +219,29 @@
     .kv .v.muted { color: var(--text-3); }
 
     /* ─────────── Buttons ─────────── */
-    .row-btns { display: flex; gap: 6px; }
+    /* Base = quiet outline; press states = subtle translate. Primary
+       (Resume) is the ONLY solid-fill button — that's the action users
+       hit 90% of the time, so it earns the visual weight. Stop is
+       danger-outline (still red, still legible, but doesn't scream
+       "click me" like a solid red button does). */
+    .row-btns { display: flex; gap: var(--space-2); }
     button {
-      flex: 1; padding: 10px 12px; font-size: 12px; font-weight: 600;
-      background: var(--bg-3); color: var(--text-1); border: 1px solid var(--line-2);
+      flex: 1; padding: 9px 12px; font-size: 12px; font-weight: 600;
+      background: transparent; color: var(--text-1);
+      border: 1px solid var(--line-2);
       border-radius: 6px; cursor: pointer; font-family: inherit;
-      transition: all 120ms;
+      user-select: none;
+      transition: background 120ms, border-color 120ms, transform 120ms;
     }
-    button:hover:not(:disabled) { background: var(--line-2); border-color: var(--line-3); transform: translateY(-1px); }
+    button:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--line-3); }
+    button:active:not(:disabled) { transform: translateY(1px); }
     button:disabled { opacity: 0.35; cursor: not-allowed; }
     button.primary { background: var(--accent); color: white; border-color: var(--accent); }
     button.primary:hover:not(:disabled) { background: var(--accent-2); border-color: var(--accent-2); }
-    button.warn { background: var(--warn); color: var(--bg-0); border-color: var(--warn); }
-    button.warn:hover:not(:disabled) { filter: brightness(1.1); }
-    button.danger { background: var(--danger); color: white; border-color: var(--danger); }
-    button.danger:hover:not(:disabled) { background: #d94040; border-color: #d94040; }
+    button.warn  { color: var(--warn);   border-color: var(--warn); }
+    button.warn:hover:not(:disabled)  { background: var(--warn-soft); }
+    button.danger { color: var(--danger); border-color: var(--danger); }
+    button.danger:hover:not(:disabled) { background: var(--danger-soft); }
 
     /* ─────────── Log ─────────── */
     .log {
@@ -249,7 +271,7 @@
 </head>
 <body>
   <div class="topbar">
-    <span class="brand"><span class="icon">◆</span> AdBrain Worker</span>
+    <span class="brand">AdBrain Worker</span>
     <span class="spacer"></span>
     <span class="worker-id" id="workerIdTop">—</span>
   </div>
@@ -313,9 +335,9 @@
       <div class="card-head">Controls</div>
       <div class="card-body">
         <div class="row-btns">
-          <button id="pauseBtn" title="Stop after current SKU">⏸ Pause</button>
-          <button id="resumeBtn" title="Resume claiming work" class="primary">▶ Resume</button>
-          <button id="stopBtn" title="Stop and disarm — needs manual restart" class="danger">■ Stop</button>
+          <button id="pauseBtn" class="warn" title="Stop after current SKU (finishes current work, then idles).">Pause</button>
+          <button id="resumeBtn" class="primary" title="Resume claiming work.">Resume</button>
+          <button id="stopBtn" class="danger" title="Stop and disarm — needs manual restart.">Stop</button>
         </div>
       </div>
     </div>
@@ -347,7 +369,7 @@
   </div>
 
   <div class="footer">
-    <a href="#" id="openManager">🖥️ Open manager dashboard</a>
+    <a href="#" id="openManager">Open manager dashboard ↗</a>
     <span style="flex:1;"></span>
     <span id="lastRefresh" style="font-size: 10px;">—</span>
   </div>
