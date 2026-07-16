@@ -743,9 +743,45 @@ $('activityWorkerFilter')?.addEventListener('change', () => {
   refreshDashboard();
 });
 $('wakeAllBtn').addEventListener('click', async () => {
-  if (!confirm('Send wake signal to all workers?')) return;
-  try { await api.commandsSend(null, 'wake'); alert('✓ Wake signal sent.'); refreshDashboard(); }
-  catch (e) { alert(`Wake failed: ${e.message}`); }
+  // Manager commands are POLLED by workers every 30s. If a worker's SW
+  // is dead (Chrome closed, PC asleep, extension crashed), Wake alone
+  // never reaches it. This handler now escalates:
+  //   1. Broadcast Wake to every worker (reaches all live SWs).
+  //   2. For each worker that's been OFFLINE (heartbeat > 5 min),
+  //      auto-send Wake-on-LAN to its NIC via the manager. Requires
+  //      MAC captured (installer bakes it into worker-config.json;
+  //      also settable via the fleet grid) + manager on same LAN as
+  //      the worker + WoL enabled in the worker PC's BIOS.
+  //   3. Show a summary toast: X wake commands sent, Y WoL packets
+  //      dispatched, Z workers unreachable (no MAC + offline).
+  if (!confirm('Send Wake to every worker?\n\nBroadcasts the Wake command to all live workers. Also auto-sends Wake-on-LAN packets to any offline worker whose MAC is registered — this is the only way to reach a PC whose Chrome is closed.')) return;
+  const now = Date.now();
+  const offline = (state.workers || []).filter(w => {
+    const hb = Number(w.last_heartbeat || 0);
+    return !hb || (now - hb) > 5 * 60 * 1000;
+  });
+  const summary = { wake: 0, wol: 0, noMac: [] };
+  try {
+    await api.commandsSend(null, 'wake');
+    summary.wake = (state.workers || []).length;
+  } catch (e) { toast(`Wake broadcast failed: ${e.message}`, 'err'); return; }
+  for (const w of offline) {
+    try {
+      const r = await api.wakeOnLan(w.worker_id);
+      if (r?.ok && r.sent) summary.wol++;
+      else summary.noMac.push(w.worker_id);
+    } catch { summary.noMac.push(w.worker_id); }
+  }
+  const parts = [`Wake broadcast: ${summary.wake} worker(s)`];
+  if (summary.wol > 0) parts.push(`WoL packets: ${summary.wol}`);
+  if (summary.noMac.length > 0) parts.push(`Unreachable (no MAC): ${summary.noMac.join(', ')}`);
+  toast(parts.join(' · '), summary.noMac.length > 0 ? 'warn' : 'ok', {
+    title: 'Wake sent',
+    body: summary.noMac.length > 0
+      ? `${summary.noMac.length} worker(s) can't be reached remotely — no MAC on file. Set a MAC (click 🔌 on their row) or start Chrome physically on that PC.`
+      : undefined,
+  });
+  refreshDashboard();
 });
 $('resumeAllBtn').addEventListener('click', async () => {
   if (!confirm('Send resume signal to all paused workers?')) return;
@@ -785,6 +821,14 @@ async function refreshDashboard() {
     // used to show as '0 online' because the jobs-derived stats can't
     // see workers who've never touched a job.
     const jobsWorkerIds = new Set((workers.workers || []).map(w => w.worker_id));
+    // Lookup roster info (mac_address, hostname) so both jobs-derived and
+    // roster-only workers carry those fields — the recovery-guide dialog
+    // and the WoL button both read w.mac_address.
+    const rosterByWid = new Map((roster.workers || []).map(w => [w.worker_id, w]));
+    for (const w of (workers.workers || [])) {
+      const r = rosterByWid.get(w.worker_id);
+      if (r) { w.mac_address = r.mac_address; w.hostname = r.hostname; }
+    }
     const idleFromRoster = (roster.workers || []).filter(w => !jobsWorkerIds.has(w.worker_id))
       .map(w => ({
         worker_id: w.worker_id,
@@ -792,6 +836,7 @@ async function refreshDashboard() {
         total_touched: 0, done_count: 0, failed_count: 0, in_flight: 0,
         done: 0, failed: 0,
         last_heartbeat: w.last_seen,
+        mac_address: w.mac_address, hostname: w.hostname,
       }));
     workers.workers = [...(workers.workers || []), ...idleFromRoster];
     state.batches = summary.batches || [];
@@ -1402,6 +1447,7 @@ function renderWorkerFleet() {
             <button data-worker="${esc(w.worker_id)}" data-release-worker="${esc(w.worker_id)}" class="danger-btn" title="Release this worker's claims back to queue (manager-side — works even if worker is offline).">↻</button>
             <button data-worker="${esc(w.worker_id)}" data-cmd="stop"   class="danger-btn" title="Stop and disarm">■</button>
             <button data-worker="${esc(w.worker_id)}" data-wol="1" title="Wake-on-LAN — send magic packet to this PC's NIC (only works if this manager PC is on the same physical LAN as the target)" style="color: var(--info); border-color: var(--info);">🔌</button>
+            <button data-worker="${esc(w.worker_id)}" data-recover="1" title="Recovery guide — step-by-step for bringing an OFFLINE worker back under manager control." style="color: var(--text-2);">?</button>
           </div>
         </td>
       </tr>`;
@@ -1497,6 +1543,54 @@ function renderWorkerFleet() {
           toast(e.message, 'err', { title: 'WOL failed' });
         }
       }
+    });
+  });
+  // Recovery guide (?) — plain alert with a diagnosis + prioritized
+  // steps. Using an alert keeps the code footprint minimal but the
+  // content is enough to unblock most 'I can't reach this worker' cases.
+  el.querySelectorAll('.worker-actions button[data-recover]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const workerId = btn.dataset.worker;
+      const w = state.workers.find(x => x.worker_id === workerId);
+      const hb = Number(w?.last_heartbeat || 0);
+      const ago = hb ? Math.round((Date.now() - hb) / 60000) : Infinity;
+      const macKnown = !!(w?.mac_address);
+      const online = ago < 3;
+      const lines = [];
+      lines.push(`▸ ${workerId}`);
+      lines.push(hb ? `Last heartbeat: ${ago} min ago${online ? '' : ' — OFFLINE'}` : 'Never heartbeated');
+      lines.push(`MAC on file: ${macKnown ? w.mac_address : 'NO'}`);
+      lines.push('');
+      lines.push('Manager commands (Wake / Reconnect / Pause / Stop /');
+      lines.push('hard_reset) are POLLED by the worker every 30 s.');
+      lines.push('If the SW is dead, no command can reach it.');
+      lines.push('');
+      lines.push('Recovery order (try in sequence):');
+      lines.push('');
+      if (online) {
+        lines.push('  1. ⟳ Force reconnect — overrides user-Stopped flag');
+        lines.push('  2. hard_reset (Frozen banner) — reloads the SW');
+        lines.push('     if the engine loop is hung');
+      } else {
+        if (macKnown) {
+          lines.push('  1. 🔌 WoL — sends magic packet. Requires WoL enabled');
+          lines.push('     in BIOS + manager on same physical LAN + PC');
+          lines.push('     asleep (not powered off from mains).');
+        } else {
+          lines.push('  1. Set MAC first (click 🔌 → enter MAC), then WoL.');
+          lines.push('     Find MAC on the worker PC with: ipconfig /all');
+        }
+        lines.push('  2. Chrome watchdog task (installed by install-worker.ps1)');
+        lines.push('     auto-launches Chrome every 5 min IF manager is');
+        lines.push('     reachable. If never installed on this PC, you');
+        lines.push('     need to re-run the install-worker one-liner.');
+        lines.push('  3. Physical / RDP access — open Chrome with the');
+        lines.push('     AdBrain profile. Extension auto-arms.');
+      }
+      lines.push('');
+      lines.push('Once Chrome + SW are alive again, all manager commands');
+      lines.push('start working within 30 s (next command-poll tick).');
+      alert(lines.join('\n'));
     });
   });
 }
