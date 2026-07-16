@@ -726,45 +726,65 @@
             <span class="card-sub" id="shopifyStatusSub">not configured</span>
           </div>
           <div class="card-body">
-            <div class="hint">
-              Wire up dropy.in so Analytics can pull the current Shopify listing and (after a Claude pass) push back an updated one.
-              <strong>Price, weight, location, inventory, and variant data are literally stripped server-side</strong> — they cannot leave this process no matter what payload arrives. See the field-impact list under any SKU's "Generate Shopify update" for what actually gets sent.
-            </div>
-            <div class="grid-2" style="margin-top: 10px;">
-              <label class="field">
-                <span class="lbl">Shop domain</span>
-                <input type="text" id="cfgShopifyDomain" placeholder="dropy.in  or  your-shop.myshopify.com" autocomplete="off" />
-                <div class="hint">Use your custom domain OR the <code>*.myshopify.com</code> shop URL. The <code>https://</code> is optional.</div>
-              </label>
-              <label class="field">
-                <span class="lbl">Admin API access token</span>
-                <input type="password" id="cfgShopifyToken" placeholder="shpat_…" autocomplete="new-password" />
-                <div class="hint">Create a custom app in Shopify admin → Apps → Develop apps → Configuration → grant <code>write_products</code>. Copy the Admin API access token here.</div>
-              </label>
-            </div>
-            <div class="grid-2" style="margin-top: 6px;">
-              <label class="field">
-                <span class="lbl">API version</span>
-                <input type="text" id="cfgShopifyApiVersion" placeholder="2024-10" />
-                <div class="hint">Leave blank for <code>2024-10</code>. Update when Shopify deprecates.</div>
-              </label>
-              <div class="field">
-                <span class="lbl">Connection test</span>
-                <div class="row"><button class="secondary" id="cfgShopifyTestBtn">Test connection</button><span id="cfgShopifyTestResult" class="hint" style="margin-left: 8px;">not tested</span></div>
+            <div class="shopify-config">
+              <div class="shopify-config-fields">
+                <div class="grid-2">
+                  <label class="field">
+                    <span class="lbl">Shop domain</span>
+                    <input type="text" id="cfgShopifyDomain" placeholder="dropy.in  or  your-shop.myshopify.com" autocomplete="off" />
+                    <div class="hint">Custom domain OR the <code>*.myshopify.com</code> URL. <code>https://</code> optional.</div>
+                  </label>
+                  <label class="field">
+                    <span class="lbl">Admin API access token</span>
+                    <input type="password" id="cfgShopifyToken" placeholder="shpat_xxxxxxxxxxxx" autocomplete="new-password" />
+                    <div class="hint">Shopify admin → Apps → <em>Develop apps</em> → custom app with <code>write_products</code> scope.</div>
+                  </label>
+                </div>
+                <div class="grid-2" style="margin-top: 6px;">
+                  <label class="field">
+                    <span class="lbl">API version</span>
+                    <input type="text" id="cfgShopifyApiVersion" placeholder="2024-10" />
+                    <div class="hint">Blank = <code>2024-10</code>.</div>
+                  </label>
+                  <label class="field">
+                    <span class="lbl">Connection test</span>
+                    <div class="row" style="gap: 6px;"><button class="secondary" id="cfgShopifyTestBtn">Test connection</button><span id="cfgShopifyTestResult" class="hint" style="align-self: center;">not tested</span></div>
+                  </label>
+                </div>
+                <div class="row" style="margin-top: 10px;">
+                  <button id="cfgShopifySaveBtn">Save Shopify config</button>
+                  <button class="secondary" id="cfgShopifyClearBtn">Clear credentials</button>
+                </div>
+                <div id="cfgShopifyResult"></div>
               </div>
+              <aside class="shopify-config-side">
+                <div class="shopify-safety">
+                  <div class="shopify-safety-title">🛡 Safety guarantee</div>
+                  <div>These fields are <strong>stripped server-side</strong> and cannot leave this process:</div>
+                  <div class="shopify-strip-chips">
+                    <span class="strip-chip">price</span><span class="strip-chip">weight</span><span class="strip-chip">location</span><span class="strip-chip">inventory</span><span class="strip-chip">variants</span><span class="strip-chip">images</span><span class="strip-chip">sku</span>
+                  </div>
+                </div>
+                <div class="shopify-impact">
+                  <div class="shopify-impact-title">Field-impact hierarchy — what will be updated</div>
+                  <div class="impact-row"><span class="impact-badge crit">CRIT</span><code>title</code><span class="hint">primary rank signal</span></div>
+                  <div class="impact-row"><span class="impact-badge crit">CRIT</span><code>handle</code><span class="hint">URL slug (careful on existing)</span></div>
+                  <div class="impact-row"><span class="impact-badge crit">CRIT</span><code>meta_title</code><span class="hint">SERP <title></span></div>
+                  <div class="impact-row"><span class="impact-badge high">HIGH</span><code>meta_description</code><span class="hint">SERP CTR</span></div>
+                  <div class="impact-row"><span class="impact-badge high">HIGH</span><code>body_html</code><span class="hint">SEO + conversion</span></div>
+                  <div class="impact-row"><span class="impact-badge med">MED</span><code>tags</code><span class="hint">on-site search</span></div>
+                  <div class="impact-row"><span class="impact-badge med">MED</span><code>product_type</code><span class="hint">categorization</span></div>
+                  <div class="impact-row"><span class="impact-badge low">LOW</span><code>vendor</code><span class="hint">brand filter</span></div>
+                </div>
+              </aside>
             </div>
-            <div class="row" style="margin-top: 10px;">
-              <button id="cfgShopifySaveBtn">Save Shopify config</button>
-              <button class="secondary" id="cfgShopifyClearBtn">Clear credentials</button>
-            </div>
-            <div id="cfgShopifyResult"></div>
           </div>
         </div>
       </div>
 
       <div class="an-layer">
         <div class="an-layer-head">Maintenance</div>
-        <div class="two-col">
+        <div class="three-col">
           <div class="card collapsible">
             <div class="card-head">
               <span class="card-icon">🧽</span>
@@ -772,9 +792,9 @@
               <span class="card-sub" id="orphanCountSub">—</span>
             </div>
             <div class="card-body">
-              <div class="hint">Orphans = keyword rows whose <code>batch_id</code> no longer has any jobs (usually from a reset while workers were still pushing).</div>
+              <div class="hint">Keyword rows whose <code>batch_id</code> has no jobs (usually from a reset while workers were still pushing).</div>
               <div class="row" style="margin-top: 10px;">
-                <button id="cleanupOrphansBtn" class="danger" disabled>Clean orphan keywords</button>
+                <button id="cleanupOrphansBtn" class="danger" disabled>Clean orphans</button>
                 <button id="refreshOrphansBtn" class="secondary">Recount</button>
               </div>
               <div id="cleanupOrphansResult"></div>
@@ -788,29 +808,12 @@
               <span class="card-sub" id="quiesceSub">click to check</span>
             </div>
             <div class="card-body">
-              <div class="hint">Broadcasts <strong>pause</strong> to every worker. Each finishes its current SKU, pushes results, stops claiming. Safe to reset once counts hit zero.</div>
+              <div class="hint">Broadcasts <strong>pause</strong> to every worker. Each finishes its current SKU, pushes results, stops claiming.</div>
               <div class="row" style="margin-top: 10px;">
-                <button id="quiesceBtn" class="secondary">Quiesce all workers</button>
-                <button id="quiesceRefreshBtn" class="secondary">Refresh status</button>
+                <button id="quiesceBtn" class="secondary">Quiesce all</button>
+                <button id="quiesceRefreshBtn" class="secondary">Refresh</button>
               </div>
               <div id="quiesceStatus" style="margin-top: 10px;"></div>
-            </div>
-          </div>
-
-          <div class="card collapsible">
-            <div class="card-head">
-              <span class="card-icon">💾</span>
-              <span class="card-title">Database backups</span>
-              <span class="card-sub" id="backupsSub">—</span>
-            </div>
-            <div class="card-body">
-              <div class="hint">SQLite <code>VACUUM INTO</code> snapshots. Auto-runs on startup + every 24h. Keeps newest 7 (older auto-pruned). Env: <code>BACKUP_KEEP_N</code>, <code>BACKUP_DIR</code>.</div>
-              <div class="row" style="margin-top: 10px;">
-                <button id="backupNowBtn">Backup now</button>
-                <button id="backupsRefreshBtn" class="secondary">Refresh list</button>
-              </div>
-              <div id="backupsList" style="margin-top: 10px; max-height: 200px; overflow: auto;"></div>
-              <div id="backupResult"></div>
             </div>
           </div>
 
@@ -818,16 +821,17 @@
             <div class="card-head">
               <span class="card-icon">🧹</span>
               <span class="card-title">Cleanup old data</span>
+              <span class="card-sub">retention purge</span>
             </div>
             <div class="card-body">
-              <div class="hint">Retention purge — activity + acked commands older than cutoff are deleted. Jobs + keywords kept.</div>
+              <div class="hint">Activity + acked commands older than cutoff are deleted. Jobs + keywords kept.</div>
               <div class="grid-2" style="margin-top: 10px;">
                 <label class="field">
-                  <span class="lbl">Activity log — keep N days</span>
+                  <span class="lbl">Activity — keep N days</span>
                   <input type="number" id="cleanupLogDays" min="0" max="90" value="7" />
                 </label>
                 <label class="field">
-                  <span class="lbl">Acked commands — keep N days</span>
+                  <span class="lbl">Commands — keep N days</span>
                   <input type="number" id="cleanupCommandsDays" min="0" max="30" value="1" />
                 </label>
               </div>
@@ -838,19 +842,36 @@
             </div>
           </div>
         </div>
+
+        <div class="card collapsible" style="margin-top: var(--space-3);">
+          <div class="card-head">
+            <span class="card-icon">💾</span>
+            <span class="card-title">Database backups</span>
+            <span class="card-sub" id="backupsSub">—</span>
+          </div>
+          <div class="card-body">
+            <div class="hint">SQLite <code>VACUUM INTO</code> snapshots. Auto-runs on startup + every 24h. Keeps newest 7 (older auto-pruned). Env: <code>BACKUP_KEEP_N</code>, <code>BACKUP_DIR</code>.</div>
+            <div class="row" style="margin-top: 10px;">
+              <button id="backupNowBtn">Backup now</button>
+              <button id="backupsRefreshBtn" class="secondary">Refresh list</button>
+            </div>
+            <div id="backupsList" style="margin-top: 10px; max-height: 240px; overflow: auto;"></div>
+            <div id="backupResult"></div>
+          </div>
+        </div>
       </div>
 
       <div class="an-layer">
         <div class="an-layer-head" style="color: var(--danger);">Danger zone</div>
-        <div class="two-col">
+        <div class="three-col">
           <div class="card collapsible collapsed">
             <div class="card-head">
               <span class="card-icon">🎯</span>
               <span class="card-title">Selective wipe</span>
-              <span class="card-sub">pick exactly what to delete</span>
+              <span class="card-sub">pick what to delete</span>
             </div>
             <div class="card-body">
-              <div class="hint">A checkbox for each data category, optionally scoped to one batch. Deletes only what you tick. Useful when you want to wipe activity but keep keywords, or delete failed jobs only, etc.</div>
+              <div class="hint">Checkbox per data category, optionally batch-scoped. Only what you tick is deleted. Useful for wiping activity but keeping keywords, or dropping failures only.</div>
               <div class="row" style="margin-top: 10px;">
                 <button class="danger" id="openSelectiveWipeBtn">Open selective wipe…</button>
               </div>
@@ -863,10 +884,10 @@
               <span class="card-sub">jobs + keywords + activity</span>
             </div>
             <div class="card-body">
-              <div class="hint">Wipes every job, keyword row, and activity-log entry for a specific batch. Worker config untouched. Cannot be undone.</div>
+              <div class="hint">Wipes every job, keyword row, and activity entry for a specific batch. Worker config untouched.</div>
               <div class="row" style="margin-top: 10px;">
-                <select id="deleteBatchSelect" style="min-width: 220px;"></select>
-                <button class="danger" id="deleteBatchBtn">Delete this batch</button>
+                <select id="deleteBatchSelect" style="flex: 1; min-width: 0;"></select>
+                <button class="danger" id="deleteBatchBtn">Delete</button>
               </div>
               <div id="deleteBatchResult"></div>
             </div>
