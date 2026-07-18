@@ -672,6 +672,147 @@ async function refreshUploadSidebar() {
   } catch { /* stats bar surfaces errors */ }
 }
 
+// ─────────── Upload mode toggle: Excel/CSV ↔ SKU list ───────────
+// The SKU-list mode ships SKUs to /api/jobs/upload-by-sku, resolving
+// each Dropy-<ASIN> to an amazon.in URL (fast) or a real dropy.in
+// handle via the Shopify API (canonical). Same batchId + result pane.
+document.querySelectorAll('.upload-mode-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.upload-mode-btn').forEach(b => {
+      b.classList.toggle('active', b === btn);
+      b.setAttribute('aria-selected', b === btn ? 'true' : 'false');
+    });
+    const mode = btn.dataset.mode;
+    $('uploadModeFile').style.display = mode === 'file' ? '' : 'none';
+    $('uploadModeSku').style.display  = mode === 'sku'  ? '' : 'none';
+    $('uploadModeSub').textContent = mode === 'file' ? 'Excel · CSV · with URL columns' : 'SKU list — one Dropy-BXXX per line';
+    setResult($('uploadResult'), '', 'info');
+  });
+});
+// Live count as user pastes/types SKUs — same regex as server-side parser.
+function _skuUploadRecount() {
+  const raw = $('skuUploadText').value;
+  const lines = raw.split(/\r?\n/);
+  const valid = lines.filter(l => {
+    const s = String(l).trim();
+    if (!s || s.startsWith('#')) return false;
+    return /^(?:Dropy-)?[A-Z0-9]{10}$/i.test(s);
+  }).length;
+  const nonBlank = lines.filter(l => l.trim() && !l.trim().startsWith('#')).length;
+  const invalid = nonBlank - valid;
+  $('skuUploadCount').textContent = `${lines.length} line(s) · ${valid} valid SKU(s)` + (invalid ? ` · ${invalid} bad format` : '');
+  // Preview button always enabled if there's ANY input; import button
+  // wired by preview result.
+}
+$('skuUploadText')?.addEventListener('input', _skuUploadRecount);
+// Textarea can also accept a .txt file drop directly.
+function _acceptSkuFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    $('skuUploadText').value = String(reader.result || '');
+    _skuUploadRecount();
+    toast(`Loaded ${file.name} (${(file.size / 1024).toFixed(1)} KB)`, 'ok');
+  };
+  reader.onerror = () => toast(`Failed to read ${file.name}`, 'err');
+  reader.readAsText(file);
+}
+$('skuUploadFile')?.addEventListener('change', (e) => {
+  const f = e.target.files?.[0];
+  if (f) _acceptSkuFile(f);
+});
+// Drag-drop on the textarea itself (in addition to the drop-zone box).
+const _skuTextEl = $('skuUploadText');
+if (_skuTextEl) {
+  ['dragover', 'dragleave', 'drop'].forEach(ev => {
+    _skuTextEl.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); });
+  });
+  _skuTextEl.addEventListener('drop', (e) => {
+    const f = e.dataTransfer?.files?.[0];
+    if (f) _acceptSkuFile(f);
+  });
+}
+// Preview button — hits upload-by-sku with dryRun=true.
+$('skuPreviewBtn')?.addEventListener('click', async () => {
+  const raw = $('skuUploadText').value;
+  const skus = raw.split(/\r?\n/);
+  const resolve = $('skuUploadResolve').value;
+  const batchId = $('uploadBatchId').value.trim() || String(Date.now());
+  const box = $('skuUploadPreview');
+  const btn = $('skuUploadBtn');
+  btn.disabled = true;
+  box.innerHTML = '<div class="hint">Resolving…</div>';
+  try {
+    const r = await api.jobsUploadBySku(batchId, skus, resolve, true);
+    const rows = (r.preview || []).slice(0, 40);
+    const rowsHtml = rows.map(x => `
+      <tr>
+        <td class="mono" style="font-size:11px;">${esc(x.sku)}</td>
+        <td class="mono" style="font-size:11px; color:var(--text-3);">${esc(x.asin)}</td>
+        <td style="max-width:340px; overflow:hidden; text-overflow:ellipsis;">${x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener" style="font-size:11px;">${esc(x.url.replace(/^https?:\/\//, ''))}</a>` : '<span style="color:var(--danger);">unresolved</span>'}</td>
+        <td class="mono" style="font-size:10px; color:${x.source === 'shopify' ? 'var(--success)' : x.source === 'amazon' ? 'var(--warn)' : 'var(--danger)'};">${esc(x.source || '—')}</td>
+      </tr>`).join('');
+    const shopifyMissing = resolve !== 'amazon' && !r.shopifyConfigured;
+    box.innerHTML = `
+      <div class="banner ${r.resolved > 0 ? 'ok' : 'warn'}" style="margin: var(--space-3) 0;">
+        <strong>${r.resolved}</strong> resolved · <strong>${r.unresolved || 0}</strong> unresolved · <strong>${r.badFormat || 0}</strong> bad format
+        ${r.badFormat > 0 ? ` · samples: ${(r.badFormatSamples || []).slice(0, 3).map(s => `<code>${esc(s)}</code>`).join(' ')}` : ''}
+        ${shopifyMissing ? ' · <strong>Shopify not configured</strong> — configure in Config → Shopify integration, or switch to Amazon.in resolve.' : ''}
+      </div>
+      <div class="tbl-wrap" style="max-height: 320px; overflow-y: auto;">
+        <table class="tbl compact">
+          <thead><tr><th>SKU</th><th>ASIN</th><th>Resolved URL</th><th>Source</th></tr></thead>
+          <tbody>${rowsHtml || '<tr><td colspan="4" style="text-align:center; padding:20px; color:var(--text-3);">nothing to preview</td></tr>'}</tbody>
+        </table>
+        ${(r.preview?.length || 0) > 40 ? `<div class="hint" style="padding: 6px 0;">…and ${r.preview.length - 40} more.</div>` : ''}
+      </div>`;
+    btn.disabled = r.resolved === 0;
+    btn.textContent = r.resolved > 0 ? `Import → queue (${r.resolved} SKU${r.resolved === 1 ? '' : 's'})` : 'Import → queue';
+  } catch (e) {
+    box.innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
+  }
+});
+$('skuClearBtn')?.addEventListener('click', () => {
+  $('skuUploadText').value = '';
+  $('skuUploadPreview').innerHTML = '';
+  $('skuUploadBtn').disabled = true;
+  $('skuUploadBtn').textContent = 'Import → queue';
+  _skuUploadRecount();
+  setResult($('uploadResult'), '', 'info');
+});
+$('skuUploadBtn')?.addEventListener('click', async () => {
+  const raw = $('skuUploadText').value;
+  const skus = raw.split(/\r?\n/);
+  const resolve = $('skuUploadResolve').value;
+  const batchId = $('uploadBatchId').value.trim() || String(Date.now());
+  const btn = $('skuUploadBtn');
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Importing…';
+  setResult($('uploadResult'), 'Importing…', 'info');
+  try {
+    const r = await api.jobsUploadBySku(batchId, skus, resolve, false);
+    const parts = [`${r.inserted} SKU(s) added to batch ${batchId}`];
+    if (r.skippedActive) parts.push(`${r.skippedActive} skipped (already in another batch)`);
+    if (r.unresolved) parts.push(`${r.unresolved} unresolved`);
+    if (r.badFormat) parts.push(`${r.badFormat} bad format`);
+    const msg = parts.join(' · ');
+    setResult($('uploadResult'), '✓ ' + msg, 'ok');
+    toast(msg, 'ok', { title: 'SKUs imported' });
+    refreshStatsBar();
+    refreshUploadSidebar();
+    // Keep the batch ID visible; clear the textarea so a follow-up
+    // paste doesn't accidentally include the same SKUs.
+    $('skuUploadText').value = '';
+    $('skuUploadPreview').innerHTML = '';
+    _skuUploadRecount();
+  } catch (e) {
+    setResult($('uploadResult'), `Import failed: ${e.message}`, 'err');
+    toast(e.message, 'err', { title: 'Import failed' });
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
+});
+
 $('uploadBtn').addEventListener('click', async () => {
   if (!state.parsedProducts?.length) return;
   const batchId = $('uploadBatchId').value.trim() || String(Date.now());
