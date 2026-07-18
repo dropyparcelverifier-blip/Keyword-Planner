@@ -943,7 +943,7 @@ $('skuPreviewBtn')?.addEventListener('click', async () => {
         <td style="max-width:260px; overflow:hidden; text-overflow:ellipsis;" title="${esc(x.product_name || '')}">${x.product_name ? esc(x.product_name) : '<span style="color:var(--text-3);">—</span>'}</td>
         <td class="mono" style="font-size:10px; color:var(--text-3); max-width:220px; overflow:hidden; text-overflow:ellipsis;" title="${esc(x.handles || '')}">${x.handles ? esc(x.handles.split('|').slice(0, 3).join(' · ')) + (x.handles.split('|').length > 3 ? '…' : '') : '<span>—</span>'}</td>
         <td class="mono" style="font-size:11px;">${x.brands ? esc(x.brands) : '<span style="color:var(--text-3);">—</span>'}</td>
-        <td style="max-width:280px; overflow:hidden; text-overflow:ellipsis;">${x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener" style="font-size:11px;">${esc(x.url.replace(/^https?:\/\//, ''))}</a>` : '<span style="color:var(--danger);">unresolved</span>'}</td>
+        <td style="max-width:280px; overflow:hidden; text-overflow:ellipsis;">${x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener" style="font-size:11px;">${esc(x.url.replace(/^https?:\/\//, ''))}</a>` : `<span style="color:var(--danger);" title="${esc(x.note || 'unresolved')}">unresolved${x.note ? ` <span style="color:var(--text-3); font-size:10px;">(${esc(x.note.slice(0, 40))}${x.note.length > 40 ? '…' : ''})</span>` : ''}</span>`}</td>
         <td class="mono" style="font-size:10px; color:${x.source === 'shopify' ? 'var(--success)' : x.source === 'amazon' ? 'var(--warn)' : 'var(--danger)'};">${esc(x.source || '—')}</td>
       </tr>`).join('');
     const shopifyMissing = resolve !== 'amazon' && !r.shopifyConfigured;

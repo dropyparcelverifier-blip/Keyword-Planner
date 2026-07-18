@@ -1672,6 +1672,11 @@ async function run() {
   const pushIdx = bgOrderCheck.indexOf('auto-push this product', bgOrderCheck.indexOf('onProductDone: async'));
   const markIdx = bgOrderCheck.indexOf('markJobDone({', bgOrderCheck.indexOf('onProductDone: async'));
   assert(pushIdx > 0 && markIdx > 0 && pushIdx < markIdx, 'PHANTOM.11 push comes before markJobDone in onProductDone');
+  // Shopify URL uses the PUBLIC storefront domain, not *.myshopify.com admin
+  assert(srvFull.includes('primary_domain.host'),                      'STORE.1 Shopify shop.json queried for primary_domain');
+  assert(srvFull.includes('const publicHost = storefrontHost'),        'STORE.2 URL builder uses publicHost, not shopifyDomain');
+  assert(srvFull.includes('https://${publicHost}/products/'),          'STORE.3 URL template uses publicHost');
+  assert(srvFull.includes("no Shopify variant found for SKU"),         'STORE.4 unresolved SKUs get explanatory note');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');
