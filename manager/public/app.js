@@ -1017,13 +1017,25 @@ $('skuUploadBtn')?.addEventListener('click', async () => {
   setResult($('uploadResult'), 'Importing…', 'info');
   try {
     const r = await api.jobsUploadBySku(batchId, skus, resolve, false);
-    const parts = [`${r.inserted} SKU(s) added to batch ${batchId}`];
+    const parts = [`${r.inserted} product page(s) added to batch ${batchId}`];
+    if (r.linkedToExisting) parts.push(`${r.linkedToExisting} extra SKU(s) linked to same page (variants)`);
     if (r.skippedActive) parts.push(`${r.skippedActive} skipped (already in another batch)`);
     if (r.unresolved) parts.push(`${r.unresolved} unresolved`);
     if (r.badFormat) parts.push(`${r.badFormat} bad format`);
     const msg = parts.join(' · ');
-    setResult($('uploadResult'), '✓ ' + msg, 'ok');
-    toast(msg, 'ok', { title: 'SKUs imported' });
+    // If many SKUs got linked, explain WHY inline. Users need to see
+    // that 25 SKUs → 1 job is NORMAL for a variant-heavy store — every
+    // SKU is preserved on that single row's sku column.
+    const heavyLink = r.linkedToExisting >= 5;
+    if (heavyLink) {
+      $('uploadResult').innerHTML = `<div class="banner warn" style="margin-top:10px;">
+        ⚠ ${esc(msg)}
+        <div style="margin-top: 6px; font-size: 12px;">Your Shopify store maps multiple SKUs to the same product page (variants). The engine scrapes each <strong>product page once</strong> — that's ${r.inserted} scrape job(s) covering all ${r.inserted + r.linkedToExisting} SKUs you provided. Every SKU is preserved on the job row's <code>sku</code> column (comma-separated), so downloaded CSVs + downstream Shopify updates still see them individually. Keyword data + rankings apply to <em>all variants</em> under each page.</div>
+      </div>`;
+    } else {
+      setResult($('uploadResult'), '✓ ' + msg, 'ok');
+    }
+    toast(msg, heavyLink ? 'warn' : 'ok', { title: 'SKUs imported' });
     refreshStatsBar();
     refreshUploadSidebar();
     // Keep the batch ID visible; clear the textarea so a follow-up

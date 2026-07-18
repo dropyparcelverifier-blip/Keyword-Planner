@@ -1097,20 +1097,50 @@ const server = http.createServer(async (req, res) => {
           shopifyConfigured,
         });
       }
-      // Real insert: use existing upload path (cross-batch dedup + insert).
-      let inserted = 0, skippedActive = 0;
+      // UPSERT semantics — 25 SKUs that all resolve to the same dropy.in
+      // product page (variants) become ONE job row whose 'sku' column
+      // holds all 25 SKUs comma-separated. That way the user sees every
+      // SKU they provided in the UI, and the engine still only scrapes
+      // the product page ONCE (the whole point of scraping).
+      //
+      // Two dedup paths:
+      //   (a) Cross-batch — skip URLs already active in ANOTHER batch.
+      //   (b) In-batch    — INSERT ... ON CONFLICT DO UPDATE appends the
+      //                     new SKU to the existing row's sku field.
+      //                     No-op if the SKU is already listed
+      //                     (guarded by NOT LIKE).
+      let inserted = 0, skippedActive = 0, linkedToExisting = 0;
       const skippedSkus = [];
+      const seenInThisCall = new Set();
+      const upsertJob = db.prepare(`INSERT INTO jobs
+        (batch_id, sku, product_url, product_name, priority, handles, brands)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(batch_id, product_url) DO UPDATE SET
+          sku = CASE
+            WHEN sku IS NULL OR sku = '' THEN excluded.sku
+            WHEN (',' || sku || ',') LIKE '%,' || excluded.sku || ',%' THEN sku
+            ELSE sku || ',' || excluded.sku
+          END`);
+      const existsInBatch = db.prepare(`SELECT 1 FROM jobs WHERE batch_id=? AND product_url=?`);
       db.exec('BEGIN');
       try {
         for (const r of withUrl) {
           if (Q.existsActiveUrl.get(r.url, batchId)) { skippedActive++; skippedSkus.push(r.sku); continue; }
-          // Pass enriched Shopify metadata into the same columns Excel/CSV
-          // uploads fill: product_name (from title), handles (handle +
-          // tags + product_type), brands (vendor). Engine uses these
-          // for seed derivation, product context, and brand-domain
-          // confirmation.
-          Q.insertJob.run(batchId, r.sku, r.url, r.product_name, 100, r.handles, r.brands);
-          inserted++;
+          // Second (or Nth) time we see this URL in this call — it will
+          // hit the UPSERT UPDATE branch and merge into the row we
+          // just inserted.
+          if (seenInThisCall.has(r.url)) {
+            upsertJob.run(batchId, r.sku, r.url, r.product_name, 100, r.handles, r.brands);
+            linkedToExisting++;
+            continue;
+          }
+          seenInThisCall.add(r.url);
+          // First time in this call — check if the URL was already in
+          // the batch from a PREVIOUS upload to decide inserted vs merged.
+          const preExists = !!existsInBatch.get(batchId, r.url);
+          upsertJob.run(batchId, r.sku, r.url, r.product_name, 100, r.handles, r.brands);
+          if (preExists) linkedToExisting++;
+          else inserted++;
         }
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
@@ -1119,6 +1149,11 @@ const server = http.createServer(async (req, res) => {
         parsed: parsed.size, badFormat: badFormat.length,
         unresolved: withoutUrl.length,
         skippedActive, skippedSkus: skippedSkus.slice(0, 20),
+        // linkedToExisting = SKUs merged into another row's sku column
+        // because they resolved to a URL already in this batch. The
+        // engine still scrapes each URL once; every SKU is preserved
+        // for downstream lookup / display.
+        linkedToExisting,
         badFormatSamples: badFormat.slice(0, 20),
         shopifyConfigured,
       });
@@ -1177,21 +1212,38 @@ const server = http.createServer(async (req, res) => {
       const seen = new Map();
       for (const pr of products) { const u = String(pr.url || pr.product_url || '').trim(); if (u) seen.set(u, pr); }
       const dupDropped = products.filter(p => (p.url || p.product_url || '').trim()).length - seen.size;
-      let n = 0, skippedActive = 0; const skippedSkus = [];
+      // Same UPSERT semantics as /api/jobs/upload-by-sku — an append-to-
+      // existing-batch upload where the URL was already there merges the
+      // new SKU into the existing row's sku column instead of throwing
+      // UNIQUE. Idempotent re-uploads become a no-op.
+      let n = 0, skippedActive = 0, linkedToExisting = 0;
+      const skippedSkus = [];
+      const upsertJobExcel = db.prepare(`INSERT INTO jobs
+        (batch_id, sku, product_url, product_name, priority, handles, brands)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(batch_id, product_url) DO UPDATE SET
+          sku = CASE
+            WHEN sku IS NULL OR sku = '' THEN excluded.sku
+            WHEN excluded.sku IS NULL OR excluded.sku = '' THEN sku
+            WHEN (',' || sku || ',') LIKE '%,' || excluded.sku || ',%' THEN sku
+            ELSE sku || ',' || excluded.sku
+          END`);
+      const seenUrlsExcel = new Set();
       db.exec('BEGIN');
       try {
         for (const [urlv, pr] of seen) {
           // Cross-batch dedup: skip URLs already pending/claimed/done in ANOTHER batch.
           if (Q.existsActiveUrl.get(urlv, batchId)) { skippedActive++; if (pr.sku) skippedSkus.push(pr.sku); continue; }
-          Q.insertJob.run(batchId, pr.sku || null, urlv, pr.product_name || pr.name || null,
+          upsertJobExcel.run(batchId, pr.sku || null, urlv, pr.product_name || pr.name || null,
             Number.isFinite(pr.priority) ? pr.priority : 100,
             Array.isArray(pr.handles) ? pr.handles.join('|') : (pr.handles || null),
             Array.isArray(pr.brands) ? pr.brands.join('|') : (pr.brands || null));
-          n++;
+          if (!seenUrlsExcel.has(urlv)) { n++; seenUrlsExcel.add(urlv); }
+          else linkedToExisting++;
         }
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
-      return send(res, 200, { ok: true, uploaded: n, total: seen.size, batchId, duplicatesDropped: dupDropped, skippedActive, skippedSkus: skippedSkus.slice(0, 10) });
+      return send(res, 200, { ok: true, uploaded: n, total: seen.size, batchId, duplicatesDropped: dupDropped, skippedActive, skippedSkus: skippedSkus.slice(0, 10), linkedToExisting });
     }
     if (m === 'POST' && p === '/api/jobs/claim') {
       const b = await readJson(req);
