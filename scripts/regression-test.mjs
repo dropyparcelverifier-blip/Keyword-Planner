@@ -1653,6 +1653,9 @@ async function run() {
   assert(popupJsSrc.includes("await rpc('clearLog')"),                 'CTRL.1 popup Clear-log uses RPC (not direct storage write)');
   assert(bgSrcCtrl.includes('_doAutoConnectWorker({ workerId: wId, chunkSize: cs })'), 'CTRL.2 resume calls _doAutoConnectWorker directly');
   assert(bgSrcCtrl.includes("Resume command received — force-armed"), 'CTRL.3 resume force-arms (clears userStoppedArm)');
+  // jobs/list must return handles+brands so the queue-manager UI can
+  // display them (bulk update + enriched Shopify uploads populate these).
+  assert(srvFull.includes('sku, product_url, product_name, priority, status, claimed_by, claimed_at, heartbeat_at, done_at, failed_reason, attempts, handles, brands'), 'CTRL.4 jobs/list returns handles+brands columns');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');

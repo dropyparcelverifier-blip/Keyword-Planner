@@ -334,7 +334,7 @@ const Q = {
   updateJobPriority: db.prepare(`UPDATE jobs SET priority=? WHERE id=?`),
   updateJobStatus:   db.prepare(`UPDATE jobs SET status=?, claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=NULL, failed_reason=NULL WHERE id=?`),
   deleteJob:    db.prepare(`DELETE FROM jobs WHERE id=?`),
-  jobsForBatch: db.prepare(`SELECT id, batch_id, sku, product_url, product_name, priority, status, claimed_by, claimed_at, heartbeat_at, done_at, failed_reason, attempts FROM jobs WHERE batch_id=? ORDER BY priority DESC, id ASC`),
+  jobsForBatch: db.prepare(`SELECT id, batch_id, sku, product_url, product_name, priority, status, claimed_by, claimed_at, heartbeat_at, done_at, failed_reason, attempts, handles, brands FROM jobs WHERE batch_id=? ORDER BY priority DESC, id ASC`),
   deleteKeywordsForProduct: db.prepare(`DELETE FROM keywords WHERE batch_id=? AND product_url=?`),
   jobIdByBatchAndUrl: db.prepare(`SELECT id FROM jobs WHERE batch_id=? AND product_url=?`),
   summary: db.prepare(`SELECT batch_id,
@@ -348,7 +348,7 @@ const Q = {
       COUNT(*) total_touched, SUM(status='done') done_count, SUM(status='failed') failed_count,
       SUM(status='claimed') in_flight, MAX(heartbeat_at) last_heartbeat
     FROM jobs WHERE claimed_by IS NOT NULL GROUP BY claimed_by, batch_id`),
-  perProduct: db.prepare(`SELECT id, batch_id, sku, product_url, product_name, status, claimed_by, claimed_at, heartbeat_at, done_at, failed_reason, attempts FROM jobs WHERE batch_id=? ORDER BY priority DESC, id ASC`),
+  perProduct: db.prepare(`SELECT id, batch_id, sku, product_url, product_name, status, claimed_by, claimed_at, heartbeat_at, done_at, failed_reason, attempts, handles, brands FROM jobs WHERE batch_id=? ORDER BY priority DESC, id ASC`),
   activeWorkers: db.prepare(`SELECT DISTINCT claimed_by worker_id, MAX(heartbeat_at) last_heartbeat FROM jobs WHERE batch_id=? AND claimed_by IS NOT NULL GROUP BY claimed_by`),
   insertKeyword: db.prepare(`INSERT INTO keywords (batch_id, sku, keyword, product_url, data) VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(batch_id, product_url, keyword) DO UPDATE SET data=excluded.data, sku=excluded.sku`),
