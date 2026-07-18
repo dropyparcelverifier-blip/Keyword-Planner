@@ -1636,6 +1636,15 @@ async function run() {
   assert(kdSrcAmzn.includes('WEBSITE_MAX_ATTEMPTS'),                   'AMZN.13 website fallback retries on transient errors');
   assert(kdSrcAmzn.includes('message port closed|message channel closed|Receiving end does not exist'), 'AMZN.14 catches MV3 port-close error');
   assert(kdSrcAmzn.includes('content script tore down mid-flow'),      'AMZN.15 clear log when MV3 SW teardown detected');
+  // SKU-list mode enriches Shopify-resolved jobs with the same fields
+  // Excel/CSV uploads carry: product_name (title), handles (handle +
+  // tags + product_type), brands (vendor). Engine uses these for seed
+  // derivation and brand-domain confirmation.
+  assert(srvFull.includes('fields=handle,title,tags,vendor,product_type'), 'ENRICH.1 Shopify fetch pulls tags/vendor/product_type');
+  assert(srvFull.includes("entry.handles = handleParts.length ? handleParts.join"), 'ENRICH.2 handles concat (handle + tags + product_type)');
+  assert(srvFull.includes('entry.brands  = p.vendor'),                  'ENRICH.3 brands from Shopify vendor');
+  assert(srvFull.includes('r.handles, r.brands'),                       'ENRICH.4 insertJob passes enriched handles + brands');
+  assert(appFull.includes('<th>Title</th>') && appFull.includes('<th>Handles</th>') && appFull.includes('<th>Brand</th>'), 'ENRICH.5 preview table shows Title/Handles/Brand');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');
