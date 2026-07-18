@@ -94,6 +94,8 @@ export const api = {
   jobsUploadBySku:     (batchId, skus, resolve, dryRun) => _fetch('/api/jobs/upload-by-sku', { method: 'POST', body: { batchId, skus, resolve, dryRun } }),
   jobsBulkUpdate:      (jobIds, patch, force) => _fetch('/api/jobs/bulk-update', { method: 'POST', body: { jobIds, patch, force: !!force } }),
   jobsBulkDelete:      (jobIds, force) => _fetch('/api/jobs/bulk-delete', { method: 'POST', body: { jobIds, force: !!force } }),
+  jobsDoneEmpty:       (batchId)       => _fetch(`/api/jobs/done-empty${batchId ? `?batchId=${encodeURIComponent(batchId)}` : ''}`),
+  jobsRequeueDoneEmpty:(batchId)       => _fetch('/api/jobs/requeue-done-empty', { method: 'POST', body: { batchId: batchId || null } }),
 };
 
 // Live keyword stats — mirrors the extension's dashboard fetchBatchKeywordStats.

@@ -337,13 +337,34 @@ const Q = {
   jobsForBatch: db.prepare(`SELECT id, batch_id, sku, product_url, product_name, priority, status, claimed_by, claimed_at, heartbeat_at, done_at, failed_reason, attempts, handles, brands FROM jobs WHERE batch_id=? ORDER BY priority DESC, id ASC`),
   deleteKeywordsForProduct: db.prepare(`DELETE FROM keywords WHERE batch_id=? AND product_url=?`),
   jobIdByBatchAndUrl: db.prepare(`SELECT id FROM jobs WHERE batch_id=? AND product_url=?`),
-  summary: db.prepare(`SELECT batch_id,
+  summary: db.prepare(`SELECT j.batch_id,
       COUNT(*) total,
-      SUM(status='pending') pending, SUM(status='claimed') claimed,
-      SUM(status='done') done, SUM(status='failed') failed,
-      COUNT(DISTINCT CASE WHEN status='claimed' THEN claimed_by END) active_workers,
-      MAX(done_at) last_done_at
-    FROM jobs GROUP BY batch_id ORDER BY batch_id DESC LIMIT 20`),
+      SUM(j.status='pending') pending, SUM(j.status='claimed') claimed,
+      SUM(j.status='done') done, SUM(j.status='failed') failed,
+      COUNT(DISTINCT CASE WHEN j.status='claimed' THEN j.claimed_by END) active_workers,
+      MAX(j.done_at) last_done_at,
+      /* done_empty = 'done' jobs with ZERO keyword rows in the keywords
+         table. This surfaces the phantom-done bug: worker marked done
+         BEFORE the keyword push, then the push failed. The row sits
+         forever as 'done' with no data. UI shows a warning + 1-click
+         requeue for these. */
+      SUM(CASE WHEN j.status='done' AND NOT EXISTS
+          (SELECT 1 FROM keywords k WHERE k.batch_id=j.batch_id AND k.product_url=j.product_url)
+        THEN 1 ELSE 0 END) done_empty
+    FROM jobs j GROUP BY j.batch_id ORDER BY j.batch_id DESC LIMIT 20`),
+  /* List individual done-empty jobs so the UI can offer a per-job requeue
+     (e.g. the user might want to skip one that they know has no results). */
+  doneEmptyJobs: db.prepare(`SELECT id, batch_id, sku, product_url, product_name, done_at, claimed_by
+    FROM jobs j WHERE status='done' AND NOT EXISTS
+      (SELECT 1 FROM keywords k WHERE k.batch_id=j.batch_id AND k.product_url=j.product_url)
+    AND (? IS NULL OR batch_id=?) ORDER BY done_at DESC LIMIT 500`),
+  /* Bulk requeue: reset done-empty jobs back to pending so a worker
+     re-picks them and (with the reorder fix) pushes keywords first. */
+  requeueDoneEmpty: db.prepare(`UPDATE jobs SET status='pending',
+      claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=NULL, failed_reason=NULL
+    WHERE status='done' AND NOT EXISTS
+      (SELECT 1 FROM keywords k WHERE k.batch_id=jobs.batch_id AND k.product_url=jobs.product_url)
+    AND (? IS NULL OR batch_id=?)`),
   workerStats: db.prepare(`SELECT claimed_by worker_id, batch_id,
       COUNT(*) total_touched, SUM(status='done') done_count, SUM(status='failed') failed_count,
       SUM(status='claimed') in_flight, MAX(heartbeat_at) last_heartbeat
@@ -1313,6 +1334,21 @@ const server = http.createServer(async (req, res) => {
       const b = await readJson(req);
       const bId = String(b.batchId || '').trim();
       const info = bId ? Q.requeueBatchFailed.run(bId) : Q.requeueAllFailed.run();
+      return send(res, 200, { ok: true, updated: info.changes });
+    }
+    // Done-empty visibility: worker marked a job 'done' but the manager
+    // has ZERO keyword rows for it (worker died / push failed after the
+    // done-flag write). Returns the list so the UI can flag them and
+    // offer 1-click requeue.
+    if (m === 'GET' && p === '/api/jobs/done-empty') {
+      const bId = url.searchParams.get('batchId') || '';
+      const rows = Q.doneEmptyJobs.all(bId || null, bId || null);
+      return send(res, 200, { ok: true, rows, count: rows.length });
+    }
+    if (m === 'POST' && p === '/api/jobs/requeue-done-empty') {
+      const b = await readJson(req);
+      const bId = (b.batchId && String(b.batchId).trim()) || null;
+      const info = Q.requeueDoneEmpty.run(bId, bId);
       return send(res, 200, { ok: true, updated: info.changes });
     }
     if (m === 'GET' && p === '/api/keywords/batches') {

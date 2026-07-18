@@ -1364,9 +1364,15 @@ function renderBatchOverview() {
             </div>
           </td>
           <td class="num">${total}</td>
-          <td class="num" style="color:var(--success);">${done}</td>
+          <td class="num" style="color:var(--success);">
+            ${done}
+            ${b.done_empty > 0 ? `<div style="font-size:9px; color:var(--warn); font-weight:700; margin-top:2px;" title="Marked 'done' but the manager has ZERO keyword rows for these SKUs — worker died / push failed after marking done. Click the 'Requeue empty' button to reset them to pending so a worker retries.">⚠ ${b.done_empty} empty</div>` : ''}
+          </td>
           <td class="num" style="color:${failed > 0 ? 'var(--danger)' : 'var(--text-3)'};">${failed}</td>
-          <td><button class="tiny secondary" data-queue-manage="${esc(b.batch_id)}" title="Open the queue manager for this batch — view every SKU, edit priority, re-queue failed, delete, add new.">Manage</button></td>
+          <td>
+            <button class="tiny secondary" data-queue-manage="${esc(b.batch_id)}" title="Open the queue manager for this batch — view every SKU, edit priority, re-queue failed, delete, add new.">Manage</button>
+            ${b.done_empty > 0 ? `<button class="tiny secondary" data-requeue-empty="${esc(b.batch_id)}" style="color:var(--warn); border-color:var(--warn); margin-left:4px;" title="Reset the ${b.done_empty} phantom-done job(s) back to pending. A worker will re-claim and this time push keywords BEFORE marking done.">↺ Requeue ${b.done_empty} empty</button>` : ''}
+          </td>
         </tr>`;
     }).join('')}
     </tbody></table>`;
@@ -1374,6 +1380,16 @@ function renderBatchOverview() {
   el.querySelectorAll('button[data-queue-manage]').forEach(btn =>
     btn.addEventListener('click', () => openQueueManager(btn.dataset.queueManage))
   );
+  // Wire the Requeue-empty buttons — 1-click reset of phantom-done jobs.
+  el.querySelectorAll('button[data-requeue-empty]').forEach(btn => btn.addEventListener('click', async () => {
+    const bId = btn.dataset.requeueEmpty;
+    if (!confirm(`Requeue every 'done' SKU in batch ${bId.slice(-8)} that has ZERO keyword rows in the manager? They'll go back to pending for a worker to reclaim.`)) return;
+    try {
+      const r = await api.jobsRequeueDoneEmpty(bId);
+      toast(`${r.updated} phantom-done job(s) requeued`, 'ok', { title: 'Requeued' });
+      refreshDashboard();
+    } catch (e) { toast(e.message, 'err', { title: 'Requeue failed' }); }
+  }));
 }
 
 // ─────────── Queue manager modal ───────────
