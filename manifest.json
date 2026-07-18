@@ -17,22 +17,7 @@
     "power"
   ],
   "host_permissions": [
-    "https://www.google.com/*",
-    "https://www.google.co.in/*",
-    "https://www.google.co.uk/*",
-    "https://ads.google.com/*",
-    "https://dropy.in/*",
-    "https://cdn.shopify.com/*",
-    "https://*.gstatic.com/*",
-    "https://*.googleusercontent.com/*",
-    "http://*.ts.net/*",
-    "https://*.ts.net/*",
-    "http://localhost/*",
-    "http://127.0.0.1/*",
-    "https://huggingface.co/*",
-    "https://cdn-lfs.huggingface.co/*",
-    "https://www.amazon.in/*",
-    "https://www.amazon.com/*"
+    "<all_urls>"
   ],
   "action": {
     "default_title": "AdBrain Discovery"
