@@ -1573,6 +1573,14 @@ async function run() {
   assert(appFull.includes("_acceptSkuFile"),                           'BULK.22 SKU file-drop handler');
   assert(appFull.includes("_skuUploadRecount"),                        'BULK.23 SKU live-count handler');
   assert(cssFull.includes('.upload-mode-toggle'),                      'BULK.24 mode toggle styled');
+  // Token auto-save + smart-detect on file drops (fixes user reports).
+  assert(appFull.includes('_persistTokenFromInput'),                   'BULK.25 token auto-save helper');
+  assert(appFull.includes("addEventListener('blur'"),                  'BULK.26 tokenInput blur autosave');
+  assert(appFull.includes("addEventListener('paste'"),                 'BULK.27 tokenInput paste autosave');
+  assert(appFull.includes('_looksLikeSkuTxtFile'),                     'BULK.28 detect .txt drops');
+  assert(appFull.includes('_looksLikeExcelFile'),                      'BULK.29 detect .xlsx drops');
+  assert(appFull.includes('_autoSwitchToSkuMode'),                     'BULK.30 auto-switch to SKU mode on .txt drop');
+  assert(appFull.includes('_autoSwitchToFileMode'),                    'BULK.31 auto-switch to Excel mode on .xlsx drop');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');
