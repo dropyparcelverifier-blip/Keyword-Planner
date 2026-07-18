@@ -932,13 +932,68 @@ const server = http.createServer(async (req, res) => {
         const key = asin;
         if (!parsed.has(key)) parsed.set(key, { sku: line, asin });
       }
-      // Resolve each SKU to a URL.
+      // Resolve each SKU to a URL. Uses ONE GraphQL query per lookup
+      // round (SKU / barcode / handle) with OR'd search values —
+      // 3 API calls per 250-SKU batch instead of 750.
       const cfgRow = Q.getConfig.get();
       const cfg = cfgRow?.config ? JSON.parse(cfgRow.config) : {};
       const shop = cfg.shopify || {};
       const apiVer = shop.apiVersion || '2024-10';
       const shopifyConfigured = !!(shop.shopDomain && shop.adminToken);
       const shopifyDomain = shop.shopDomain ? String(shop.shopDomain).replace(/^https?:\/\//, '').replace(/\/+$/, '') : null;
+      // Build the batch search value: field:"a" OR field:"b" OR ...
+      const batchGqlLookup = async (field, values) => {
+        if (values.length === 0) return {};
+        // Shopify's OR operator + double-quoted values (hyphens preserved).
+        // 'first' clamps to actual value count so we don't over-request.
+        const clauses = values.map(v => `${field}:\\"${String(v).replace(/"/g, '')}\\"`).join(' OR ');
+        const first = Math.min(250, values.length * 3);  // some SKUs may have multiple variants
+        const graphqlText = `{
+          productVariants(first: ${first}, query: "${clauses}") {
+            edges { node { id sku barcode product { id handle title tags vendor productType } } }
+          }
+        }`;
+        const r = await shopifyRequest({
+          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+          method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`, body: { query: graphqlText },
+        });
+        if (!r.ok) return {};
+        // Return a map keyed by the field-value (lowercased) so the
+        // per-SKU loop can look up matches locally in O(1). Ignore
+        // fuzzy hits — the returned field must equal what we asked.
+        const byKey = {};
+        for (const edge of (r?.data?.data?.productVariants?.edges || [])) {
+          const key = String(edge?.node?.[field] || '').toLowerCase();
+          if (!key) continue;
+          if (!byKey[key]) byKey[key] = edge.node;   // first exact match wins
+        }
+        return byKey;
+      };
+      const batchGqlHandleWildcard = async (asinTokens) => {
+        if (asinTokens.length === 0) return {};
+        // Handle wildcards — 'handle:*asin* OR handle:*asin2*'. Slower
+        // than exact lookup on Shopify's side but still one round-trip.
+        const clauses = asinTokens.map(a => `handle:*${a}*`).join(' OR ');
+        const first = Math.min(250, asinTokens.length * 2);
+        const graphqlText = `{
+          products(first: ${first}, query: "${clauses}") {
+            edges { node { id handle title tags vendor productType } }
+          }
+        }`;
+        const r = await shopifyRequest({
+          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+          method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`, body: { query: graphqlText },
+        });
+        if (!r.ok) return {};
+        const byAsin = {};
+        for (const edge of (r?.data?.data?.products?.edges || [])) {
+          const h = String(edge?.node?.handle || '').toLowerCase();
+          for (const a of asinTokens) {
+            if (h.includes(a) && !byAsin[a]) byAsin[a] = edge.node;
+          }
+        }
+        return byAsin;
+      };
       // Look up the STOREFRONT host (the public dropy.in domain, NOT
       // the *.myshopify.com admin host). Shopify's /admin/api/shop.json
       // returns .primary_domain.host which is what customers browse.
@@ -959,145 +1014,80 @@ const server = http.createServer(async (req, res) => {
       }
       // Fall back to the admin domain if we couldn't get the primary_domain.
       const publicHost = storefrontHost || shopifyDomain;
+      // BATCH pre-lookup — one Shopify query per round covers every SKU.
+      let skuMap = {}, barcodeMap = {}, handleMap = {};
+      const wantShopifyForBatch = (resolveMode === 'shopify' || resolveMode === 'both') && shopifyConfigured;
+      if (wantShopifyForBatch) {
+        const allSkuCandidates = [];
+        const allBarcodeCandidates = [];
+        const allAsinTokens = [];
+        for (const [asin, e] of parsed) {
+          allSkuCandidates.push(e.sku);
+          allSkuCandidates.push(asin);
+          allSkuCandidates.push(`Dropy-${asin}`);
+          allBarcodeCandidates.push(e.sku, asin);
+          allAsinTokens.push(asin.toLowerCase());
+        }
+        const uniq = arr => [...new Set(arr.filter(Boolean))];
+        try {
+          skuMap     = await batchGqlLookup('sku',     uniq(allSkuCandidates));
+        } catch (e) { /* skuMap stays empty */ }
+        try {
+          barcodeMap = await batchGqlLookup('barcode', uniq(allBarcodeCandidates));
+        } catch (e) { /* barcodeMap stays empty */ }
+        try {
+          handleMap  = await batchGqlHandleWildcard(uniq(allAsinTokens));
+        } catch (e) { /* handleMap stays empty */ }
+      }
+      const enrichFromProduct = (entry, p, matchedVia) => {
+        if (!p?.handle) return false;
+        entry._url = `https://${publicHost}/products/${p.handle}`;
+        entry._source = 'shopify';
+        entry._matchedVia = matchedVia;
+        entry.product_name = p.title || null;
+        const handleParts = [
+          p.handle,
+          ...(String(p.tags || '').split(',').map(t => t.trim()).filter(Boolean)),
+          p.productType,
+        ].filter(Boolean);
+        entry.handles = handleParts.length ? handleParts.join('|') : null;
+        entry.brands  = p.vendor || null;
+        return true;
+      };
       const resolved = [];
       for (const [asin, entry] of parsed) {
         let url = null, source = null, note = null;
-        const wantShopify = (resolveMode === 'shopify' || resolveMode === 'both') && shopifyConfigured;
         let shopifyTried = false;
         let matchedVia = null;
-        if (wantShopify) {
+        // Consume the batched maps built ABOVE the loop. Each SKU makes
+        // three O(1) local lookups instead of 3-9 Shopify roundtrips.
+        if (wantShopifyForBatch) {
           shopifyTried = true;
-          try {
-            // CRITICAL: the Shopify REST endpoint /variants.json does NOT
-            // accept ?sku= as a filter — the parameter is silently ignored
-            // and Shopify returns the store's variants unfiltered. Using
-            // it caused every SKU to resolve to the SAME product (the
-            // first variant in the store). GraphQL productVariants(query:
-            // "sku:XYZ") is the correct filter path.
-            //
-            // We NEVER modify the SKU we store on the job row — the
-            // multiple candidates below are only what we send to
-            // Shopify's search index, which is case-insensitive so we
-            // only need 2-3 variants (not 6).
-            const asinUpper = entry.asin.toUpperCase();
-            const candidates = [];
-            const seen = new Set();
-            const pushCand = (label, sku) => {
-              if (!sku || seen.has(sku)) return;
-              seen.add(sku);
-              candidates.push({ label, sku });
-            };
-            pushCand('input as-is',    entry.sku);
-            pushCand('ASIN only',      asinUpper);
-            pushCand('Dropy-<ASIN>',   `Dropy-${asinUpper}`);
-            // Shopify's GraphQL search syntax TOKENIZES on '-' unless
-            // the value is quoted. Every user SKU starts with 'Dropy-'
-            // so an unquoted 'sku:Dropy-B002OTT3US' becomes 'sku:Dropy'
-            // + free-text 'B002OTT3US', which matches EVERY Dropy-*
-            // variant in the store → same wrong product for every
-            // lookup. Fix: quote the value. In GraphQL string:
-            //   sku:"Dropy-B002OTT3US"
-            // which becomes sku:\"…\" after the JSON-encode below.
-            //
-            // Also: verify the returned variant.sku actually matches
-            // what we asked for. If Shopify silently returns something
-            // else (fuzzy match, empty query, whatever), treat it as
-            // 'not found' rather than trust it.
-            const gqlSearch = async (field, value, byLabel) => {
-              const quoted = `${field}:\\"${String(value).replace(/"/g, '')}\\"`;
-              const body = { query: `{
-                productVariants(first: 1, query: "${quoted}") {
-                  edges {
-                    node {
-                      id sku barcode
-                      product {
-                        id handle title tags vendor productType
-                      }
-                    }
-                  }
-                }
-              }` };
-              const r = await shopifyRequest({
-                shopDomain: shop.shopDomain, adminToken: shop.adminToken,
-                method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`, body,
-              });
-              const edge = r?.data?.data?.productVariants?.edges?.[0];
-              if (!edge?.node?.product?.handle) return false;
-              // Sanity check — the returned variant's field must actually
-              // equal the search value (case-insensitively). Guards
-              // against Shopify returning a fuzzy hit.
-              const returnedFieldVal = String(edge.node[field] || '').toLowerCase();
-              const requestedVal     = String(value).toLowerCase();
-              if (returnedFieldVal !== requestedVal) {
-                return { fuzzyMismatch: true, returned: edge.node[field], requested: value };
-              }
-              const p = edge.node.product;
-              matchedVia = `${byLabel} → product.handle="${p.handle}"`;
-              url = `https://${publicHost}/products/${p.handle}`;
-              source = 'shopify';
-              entry.product_name = p.title || null;
-              const handleParts = [
-                p.handle,
-                ...(String(p.tags || '').split(',').map(t => t.trim()).filter(Boolean)),
-                p.productType,
-              ].filter(Boolean);
-              entry.handles = handleParts.length ? handleParts.join('|') : null;
-              entry.brands  = p.vendor || null;
-              return true;
-            };
-            // Round 1 — variant SKU exact match
-            const fuzzyHits = [];
+          const asinUpper = entry.asin.toUpperCase();
+          const asinLower = entry.asin.toLowerCase();
+          const candidates = [entry.sku, asinUpper, `Dropy-${asinUpper}`];
+          for (const c of candidates) {
+            const node = skuMap[String(c).toLowerCase()];
+            if (node?.product?.handle && enrichFromProduct(entry, node.product, `variant.sku="${c}"`)) {
+              url = entry._url; source = entry._source; matchedVia = entry._matchedVia; break;
+            }
+          }
+          if (!url) {
             for (const c of candidates) {
-              const r = await gqlSearch('sku', c.sku, `variant.sku="${c.sku}" (${c.label})`);
-              if (r === true) break;
-              if (r && r.fuzzyMismatch) fuzzyHits.push(`sku:${c.sku} → returned ${r.returned}`);
-            }
-            // Round 2 — variant BARCODE match (Amazon stores it as barcode)
-            if (!url) {
-              for (const c of candidates) {
-                const r = await gqlSearch('barcode', c.sku, `variant.barcode="${c.sku}"`);
-                if (r === true) break;
-                if (r && r.fuzzyMismatch) fuzzyHits.push(`barcode:${c.sku} → returned ${r.returned}`);
+              const node = barcodeMap[String(c).toLowerCase()];
+              if (node?.product?.handle && enrichFromProduct(entry, node.product, `variant.barcode="${c}"`)) {
+                url = entry._url; source = entry._source; matchedVia = entry._matchedVia; break;
               }
             }
-            // Round 3 — product HANDLE contains ASIN (some stores slugify Amazon titles)
-            if (!url) {
-              const handleTry = entry.asin.toLowerCase();
-              const body = { query: `{
-                products(first: 1, query: "handle:*${handleTry}*") {
-                  edges { node { id handle title tags vendor productType } }
-                }
-              }` };
-              const r = await shopifyRequest({
-                shopDomain: shop.shopDomain, adminToken: shop.adminToken,
-                method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`, body,
-              });
-              const edge = r?.data?.data?.products?.edges?.[0];
-              if (edge?.node?.handle && edge.node.handle.toLowerCase().includes(handleTry)) {
-                const p = edge.node;
-                matchedVia = `product.handle contains "${handleTry}"`;
-                url = `https://${publicHost}/products/${p.handle}`;
-                source = 'shopify';
-                entry.product_name = p.title || null;
-                const handleParts = [
-                  p.handle,
-                  ...(String(p.tags || '').split(',').map(t => t.trim()).filter(Boolean)),
-                  p.productType,
-                ].filter(Boolean);
-                entry.handles = handleParts.length ? handleParts.join('|') : null;
-                entry.brands  = p.vendor || null;
-              }
+          }
+          if (!url) {
+            const p = handleMap[asinLower];
+            if (p?.handle && enrichFromProduct(entry, p, `product.handle contains "${asinLower}"`)) {
+              url = entry._url; source = entry._source; matchedVia = entry._matchedVia;
             }
-            // Log fuzzy mismatches so users see WHY nothing matched
-            // when Shopify returned a variant but not the one asked for.
-            if (!url && fuzzyHits.length) {
-              note = `Shopify search returned fuzzy hits that don't match — ${fuzzyHits.slice(0, 2).join(' | ')}. Your Shopify catalog probably doesn't have this SKU stored anywhere.`;
-            }
-          } catch (e) { note = `shopify lookup error: ${e.message}`; }
+          }
         }
-        // If Shopify matched, surface WHICH variant matched (useful
-        // when the user's paste didn't match exactly but a fuzzy path
-        // rescued it).
+        // If Shopify matched, surface WHICH variant matched.
         if (matchedVia) note = `matched via ${matchedVia}`;
         // If Shopify was tried but didn't match, explain the exhausted paths.
         if (shopifyTried && !url && !note) {
@@ -1670,6 +1660,108 @@ const server = http.createServer(async (req, res) => {
     // ---------- Shopify integration ----------
     // Returns the field-impact hierarchy (what carries most SEO/CTR weight).
     // UI uses this to render a priority list; the Claude prompt inlines it too.
+    // Diagnostic endpoint: run the SAME GraphQL lookup as the bulk
+    // upload for ONE SKU, and return the raw request + response so
+    // the user can see exactly what Shopify is doing. Solves the
+    // 'why is every SKU resolving to CLEARSTEM' debug loop.
+    if (m === 'GET' && p === '/api/shopify/debug-lookup') {
+      const skuInput = String(url.searchParams.get('sku') || '').trim();
+      if (!skuInput) return send(res, 400, { ok: false, error: 'sku query param required, e.g. ?sku=Dropy-B002OTT3US' });
+      const cfgRow = Q.getConfig.get();
+      const cfg = cfgRow?.config ? JSON.parse(cfgRow.config) : {};
+      const shop = cfg.shopify || {};
+      const apiVer = shop.apiVersion || '2024-10';
+      if (!shop.shopDomain || !shop.adminToken) {
+        return send(res, 400, { ok: false, error: 'Shopify not configured — set credentials in Config → Shopify integration first' });
+      }
+      const asinMatch = skuInput.match(/^(?:Dropy-)?([A-Z0-9]{10})$/i);
+      const asin = asinMatch ? asinMatch[1].toUpperCase() : null;
+      const rounds = [];
+      const tryQuery = async (field, value, label) => {
+        const quoted = `${field}:\\"${String(value).replace(/"/g, '')}\\"`;
+        const graphqlText = `{
+          productVariants(first: 3, query: "${quoted}") {
+            edges { node { id sku barcode product { id handle title vendor productType } } }
+          }
+        }`;
+        const body = { query: graphqlText };
+        const started = Date.now();
+        const r = await shopifyRequest({
+          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+          method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`, body,
+        });
+        const elapsed = Date.now() - started;
+        const edges = r?.data?.data?.productVariants?.edges || [];
+        const returned = edges.map(e => ({
+          sku: e?.node?.sku,
+          barcode: e?.node?.barcode,
+          product: {
+            id: e?.node?.product?.id,
+            handle: e?.node?.product?.handle,
+            title: e?.node?.product?.title,
+          },
+          exactMatch: String(e?.node?.[field] || '').toLowerCase() === String(value).toLowerCase(),
+        }));
+        rounds.push({
+          label, field, requested: value,
+          graphqlQuery: graphqlText.replace(/\s+/g, ' ').trim(),
+          shopifyStatus: r.status,
+          shopifyOk: r.ok,
+          shopifyError: r.error || null,
+          elapsedMs: elapsed,
+          returnedCount: edges.length,
+          returned,
+          firstExactMatch: returned.find(v => v.exactMatch) || null,
+        });
+      };
+      // Round 1 — variant SKU exact match with 3 candidate forms
+      const candidates = [skuInput];
+      if (asin) {
+        if (!candidates.includes(asin))              candidates.push(asin);
+        if (!candidates.includes(`Dropy-${asin}`))   candidates.push(`Dropy-${asin}`);
+      }
+      for (const c of candidates) await tryQuery('sku', c, `sku="${c}"`);
+      // Round 2 — variant BARCODE match
+      for (const c of candidates) await tryQuery('barcode', c, `barcode="${c}"`);
+      // Round 3 — product handle wildcard
+      let handleRound = null;
+      if (asin) {
+        const asinLower = asin.toLowerCase();
+        const graphqlText = `{
+          products(first: 3, query: "handle:*${asinLower}*") {
+            edges { node { id handle title vendor productType } }
+          }
+        }`;
+        const r = await shopifyRequest({
+          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+          method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`,
+          body: { query: graphqlText },
+        });
+        handleRound = {
+          asin: asinLower,
+          shopifyOk: r.ok,
+          shopifyStatus: r.status,
+          returned: (r?.data?.data?.products?.edges || []).map(e => ({
+            handle: e?.node?.handle,
+            title: e?.node?.title,
+            matchesAsin: String(e?.node?.handle || '').toLowerCase().includes(asinLower),
+          })),
+        };
+      }
+      const winner = rounds.find(r => r.firstExactMatch) || null;
+      return send(res, 200, {
+        ok: true,
+        input: skuInput,
+        parsedAsin: asin,
+        shopifyDomain: shop.shopDomain,
+        apiVersion: apiVer,
+        rounds,
+        handleRound,
+        conclusion: winner
+          ? `MATCH: ${winner.label} → product '${winner.firstExactMatch.product.title}' (handle: ${winner.firstExactMatch.product.handle})`
+          : `NO EXACT MATCH across ${rounds.length} lookup(s). Check the 'returned' arrays — Shopify may be returning fuzzy hits (wrong sku in returned[0].sku) OR nothing (returnedCount:0).`,
+      });
+    }
     if (m === 'GET' && p === '/api/shopify/field-impact') {
       return send(res, 200, { ok: true, fields: SHOPIFY_FIELD_IMPACT, allowlist: [...SHOPIFY_ALLOWED_FIELDS] });
     }

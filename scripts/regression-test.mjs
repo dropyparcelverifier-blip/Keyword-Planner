@@ -1680,16 +1680,18 @@ async function run() {
   assert(srvFull.includes('https://${publicHost}/products/'),          'STORE.3 URL template uses publicHost');
   assert(srvFull.includes('no Shopify variant/product found (tried'),  'STORE.4 unresolved SKUs get explanatory note (all fallback paths listed)');
   // Widened SKU search: multiple case variants + barcode + handle fallback
-  assert(srvFull.includes("pushCand('ASIN only'"),                     'STORE.5 tries ASIN only');
-  assert(srvFull.includes("pushCand('Dropy-<ASIN>'"),                  'STORE.5b tries Dropy-<ASIN> variant');
-  assert(srvFull.includes("gqlSearch('barcode', c.sku"),               'STORE.6 barcode search (GraphQL with quoting)');
+  assert(srvFull.includes('allSkuCandidates.push(asin)'),              'STORE.5 tries ASIN only in batch');
+  assert(srvFull.includes('allSkuCandidates.push(`Dropy-${asin}`)'),   'STORE.5b tries Dropy-<ASIN> variant in batch');
+  assert(srvFull.includes("batchGqlLookup('barcode'"),                 'STORE.6 barcode search batched (GraphQL)');
   assert(srvFull.includes('handle:*'),                                 'STORE.7 handle wildcard search (GraphQL)');
-  assert(srvFull.includes('fuzzyMismatch'),                            'STORE.6b sanity-check: returned field must match requested');
+  assert(srvFull.includes('barcodeMap[String(c).toLowerCase()]'),      'STORE.6b batched barcode map lookup');
   assert(srvFull.includes('field}:\\\\"'),                             'STORE.6c query value quoted so hyphens are not tokenized');
+  assert(srvFull.includes('batchGqlLookup = async'),                   'STORE.6d batch GQL helper defined');
+  assert(srvFull.includes(' OR '),                                     'STORE.6e uses OR operator to combine values in one query');
   assert(srvFull.includes('matched via ${matchedVia}'),                'STORE.8 preview shows which variant path matched');
   // GraphQL migration — REST /variants.json?sku= doesn't actually filter,
   // it silently returns all variants. Must use GraphQL productVariants.
-  assert(srvFull.includes('productVariants(first: 1, query'),          'STORE.9 uses GraphQL productVariants query');
+  assert(srvFull.includes('productVariants(first: ${first}, query'),   'STORE.9 uses GraphQL productVariants query (with dynamic first)');
   assert(srvFull.includes('graphql.json'),                             'STORE.10 hits Shopify GraphQL endpoint');
   assert(!srvFull.includes('variants.json?fields=id,sku,product_id&limit=1&sku='), 'STORE.11 broken REST ?sku= filter removed');
   // Worker status: distinguish long-offline (probably powered off) from
