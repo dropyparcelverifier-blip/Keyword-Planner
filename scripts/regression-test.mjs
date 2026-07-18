@@ -571,6 +571,21 @@ async function run() {
   assert(!popupHtml.includes('mgrSaveCredsBtn'), '20f.20 no manager creds card in popup');
   assert(popupHtml.includes('id="hero"'), '20f.21 worker hero status block present');
   assert(popupHtml.includes('id="openManager"'), '20f.22 open-manager-dashboard footer link present');
+  // Palette parity: worker popup + manager operator dashboard must share
+  // the near-black + amber tokens so the whole surface reads as one product.
+  const dashHtml = readFileSync(resolve(REPO, 'dashboard.html'), 'utf-8');
+  const AMBER_TOKEN = '--accent:     #f59e0b';
+  const NEAR_BLACK  = '--bg-0:       #050510';
+  assert(popupHtml.includes(AMBER_TOKEN),  '20f.23 popup uses amber accent');
+  assert(popupHtml.includes(NEAR_BLACK),   '20f.24 popup uses near-black base');
+  assert(dashHtml.includes(AMBER_TOKEN),   '20f.25 dashboard uses amber accent');
+  assert(dashHtml.includes(NEAR_BLACK),    '20f.26 dashboard uses near-black base');
+  // Manager styles.css already established this palette earlier — sanity check.
+  const stylesCssEarly = readFileSync(resolve(REPO, 'manager/public/styles.css'), 'utf-8');
+  assert(stylesCssEarly.includes("--accent:     #f59e0b"), '20f.27 manager styles.css matches');
+  // No lingering old-blue accent (#5a8cff) in worker/dashboard.
+  assert(!popupHtml.includes('#5a8cff'),   '20f.28 popup no legacy blue');
+  assert(!dashHtml.includes('#5a8cff'),    '20f.29 dashboard no legacy blue');
 
   // ===== 20g. UX/ANALYTICS OVERHAUL =====
   // Command palette
