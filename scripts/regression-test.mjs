@@ -1682,8 +1682,10 @@ async function run() {
   // Widened SKU search: multiple case variants + barcode + handle fallback
   assert(srvFull.includes("pushCand('ASIN only'"),                     'STORE.5 tries ASIN only');
   assert(srvFull.includes("pushCand('Dropy-<ASIN>'"),                  'STORE.5b tries Dropy-<ASIN> variant');
-  assert(srvFull.includes("`barcode:${c.sku}`"),                       'STORE.6 barcode search (GraphQL)');
+  assert(srvFull.includes("gqlSearch('barcode', c.sku"),               'STORE.6 barcode search (GraphQL with quoting)');
   assert(srvFull.includes('handle:*'),                                 'STORE.7 handle wildcard search (GraphQL)');
+  assert(srvFull.includes('fuzzyMismatch'),                            'STORE.6b sanity-check: returned field must match requested');
+  assert(srvFull.includes('field}:\\\\"'),                             'STORE.6c query value quoted so hyphens are not tokenized');
   assert(srvFull.includes('matched via ${matchedVia}'),                'STORE.8 preview shows which variant path matched');
   // GraphQL migration — REST /variants.json?sku= doesn't actually filter,
   // it silently returns all variants. Must use GraphQL productVariants.

@@ -990,11 +990,23 @@ const server = http.createServer(async (req, res) => {
             pushCand('input as-is',    entry.sku);
             pushCand('ASIN only',      asinUpper);
             pushCand('Dropy-<ASIN>',   `Dropy-${asinUpper}`);
-            // GraphQL productVariants search — works with variant SKU
-            // AND barcode field via the query language.
-            const gqlSearch = async (query, byLabel) => {
+            // Shopify's GraphQL search syntax TOKENIZES on '-' unless
+            // the value is quoted. Every user SKU starts with 'Dropy-'
+            // so an unquoted 'sku:Dropy-B002OTT3US' becomes 'sku:Dropy'
+            // + free-text 'B002OTT3US', which matches EVERY Dropy-*
+            // variant in the store → same wrong product for every
+            // lookup. Fix: quote the value. In GraphQL string:
+            //   sku:"Dropy-B002OTT3US"
+            // which becomes sku:\"…\" after the JSON-encode below.
+            //
+            // Also: verify the returned variant.sku actually matches
+            // what we asked for. If Shopify silently returns something
+            // else (fuzzy match, empty query, whatever), treat it as
+            // 'not found' rather than trust it.
+            const gqlSearch = async (field, value, byLabel) => {
+              const quoted = `${field}:\\"${String(value).replace(/"/g, '')}\\"`;
               const body = { query: `{
-                productVariants(first: 1, query: "${query.replace(/"/g, '\\"')}") {
+                productVariants(first: 1, query: "${quoted}") {
                   edges {
                     node {
                       id sku barcode
@@ -1011,6 +1023,14 @@ const server = http.createServer(async (req, res) => {
               });
               const edge = r?.data?.data?.productVariants?.edges?.[0];
               if (!edge?.node?.product?.handle) return false;
+              // Sanity check — the returned variant's field must actually
+              // equal the search value (case-insensitively). Guards
+              // against Shopify returning a fuzzy hit.
+              const returnedFieldVal = String(edge.node[field] || '').toLowerCase();
+              const requestedVal     = String(value).toLowerCase();
+              if (returnedFieldVal !== requestedVal) {
+                return { fuzzyMismatch: true, returned: edge.node[field], requested: value };
+              }
               const p = edge.node.product;
               matchedVia = `${byLabel} → product.handle="${p.handle}"`;
               url = `https://${publicHost}/products/${p.handle}`;
@@ -1026,13 +1046,18 @@ const server = http.createServer(async (req, res) => {
               return true;
             };
             // Round 1 — variant SKU exact match
+            const fuzzyHits = [];
             for (const c of candidates) {
-              if (await gqlSearch(`sku:${c.sku}`, `variant.sku="${c.sku}" (${c.label})`)) break;
+              const r = await gqlSearch('sku', c.sku, `variant.sku="${c.sku}" (${c.label})`);
+              if (r === true) break;
+              if (r && r.fuzzyMismatch) fuzzyHits.push(`sku:${c.sku} → returned ${r.returned}`);
             }
             // Round 2 — variant BARCODE match (Amazon stores it as barcode)
             if (!url) {
               for (const c of candidates) {
-                if (await gqlSearch(`barcode:${c.sku}`, `variant.barcode="${c.sku}"`)) break;
+                const r = await gqlSearch('barcode', c.sku, `variant.barcode="${c.sku}"`);
+                if (r === true) break;
+                if (r && r.fuzzyMismatch) fuzzyHits.push(`barcode:${c.sku} → returned ${r.returned}`);
               }
             }
             // Round 3 — product HANDLE contains ASIN (some stores slugify Amazon titles)
@@ -1048,7 +1073,7 @@ const server = http.createServer(async (req, res) => {
                 method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`, body,
               });
               const edge = r?.data?.data?.products?.edges?.[0];
-              if (edge?.node?.handle) {
+              if (edge?.node?.handle && edge.node.handle.toLowerCase().includes(handleTry)) {
                 const p = edge.node;
                 matchedVia = `product.handle contains "${handleTry}"`;
                 url = `https://${publicHost}/products/${p.handle}`;
@@ -1062,6 +1087,11 @@ const server = http.createServer(async (req, res) => {
                 entry.handles = handleParts.length ? handleParts.join('|') : null;
                 entry.brands  = p.vendor || null;
               }
+            }
+            // Log fuzzy mismatches so users see WHY nothing matched
+            // when Shopify returned a variant but not the one asked for.
+            if (!url && fuzzyHits.length) {
+              note = `Shopify search returned fuzzy hits that don't match — ${fuzzyHits.slice(0, 2).join(' | ')}. Your Shopify catalog probably doesn't have this SKU stored anywhere.`;
             }
           } catch (e) { note = `shopify lookup error: ${e.message}`; }
         }
