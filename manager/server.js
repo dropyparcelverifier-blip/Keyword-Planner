@@ -964,56 +964,114 @@ const server = http.createServer(async (req, res) => {
         let url = null, source = null, note = null;
         const wantShopify = (resolveMode === 'shopify' || resolveMode === 'both') && shopifyConfigured;
         let shopifyTried = false;
+        let matchedVia = null;
         if (wantShopify) {
           shopifyTried = true;
           try {
-            // Shopify variant lookup by SKU — try both the literal SKU
-            // ('Dropy-B00...') and just the ASIN, since customers may
-            // store either as the variant SKU field.
-            for (const candidateSku of [entry.sku, entry.asin, `Dropy-${entry.asin}`]) {
+            // Build the candidate list. We NEVER modify the SKU we
+            // store on the job row — that stays as the user typed it.
+            // We just try multiple search variants against Shopify
+            // because the variants.json?sku= endpoint is EXACT-match
+            // (case-sensitive), and stores may have SKUs typed as:
+            //   'Dropy-B002OTT3US'  (full, mixed case — user's format)
+            //   'B002OTT3US'        (ASIN only, upper)
+            //   'b002ott3us'        (ASIN only, lower)
+            //   'dropy-b002ott3us'  (lowercase full)
+            //   'Dropy-b002ott3us'  (mixed lower)
+            // Also worth trying: variants where the ASIN is stored
+            // as the BARCODE instead of the SKU (Amazon-sourced).
+            const asinUpper = entry.asin.toUpperCase();
+            const asinLower = entry.asin.toLowerCase();
+            const candidates = [];
+            const seen = new Set();
+            const push = (label, sku) => {
+              if (!sku || seen.has(sku)) return;
+              seen.add(sku);
+              candidates.push({ label, sku });
+            };
+            push('input as-is',    entry.sku);
+            push('ASIN upper',     asinUpper);
+            push('ASIN lower',     asinLower);
+            push('Dropy-<ASIN>',   `Dropy-${asinUpper}`);
+            push('dropy-<asin>',   `dropy-${asinLower}`);
+            push('DROPY-<ASIN>',   `DROPY-${asinUpper}`);
+            // Variant SKU lookup (EXACT match against each candidate).
+            for (const c of candidates) {
               const r = await shopifyRequest({
                 shopDomain: shop.shopDomain, adminToken: shop.adminToken,
                 method: 'GET',
-                apiPath: `/admin/api/${apiVer}/variants.json?fields=id,sku,product_id&limit=1&sku=${encodeURIComponent(candidateSku)}`,
+                apiPath: `/admin/api/${apiVer}/variants.json?fields=id,sku,product_id&limit=1&sku=${encodeURIComponent(c.sku)}`,
               });
               if (r.ok && r.data?.variants?.length) {
-                const productId = r.data.variants[0].product_id;
-                const pr = await shopifyRequest({
+                matchedVia = `variant.sku="${c.sku}" (${c.label})`;
+                await _enrichProduct(r.data.variants[0].product_id);
+                break;
+              }
+            }
+            // Fallback 1: variant BARCODE match. Amazon-sourced stores
+            // often put the ASIN in the barcode field, not the SKU.
+            if (!url) {
+              const barcodes = [asinUpper, asinLower, entry.sku];
+              for (const bc of barcodes) {
+                if (seen.has('bc:' + bc)) continue;
+                seen.add('bc:' + bc);
+                const r = await shopifyRequest({
                   shopDomain: shop.shopDomain, adminToken: shop.adminToken,
                   method: 'GET',
-                  // Pull all columns the Excel/CSV flow would have carried:
-                  // title, handle, tags, vendor, product_type. Same fields
-                  // the engine uses for context, seed derivation, and
-                  // brand-domain confirmation.
-                  apiPath: `/admin/api/${apiVer}/products/${productId}.json?fields=handle,title,tags,vendor,product_type`,
+                  apiPath: `/admin/api/${apiVer}/variants.json?fields=id,sku,barcode,product_id&limit=1&barcode=${encodeURIComponent(bc)}`,
                 });
-                if (pr.ok && pr.data?.product?.handle) {
-                  const p = pr.data.product;
-                  // Use the PUBLIC storefront host (dropy.in) not the
-                  // admin *.myshopify.com host — that's the URL the
-                  // engine will actually scrape and rank.
-                  url = `https://${publicHost}/products/${p.handle}`;
-                  source = 'shopify';
-                  entry.product_name = p.title || null;
-                  // handles = product handle + tags + product_type combined
-                  // with | separator (same format the engine expects for
-                  // handlesToSeeds() + product context derivation).
-                  const handleParts = [
-                    p.handle,
-                    ...(String(p.tags || '').split(',').map(t => t.trim()).filter(Boolean)),
-                    p.product_type,
-                  ].filter(Boolean);
-                  entry.handles = handleParts.length ? handleParts.join('|') : null;
-                  entry.brands  = p.vendor || null;
+                if (r.ok && r.data?.variants?.length) {
+                  matchedVia = `variant.barcode="${bc}"`;
+                  await _enrichProduct(r.data.variants[0].product_id);
                   break;
                 }
               }
             }
+            // Fallback 2: product HANDLE contains the ASIN (many stores
+            // slugify handles from Amazon titles + include the ASIN).
+            if (!url) {
+              const handleTry = asinLower;
+              const r = await shopifyRequest({
+                shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+                method: 'GET',
+                apiPath: `/admin/api/${apiVer}/products.json?fields=id,handle,title,tags,vendor,product_type&limit=5&handle=${encodeURIComponent(handleTry)}`,
+              });
+              if (r.ok && r.data?.products?.length) {
+                matchedVia = `product.handle="${r.data.products[0].handle}"`;
+                _enrichFromProduct(r.data.products[0]);
+              }
+            }
+            // Helper — enrich from a product ID (fetches title/tags/vendor/type).
+            async function _enrichProduct(productId) {
+              const pr = await shopifyRequest({
+                shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+                method: 'GET',
+                apiPath: `/admin/api/${apiVer}/products/${productId}.json?fields=handle,title,tags,vendor,product_type`,
+              });
+              if (pr.ok && pr.data?.product) _enrichFromProduct(pr.data.product);
+            }
+            function _enrichFromProduct(p) {
+              if (!p?.handle) return;
+              url = `https://${publicHost}/products/${p.handle}`;
+              source = 'shopify';
+              entry.product_name = p.title || null;
+              const handleParts = [
+                p.handle,
+                ...(String(p.tags || '').split(',').map(t => t.trim()).filter(Boolean)),
+                p.product_type,
+              ].filter(Boolean);
+              entry.handles = handleParts.length ? handleParts.join('|') : null;
+              entry.brands  = p.vendor || null;
+            }
           } catch (e) { note = `shopify lookup error: ${e.message}`; }
         }
-        // If Shopify was tried but didn't match, log WHY so the user sees it.
+        // If Shopify matched, surface WHICH variant matched (useful
+        // when the user's paste didn't match exactly but a fuzzy path
+        // rescued it).
+        if (matchedVia) note = `matched via ${matchedVia}`;
+        // If Shopify was tried but didn't match, explain the exhausted paths.
         if (shopifyTried && !url && !note) {
-          note = `no Shopify variant found for SKU '${entry.sku}' (also tried '${entry.asin}' and 'Dropy-${entry.asin}')`;
+          note = `no Shopify variant/product found (tried SKU as-is + ASIN upper/lower + Dropy- prefix variants + barcode + handle-by-ASIN)`;
         }
         if (!url && (resolveMode === 'amazon' || resolveMode === 'both')) {
           url = `https://www.amazon.in/dp/${entry.asin}`;
