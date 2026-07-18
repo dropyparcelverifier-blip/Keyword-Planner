@@ -1820,8 +1820,12 @@ async function refreshWorkerMonitor(workerId) {
   const stage = w ? (function() {
     const now = Date.now();
     const hb  = Number(w.last_heartbeat || 0);
-    if (!hb || now - hb > 5 * 60 * 1000) return { label: 'OFFLINE',       color: 'var(--danger)',  dot: 'danger' };
-    if (       now - hb > 3 * 60 * 1000) return { label: 'stale',         color: 'var(--warn)',    dot: 'warn' };
+    const ago = now - hb;
+    const hAgo = Math.round(ago / 3600000);
+    if (!hb)                      return { label: 'never seen',                 color: 'var(--text-3)', dot: 'idle'   };
+    if (ago > 4 * 3600 * 1000)    return { label: `SHUT DOWN (${hAgo}h ago)`,   color: 'var(--text-3)', dot: 'idle'   };
+    if (ago > 5 * 60 * 1000)      return { label: 'OFFLINE',                    color: 'var(--danger)', dot: 'danger' };
+    if (ago > 3 * 60 * 1000)      return { label: 'stale',                      color: 'var(--warn)',   dot: 'warn'   };
     if (w._lastActivity) {
       const msg = String(w._lastActivity.message || '').toLowerCase();
       if (msg.includes('stopped by')) return { label: 'stopped by user', color: 'var(--danger)', dot: 'danger' };
@@ -1924,13 +1928,20 @@ function renderWorkerFleet() {
   // Also called with the worker's row so we can differentiate 'truly
   // idle' from 'offline — no heartbeat in minutes'.
   const stageFor = (act, worker) => {
-    // Heartbeat-based short-circuit: if we haven't heard from this
-    // worker in > 3 minutes, they're not idle — they're gone. Don't
-    // pretend last activity is current.
+    // Heartbeat age → four coarse states:
+    //   >4h        SHUT DOWN (PC very likely powered off / suspended
+    //              overnight / user closed laptop)
+    //   5min-4h    OFFLINE   (Chrome closed, extension unloaded, or
+    //              manager unreachable — PC is probably still on)
+    //   3-5min     stale     (probably an intermittent network blip)
+    //   <90s       online
     if (worker) {
       const hb = Number(worker.last_heartbeat || 0);
       const ago = Date.now() - hb;
-      if (!hb || ago > 5 * 60 * 1000) return { label: 'OFFLINE', color: 'var(--danger)' };
+      const hAgo = Math.round(ago / 3600000);
+      if (!hb)                        return { label: 'never seen', color: 'var(--text-3)' };
+      if (ago > 4 * 3600 * 1000)      return { label: `SHUT DOWN (${hAgo}h ago)`, color: 'var(--text-3)' };
+      if (ago > 5 * 60 * 1000)        return { label: 'OFFLINE', color: 'var(--danger)' };
       if (ago > 3 * 60 * 1000)        return { label: 'stale (no heartbeat)', color: 'var(--warn)' };
       // Stuck-engine detection: heartbeat is fresh BUT no new ENGINE
       // activity for 5+ minutes AND the worker is holding claims.

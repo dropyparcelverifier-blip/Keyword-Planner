@@ -1683,6 +1683,11 @@ async function run() {
   assert(srvFull.includes("&barcode="),                                'STORE.6 barcode fallback for Amazon-sourced stores');
   assert(srvFull.includes("&handle="),                                 'STORE.7 handle-by-ASIN fallback');
   assert(srvFull.includes('matched via ${matchedVia}'),                'STORE.8 preview shows which variant path matched');
+  // Worker status: distinguish long-offline (probably powered off) from
+  // brief-offline (Chrome closed / network blip).
+  assert(appFull.includes("`SHUT DOWN ("),                             'STATUS.1 SHUT DOWN state for >4h no heartbeat');
+  assert(appFull.includes('4 * 3600 * 1000'),                          'STATUS.2 4h threshold for shut-down detection');
+  assert(appFull.includes("'never seen'"),                             'STATUS.3 never-seen state for workers with hb=0');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');
