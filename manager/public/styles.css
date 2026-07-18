@@ -779,6 +779,42 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
   font-size: var(--text-md); margin-bottom: var(--space-3);
 }
 .qm-strip strong { font-family: var(--mono); font-weight: 700; }
+/* Status-count filter chips inside the strip — click one to filter, click × to clear. */
+.qm-filter-btn {
+  padding: 3px 10px !important;
+  font-size: 11px !important;
+  min-height: 22px !important;
+  background: transparent !important;
+  border: 1px solid var(--line-1) !important;
+  border-radius: 12px !important;
+  cursor: pointer;
+  font-weight: 500 !important;
+  transition: border-color 100ms var(--ease), background 100ms var(--ease);
+}
+.qm-filter-btn:hover:not(:disabled) { border-color: var(--line-3) !important; background: var(--bg-hover) !important; }
+.qm-filter-btn.active { border-color: currentColor !important; background: var(--bg-hover) !important; }
+.qm-filter-btn strong { color: inherit; margin-right: 4px; }
+/* Bulk-action toolbar — only visible when 1+ rows are checked. */
+.qm-bulkbar {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: 8px var(--space-3);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-3);
+  font-size: var(--text-md);
+  color: var(--text-1);
+  animation: qmBulkbarIn 140ms var(--ease);
+}
+@keyframes qmBulkbarIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.qm-bulkbar strong { color: var(--accent); font-family: var(--mono); }
+/* Selected-row highlight — subtle amber tint. */
+.tbl.compact tr.qm-row-sel { background: var(--accent-soft) !important; }
+.tbl.compact tr.qm-row-sel td { border-color: var(--accent) !important; }
+input.qm-select { cursor: pointer; }
 
 /* Inline tier strip — replaces the noisy score-distribution bar chart
    with a compact one-line summary. Score-tier already has a color; a
