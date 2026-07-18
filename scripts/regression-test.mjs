@@ -1581,6 +1581,14 @@ async function run() {
   assert(appFull.includes('_looksLikeExcelFile'),                      'BULK.29 detect .xlsx drops');
   assert(appFull.includes('_autoSwitchToSkuMode'),                     'BULK.30 auto-switch to SKU mode on .txt drop');
   assert(appFull.includes('_autoSwitchToFileMode'),                    'BULK.31 auto-switch to Excel mode on .xlsx drop');
+  // Upload file picker must include .txt so users can pick a plain SKU
+  // list from the native OS dialog (not just drag-drop).
+  assert(htmlFull.includes('accept=".xlsx,.xls,.csv,.txt,text/plain,text/csv"'), 'BULK.32 file picker accepts .txt');
+  // Tab switch uses event delegation on the container (not per-button
+  // listeners) so a DOM race can\'t break clicks.
+  assert(appFull.includes(".upload-mode-toggle')?.addEventListener"),   'BULK.33 tab-toggle uses event delegation');
+  assert(appFull.includes('function _switchUploadMode'),               'BULK.34 shared mode switcher');
+  assert(appFull.includes("e.target.closest('.upload-mode-btn')"),     'BULK.35 closest() so clicks on emoji/text still switch');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');

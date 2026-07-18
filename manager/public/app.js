@@ -566,8 +566,7 @@ function _looksLikeSkuTxtFile(f) {
 // Used by BOTH the Excel dropzone (smart auto-switch when a .txt lands)
 // and any global drops on the Upload panel.
 function _autoSwitchToSkuMode(file) {
-  const skuBtn = document.querySelector('.upload-mode-btn[data-mode="sku"]');
-  if (skuBtn && !skuBtn.classList.contains('active')) skuBtn.click();
+  _switchUploadMode('sku');
   if (file) _acceptSkuFile(file);
   toast('Detected a .txt file — switched to SKU-list mode.', 'ok', { title: 'Auto-mode' });
 }
@@ -733,21 +732,40 @@ async function refreshUploadSidebar() {
 }
 
 // ─────────── Upload mode toggle: Excel/CSV ↔ SKU list ───────────
-// The SKU-list mode ships SKUs to /api/jobs/upload-by-sku, resolving
-// each Dropy-<ASIN> to an amazon.in URL (fast) or a real dropy.in
-// handle via the Shopify API (canonical). Same batchId + result pane.
-document.querySelectorAll('.upload-mode-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.upload-mode-btn').forEach(b => {
-      b.classList.toggle('active', b === btn);
-      b.setAttribute('aria-selected', b === btn ? 'true' : 'false');
-    });
-    const mode = btn.dataset.mode;
-    $('uploadModeFile').style.display = mode === 'file' ? '' : 'none';
-    $('uploadModeSku').style.display  = mode === 'sku'  ? '' : 'none';
-    $('uploadModeSub').textContent = mode === 'file' ? 'Excel · CSV · with URL columns' : 'SKU list — one Dropy-BXXX per line';
-    setResult($('uploadResult'), '', 'info');
+// Event delegation on the container, not per-button listeners. Robust
+// against DOM race / re-render / addEventListener order. Anywhere the
+// user clicks inside .upload-mode-toggle, we resolve which button and
+// switch modes.
+function _switchUploadMode(mode) {
+  document.querySelectorAll('.upload-mode-btn').forEach(b => {
+    const isActive = b.dataset.mode === mode;
+    b.classList.toggle('active', isActive);
+    b.setAttribute('aria-selected', isActive ? 'true' : 'false');
   });
+  const fileEl = $('uploadModeFile');
+  const skuEl  = $('uploadModeSku');
+  if (fileEl) fileEl.style.display = mode === 'file' ? '' : 'none';
+  if (skuEl)  skuEl.style.display  = mode === 'sku'  ? '' : 'none';
+  const sub = $('uploadModeSub');
+  if (sub) sub.textContent = mode === 'file' ? 'Excel · CSV · with URL columns' : 'SKU list — one Dropy-BXXX per line';
+  setResult($('uploadResult'), '', 'info');
+}
+document.querySelector('.upload-mode-toggle')?.addEventListener('click', (e) => {
+  // Find the clicked mode button — user may hit the emoji, code tag,
+  // or the button itself. closest() walks up until it finds it.
+  const btn = e.target.closest('.upload-mode-btn');
+  if (!btn) return;
+  const mode = btn.dataset.mode;
+  if (mode) _switchUploadMode(mode);
+});
+// Keyboard accessibility — Space / Enter on a focused button toggles.
+document.querySelector('.upload-mode-toggle')?.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const btn = e.target.closest('.upload-mode-btn');
+  if (!btn) return;
+  e.preventDefault();
+  const mode = btn.dataset.mode;
+  if (mode) _switchUploadMode(mode);
 });
 // Live count as user pastes/types SKUs — same regex as server-side parser.
 function _skuUploadRecount() {
@@ -781,12 +799,10 @@ function _acceptSkuFile(file) {
 // dropzone, auto-switch to Excel/CSV mode + load. Prevents binary
 // garbage from ending up in the SKU textarea.
 function _autoSwitchToFileMode(file) {
-  const fileBtn = document.querySelector('.upload-mode-btn[data-mode="file"]');
-  if (fileBtn && !fileBtn.classList.contains('active')) fileBtn.click();
+  _switchUploadMode('file');
   if (file) {
     const excelInput = $('uploadFile');
     if (excelInput) {
-      // Wrap the file in a fresh DataTransfer so we can assign to input.files.
       const dt = new DataTransfer();
       dt.items.add(file);
       excelInput.files = dt.files;
