@@ -968,100 +968,100 @@ const server = http.createServer(async (req, res) => {
         if (wantShopify) {
           shopifyTried = true;
           try {
-            // Build the candidate list. We NEVER modify the SKU we
-            // store on the job row — that stays as the user typed it.
-            // We just try multiple search variants against Shopify
-            // because the variants.json?sku= endpoint is EXACT-match
-            // (case-sensitive), and stores may have SKUs typed as:
-            //   'Dropy-B002OTT3US'  (full, mixed case — user's format)
-            //   'B002OTT3US'        (ASIN only, upper)
-            //   'b002ott3us'        (ASIN only, lower)
-            //   'dropy-b002ott3us'  (lowercase full)
-            //   'Dropy-b002ott3us'  (mixed lower)
-            // Also worth trying: variants where the ASIN is stored
-            // as the BARCODE instead of the SKU (Amazon-sourced).
+            // CRITICAL: the Shopify REST endpoint /variants.json does NOT
+            // accept ?sku= as a filter — the parameter is silently ignored
+            // and Shopify returns the store's variants unfiltered. Using
+            // it caused every SKU to resolve to the SAME product (the
+            // first variant in the store). GraphQL productVariants(query:
+            // "sku:XYZ") is the correct filter path.
+            //
+            // We NEVER modify the SKU we store on the job row — the
+            // multiple candidates below are only what we send to
+            // Shopify's search index, which is case-insensitive so we
+            // only need 2-3 variants (not 6).
             const asinUpper = entry.asin.toUpperCase();
-            const asinLower = entry.asin.toLowerCase();
             const candidates = [];
             const seen = new Set();
-            const push = (label, sku) => {
+            const pushCand = (label, sku) => {
               if (!sku || seen.has(sku)) return;
               seen.add(sku);
               candidates.push({ label, sku });
             };
-            push('input as-is',    entry.sku);
-            push('ASIN upper',     asinUpper);
-            push('ASIN lower',     asinLower);
-            push('Dropy-<ASIN>',   `Dropy-${asinUpper}`);
-            push('dropy-<asin>',   `dropy-${asinLower}`);
-            push('DROPY-<ASIN>',   `DROPY-${asinUpper}`);
-            // Variant SKU lookup (EXACT match against each candidate).
-            for (const c of candidates) {
-              const r = await shopifyRequest({
-                shopDomain: shop.shopDomain, adminToken: shop.adminToken,
-                method: 'GET',
-                apiPath: `/admin/api/${apiVer}/variants.json?fields=id,sku,product_id&limit=1&sku=${encodeURIComponent(c.sku)}`,
-              });
-              if (r.ok && r.data?.variants?.length) {
-                matchedVia = `variant.sku="${c.sku}" (${c.label})`;
-                await _enrichProduct(r.data.variants[0].product_id);
-                break;
-              }
-            }
-            // Fallback 1: variant BARCODE match. Amazon-sourced stores
-            // often put the ASIN in the barcode field, not the SKU.
-            if (!url) {
-              const barcodes = [asinUpper, asinLower, entry.sku];
-              for (const bc of barcodes) {
-                if (seen.has('bc:' + bc)) continue;
-                seen.add('bc:' + bc);
-                const r = await shopifyRequest({
-                  shopDomain: shop.shopDomain, adminToken: shop.adminToken,
-                  method: 'GET',
-                  apiPath: `/admin/api/${apiVer}/variants.json?fields=id,sku,barcode,product_id&limit=1&barcode=${encodeURIComponent(bc)}`,
-                });
-                if (r.ok && r.data?.variants?.length) {
-                  matchedVia = `variant.barcode="${bc}"`;
-                  await _enrichProduct(r.data.variants[0].product_id);
-                  break;
+            pushCand('input as-is',    entry.sku);
+            pushCand('ASIN only',      asinUpper);
+            pushCand('Dropy-<ASIN>',   `Dropy-${asinUpper}`);
+            // GraphQL productVariants search — works with variant SKU
+            // AND barcode field via the query language.
+            const gqlSearch = async (query, byLabel) => {
+              const body = { query: `{
+                productVariants(first: 1, query: "${query.replace(/"/g, '\\"')}") {
+                  edges {
+                    node {
+                      id sku barcode
+                      product {
+                        id handle title tags vendor productType
+                      }
+                    }
+                  }
                 }
-              }
-            }
-            // Fallback 2: product HANDLE contains the ASIN (many stores
-            // slugify handles from Amazon titles + include the ASIN).
-            if (!url) {
-              const handleTry = asinLower;
+              }` };
               const r = await shopifyRequest({
                 shopDomain: shop.shopDomain, adminToken: shop.adminToken,
-                method: 'GET',
-                apiPath: `/admin/api/${apiVer}/products.json?fields=id,handle,title,tags,vendor,product_type&limit=5&handle=${encodeURIComponent(handleTry)}`,
+                method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`, body,
               });
-              if (r.ok && r.data?.products?.length) {
-                matchedVia = `product.handle="${r.data.products[0].handle}"`;
-                _enrichFromProduct(r.data.products[0]);
-              }
-            }
-            // Helper — enrich from a product ID (fetches title/tags/vendor/type).
-            async function _enrichProduct(productId) {
-              const pr = await shopifyRequest({
-                shopDomain: shop.shopDomain, adminToken: shop.adminToken,
-                method: 'GET',
-                apiPath: `/admin/api/${apiVer}/products/${productId}.json?fields=handle,title,tags,vendor,product_type`,
-              });
-              if (pr.ok && pr.data?.product) _enrichFromProduct(pr.data.product);
-            }
-            function _enrichFromProduct(p) {
-              if (!p?.handle) return;
+              const edge = r?.data?.data?.productVariants?.edges?.[0];
+              if (!edge?.node?.product?.handle) return false;
+              const p = edge.node.product;
+              matchedVia = `${byLabel} → product.handle="${p.handle}"`;
               url = `https://${publicHost}/products/${p.handle}`;
               source = 'shopify';
               entry.product_name = p.title || null;
               const handleParts = [
                 p.handle,
                 ...(String(p.tags || '').split(',').map(t => t.trim()).filter(Boolean)),
-                p.product_type,
+                p.productType,
               ].filter(Boolean);
               entry.handles = handleParts.length ? handleParts.join('|') : null;
               entry.brands  = p.vendor || null;
+              return true;
+            };
+            // Round 1 — variant SKU exact match
+            for (const c of candidates) {
+              if (await gqlSearch(`sku:${c.sku}`, `variant.sku="${c.sku}" (${c.label})`)) break;
+            }
+            // Round 2 — variant BARCODE match (Amazon stores it as barcode)
+            if (!url) {
+              for (const c of candidates) {
+                if (await gqlSearch(`barcode:${c.sku}`, `variant.barcode="${c.sku}"`)) break;
+              }
+            }
+            // Round 3 — product HANDLE contains ASIN (some stores slugify Amazon titles)
+            if (!url) {
+              const handleTry = entry.asin.toLowerCase();
+              const body = { query: `{
+                products(first: 1, query: "handle:*${handleTry}*") {
+                  edges { node { id handle title tags vendor productType } }
+                }
+              }` };
+              const r = await shopifyRequest({
+                shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+                method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`, body,
+              });
+              const edge = r?.data?.data?.products?.edges?.[0];
+              if (edge?.node?.handle) {
+                const p = edge.node;
+                matchedVia = `product.handle contains "${handleTry}"`;
+                url = `https://${publicHost}/products/${p.handle}`;
+                source = 'shopify';
+                entry.product_name = p.title || null;
+                const handleParts = [
+                  p.handle,
+                  ...(String(p.tags || '').split(',').map(t => t.trim()).filter(Boolean)),
+                  p.productType,
+                ].filter(Boolean);
+                entry.handles = handleParts.length ? handleParts.join('|') : null;
+                entry.brands  = p.vendor || null;
+              }
             }
           } catch (e) { note = `shopify lookup error: ${e.message}`; }
         }
