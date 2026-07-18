@@ -968,37 +968,67 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
   }
   if (allowWebsiteFallback && productUrl && accumulated.length < KP_WEBSITE_FALLBACK_THRESHOLD && accumulated.length < maxResults) {
     log(`KP: only ${accumulated.length} ideas (< ${KP_WEBSITE_FALLBACK_THRESHOLD}), running "Start with a website" fallback on fresh tab`);
+    // The website flow can take 60-90s. During that time, the KP page
+    // navigates from /ideas/new → results view — the content script for
+    // the old page gets torn down before it can sendResponse, so
+    // chrome.tabs.sendMessage rejects with 'The message port closed
+    // before a response was received'. Retry ONCE on that specific
+    // error with a fresh navigate; if the second attempt also fails,
+    // fall through to PAA + autosuggest.
+    let resp = null;
+    let websiteAttempt = 0;
+    const WEBSITE_MAX_ATTEMPTS = 2;
     try {
-      const tabId = await Worker.navigate(ideasUrl);
-      await sleep(randInt(2500, 4000));
-      const ready = await pingContentScript(tabId, 'KP_PING', 15, 1000);
-      if (!ready) {
-        seedErrors.push(`website fallback: KP content script never responded after fresh navigate`);
-      } else {
-        const resp = await chrome.tabs.sendMessage(tabId, {
-          type: 'KP_GET_IDEAS_WEBSITE',
-          productUrl,
-          maxResults: maxResults - accumulated.length,
-          hydrateTimeoutMs: KP_HYDRATE_TIMEOUT_MS,
-          tableTimeoutMs:   KP_TABLE_TIMEOUT_MS,
-        });
-        if (!resp?.ok) {
-          seedErrors.push(`website fallback: ${resp?.error || 'unknown'}`);
-        } else {
-          const websiteIdeas = Array.isArray(resp.keywords) ? resp.keywords : [];
-          let added = 0;
-          for (const item of websiteIdeas) {
-            if (accumulated.length >= maxResults) break;
-            const kw = typeof item === 'string' ? item : item?.kw;
-            if (!kw) continue;
-            const lo = String(kw).toLowerCase().trim();
-            if (seen.has(lo)) continue;
-            seen.add(lo);
-            accumulated.push(item);
-            added++;
-          }
-          log(`KP website fallback: +${added} new (${websiteIdeas.length - added} duplicates)`);
+      while (websiteAttempt < WEBSITE_MAX_ATTEMPTS && !resp?.ok) {
+        websiteAttempt++;
+        const attemptLabel = websiteAttempt > 1 ? ` (retry ${websiteAttempt}/${WEBSITE_MAX_ATTEMPTS})` : '';
+        if (websiteAttempt > 1) log(`KP website fallback: re-navigating for retry${attemptLabel}`);
+        const tabId = await Worker.navigate(ideasUrl);
+        await sleep(randInt(2500, 4000));
+        const ready = await pingContentScript(tabId, 'KP_PING', 15, 1000);
+        if (!ready) {
+          seedErrors.push(`website fallback: KP content script never responded after fresh navigate${attemptLabel}`);
+          if (websiteAttempt < WEBSITE_MAX_ATTEMPTS) { await sleep(5000); continue; }
+          break;
         }
+        try {
+          resp = await chrome.tabs.sendMessage(tabId, {
+            type: 'KP_GET_IDEAS_WEBSITE',
+            productUrl,
+            maxResults: maxResults - accumulated.length,
+            hydrateTimeoutMs: KP_HYDRATE_TIMEOUT_MS,
+            tableTimeoutMs:   KP_TABLE_TIMEOUT_MS,
+          });
+        } catch (msgErr) {
+          // The classic MV3 flake: content script tore down mid-flow
+          // when KP navigated from /ideas/new to the results view.
+          const isPortClosed = /message port closed|message channel closed|Receiving end does not exist/i.test(msgErr.message || '');
+          if (isPortClosed && websiteAttempt < WEBSITE_MAX_ATTEMPTS) {
+            log(`KP website fallback: content script tore down mid-flow (${msgErr.message.slice(0, 80)}) — retrying with fresh navigate`);
+            await sleep(5000);
+            continue;
+          }
+          seedErrors.push(`website fallback: ${msgErr.message}${websiteAttempt > 1 ? ` (after ${websiteAttempt} attempts)` : ''}`);
+          break;
+        }
+        if (!resp?.ok) {
+          seedErrors.push(`website fallback: ${resp?.error || 'unknown'}${websiteAttempt > 1 ? ` (after ${websiteAttempt} attempts)` : ''}`);
+          if (websiteAttempt < WEBSITE_MAX_ATTEMPTS) { await sleep(5000); continue; }
+          break;
+        }
+        const websiteIdeas = Array.isArray(resp.keywords) ? resp.keywords : [];
+        let added = 0;
+        for (const item of websiteIdeas) {
+          if (accumulated.length >= maxResults) break;
+          const kw = typeof item === 'string' ? item : item?.kw;
+          if (!kw) continue;
+          const lo = String(kw).toLowerCase().trim();
+          if (seen.has(lo)) continue;
+          seen.add(lo);
+          accumulated.push(item);
+          added++;
+        }
+        log(`KP website fallback: +${added} new (${websiteIdeas.length - added} duplicates)${websiteAttempt > 1 ? ` (succeeded on attempt ${websiteAttempt})` : ''}`);
       }
     } catch (e) {
       seedErrors.push(`website fallback: ${e.message}`);

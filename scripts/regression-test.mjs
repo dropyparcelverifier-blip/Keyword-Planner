@@ -1631,6 +1631,11 @@ async function run() {
   // straight to the 'Start with a website' fallback.
   assert(kdSrcAmzn.includes('URL detected — skipping text-seed flow'), 'AMZN.11 URL seeds skip text-seed flow');
   assert(kdSrcAmzn.includes("/^https?:\\/\\//i.test(seed.trim())"),    'AMZN.12 URL detection uses http/https prefix');
+  // Website fallback: detect the MV3 message-port teardown and retry
+  // on fresh navigate. Previously died with 'message channel closed'.
+  assert(kdSrcAmzn.includes('WEBSITE_MAX_ATTEMPTS'),                   'AMZN.13 website fallback retries on transient errors');
+  assert(kdSrcAmzn.includes('message port closed|message channel closed|Receiving end does not exist'), 'AMZN.14 catches MV3 port-close error');
+  assert(kdSrcAmzn.includes('content script tore down mid-flow'),      'AMZN.15 clear log when MV3 SW teardown detected');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');
