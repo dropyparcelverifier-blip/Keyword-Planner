@@ -466,14 +466,25 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
+// ─────────── Boot banner ───────────
+// Logged to the console so users can verify which build is actually
+// running when they refresh — 'my changes aren't showing' is almost
+// always a cached JS problem. Bumped whenever wiring changes.
+console.info('[adbrain] manager UI build 2026-07-18b (tabs + upload-mode delegation + inline fallback)');
+
 // ─────────── Tabs ───────────
-document.querySelectorAll('.tab').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    $(`panel-${btn.dataset.tab}`).classList.add('active');
-    saveUI({ tab: btn.dataset.tab });
+// Belt-and-suspenders: event delegation on the <nav.tabs> container so
+// a per-button forEach race can't break tab switching. Any click that
+// bubbles up from a .tab button hits the same handler.
+function _switchTab(btn) {
+  if (!btn || !btn.dataset.tab) return;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  const panel = $(`panel-${btn.dataset.tab}`);
+  if (panel) panel.classList.add('active');
+  try { saveUI({ tab: btn.dataset.tab }); } catch {}
+  try {
     if (btn.dataset.tab === 'dashboard') startDashPolling();
     else stopDashPolling();
     if (btn.dataset.tab === 'upload') refreshUploadSidebar();
@@ -481,7 +492,26 @@ document.querySelectorAll('.tab').forEach(btn => {
     if (btn.dataset.tab === 'config') { loadConfigForm(); refreshOrphanCount(); refreshBackupsList(); refreshQuiesceStatus(); }
     if (btn.dataset.tab === 'workers') refreshWorkersTab();
     if (btn.dataset.tab === 'downloads') refreshDownloadsTab();
-  });
+  } catch (e) {
+    // A refresh function throwing MUST NOT prevent the tab from switching.
+    // The visual .active swap already happened; just log the failure so
+    // the tab is still usable.
+    console.warn('[adbrain] tab refresh threw', e);
+  }
+}
+document.querySelector('.tabs')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('.tab');
+  if (btn) _switchTab(btn);
+});
+// Also expose on window so a URL like #tab=analytics could route.
+window.adbrainSwitchTab = (tabName) => {
+  const btn = document.querySelector(`.tab[data-tab="${tabName}"]`);
+  if (btn) _switchTab(btn);
+};
+// Legacy per-button binding — same handler, doubled up. Safer than
+// removing since existing code (cmdk, banner links) still calls .click().
+document.querySelectorAll('.tab').forEach(btn => {
+  btn.addEventListener('click', () => _switchTab(btn));
 });
 
 // ─────────── Token + health ───────────
@@ -750,6 +780,10 @@ function _switchUploadMode(mode) {
   if (sub) sub.textContent = mode === 'file' ? 'Excel · CSV · with URL columns' : 'SKU list — one Dropy-BXXX per line';
   setResult($('uploadResult'), '', 'info');
 }
+// Expose on window so the inline onclick fallback in index.html works
+// even if the module JS is stale-cached or fails to load. Belt to the
+// event-delegation suspenders below.
+window.adbrainSwitchUploadMode = _switchUploadMode;
 document.querySelector('.upload-mode-toggle')?.addEventListener('click', (e) => {
   // Find the clicked mode button — user may hit the emoji, code tag,
   // or the button itself. closest() walks up until it finds it.
