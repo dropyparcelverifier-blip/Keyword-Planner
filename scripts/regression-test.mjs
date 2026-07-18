@@ -1563,6 +1563,16 @@ async function run() {
   assert(appFull.includes("_qmState.search"),                          'BULK.13 search state persists across refresh');
   assert(cssFull.includes('.qm-bulkbar'),                              'BULK.14 bulk toolbar styled');
   assert(cssFull.includes('.qm-filter-btn'),                           'BULK.15 filter chip styled');
+  // SKU-list mode on the Upload tab (discoverable, first-class).
+  assert(htmlFull.includes('id="uploadModeSku"'),                      'BULK.16 SKU-list mode block in Upload tab');
+  assert(htmlFull.includes('data-mode="sku"'),                         'BULK.17 SKU mode toggle button');
+  assert(htmlFull.includes('id="skuUploadText"'),                      'BULK.18 SKU textarea');
+  assert(htmlFull.includes('id="skuUploadFile"'),                      'BULK.19 SKU .txt file input');
+  assert(htmlFull.includes('accept=".txt,.csv,text/plain"'),           'BULK.20 SKU file accepts .txt');
+  assert(appFull.includes("upload-mode-btn"),                          'BULK.21 upload mode toggle handler');
+  assert(appFull.includes("_acceptSkuFile"),                           'BULK.22 SKU file-drop handler');
+  assert(appFull.includes("_skuUploadRecount"),                        'BULK.23 SKU live-count handler');
+  assert(cssFull.includes('.upload-mode-toggle'),                      'BULK.24 mode toggle styled');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');

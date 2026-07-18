@@ -770,6 +770,45 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
   .an-rail { position: static; max-height: 260px; }
 }
 
+/* Upload-tab mode toggle — swaps between file (Excel/CSV) and SKU-list. */
+.upload-mode-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-3);
+}
+.upload-mode-btn {
+  flex: 1;
+  padding: 8px 14px !important;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  color: var(--text-3) !important;
+  font-size: var(--text-md) !important;
+  font-weight: 600 !important;
+  border-radius: 4px !important;
+  transition: background 100ms var(--ease), color 100ms var(--ease), border-color 100ms var(--ease);
+  min-height: 32px !important;
+  cursor: pointer;
+}
+.upload-mode-btn:hover:not(.active) { color: var(--text-1) !important; background: var(--bg-hover) !important; }
+.upload-mode-btn.active {
+  background: var(--accent) !important;
+  color: #0a0a15 !important;
+  border-color: var(--accent) !important;
+  font-weight: 700 !important;
+}
+.upload-mode-btn code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  border: none;
+  font-size: 0.9em;
+  opacity: 0.85;
+}
+
 /* Queue manager modal — status counts strip above the CRUD table. */
 .qm-strip {
   display: flex; gap: var(--space-4); align-items: center;
