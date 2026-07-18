@@ -485,11 +485,44 @@ document.querySelectorAll('.tab').forEach(btn => {
 });
 
 // ─────────── Token + health ───────────
-$('tokenInput').value = getToken();
-$('saveTokenBtn').addEventListener('click', () => {
-  setToken($('tokenInput').value);
+// Populate from localStorage on load. Also auto-save on blur / Enter /
+// paste so a refresh never loses the token. The Save-token button
+// remains for users who prefer the explicit click; both paths call
+// the same setToken() -> healthPing() flow.
+function _persistTokenFromInput({ silent = false } = {}) {
+  const v = ($('tokenInput')?.value || '').trim();
+  const prev = getToken();
+  if (v === prev) return;
+  setToken(v);
   healthPing();
+  if (!silent) {
+    // Green flash on the Save button so users see the auto-save fired.
+    const btn = $('saveTokenBtn');
+    if (btn) {
+      const orig = btn.textContent;
+      btn.textContent = '✓ Saved';
+      btn.style.borderColor = 'var(--success)';
+      btn.style.color = 'var(--success)';
+      setTimeout(() => {
+        btn.textContent = orig;
+        btn.style.borderColor = '';
+        btn.style.color = '';
+      }, 1200);
+    }
+  }
+}
+// Beat any password-manager autofill: read localStorage twice — once
+// synchronously on script parse, once after a microtask so any autofill
+// that ran BEFORE our handler is overwritten with the persisted value.
+$('tokenInput').value = getToken();
+Promise.resolve().then(() => {
+  const stored = getToken();
+  if (stored && !$('tokenInput').value) $('tokenInput').value = stored;
 });
+$('saveTokenBtn').addEventListener('click', () => _persistTokenFromInput({ silent: false }));
+$('tokenInput').addEventListener('blur',  () => _persistTokenFromInput({ silent: false }));
+$('tokenInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); _persistTokenFromInput({ silent: false }); } });
+$('tokenInput').addEventListener('paste', () => setTimeout(() => _persistTokenFromInput({ silent: false }), 20));
 async function healthPing() {
   const pill = $('healthPill');
   try {
@@ -517,6 +550,27 @@ healthPing();
 //  UPLOAD TAB — Excel/CSV → parse → POST /api/jobs/upload
 // ═══════════════════════════════════════════════════════════════
 // Drop-zone wiring: click, drag-hover, drop.
+// Detect whether a File is a plain-text SKU list rather than Excel/CSV.
+// Extension-based first (fast), MIME as fallback. .csv is ambiguous —
+// treat it as Excel/CSV since that's the historical path (users who
+// want SKU-list.csv still get the smart re-route on the SKU dropzone
+// side, and the SKU parser strips commas).
+function _looksLikeSkuTxtFile(f) {
+  if (!f) return false;
+  const n = String(f.name || '').toLowerCase();
+  if (n.endsWith('.txt')) return true;
+  if ((f.type || '').startsWith('text/plain')) return true;
+  return false;
+}
+// Auto-switch to SKU-list mode and load a File into the textarea.
+// Used by BOTH the Excel dropzone (smart auto-switch when a .txt lands)
+// and any global drops on the Upload panel.
+function _autoSwitchToSkuMode(file) {
+  const skuBtn = document.querySelector('.upload-mode-btn[data-mode="sku"]');
+  if (skuBtn && !skuBtn.classList.contains('active')) skuBtn.click();
+  if (file) _acceptSkuFile(file);
+  toast('Detected a .txt file — switched to SKU-list mode.', 'ok', { title: 'Auto-mode' });
+}
 (function wireDropZone() {
   const zone = $('uploadDropZone');
   const input = $('uploadFile');
@@ -531,15 +585,21 @@ healthPing();
     e.preventDefault();
     zone.classList.remove('hover');
     const f = e.dataTransfer?.files?.[0];
-    if (f) {
-      input.files = e.dataTransfer.files;
-      input.dispatchEvent(new Event('change'));
-    }
+    if (!f) return;
+    // .txt on the Excel dropzone → auto-switch to SKU mode instead of
+    // failing silently. Users don't know they need to click the tab first.
+    if (_looksLikeSkuTxtFile(f)) { _autoSwitchToSkuMode(f); return; }
+    input.files = e.dataTransfer.files;
+    input.dispatchEvent(new Event('change'));
   });
+  // File-picker path: same detect for consistency.
+  input.accept = '.xlsx,.xls,.csv,.txt';
 })();
 $('uploadFile').addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
+  // .txt via file picker on the Excel input → also auto-switch.
+  if (_looksLikeSkuTxtFile(file)) { _autoSwitchToSkuMode(file); e.target.value = ''; return; }
   // Visual feedback in the drop zone.
   const zone = $('uploadDropZone');
   zone?.classList.add('has-file');
@@ -717,10 +777,52 @@ function _acceptSkuFile(file) {
   reader.onerror = () => toast(`Failed to read ${file.name}`, 'err');
   reader.readAsText(file);
 }
+// Reverse smart-detect: if someone drops an .xlsx/.xls on the SKU
+// dropzone, auto-switch to Excel/CSV mode + load. Prevents binary
+// garbage from ending up in the SKU textarea.
+function _autoSwitchToFileMode(file) {
+  const fileBtn = document.querySelector('.upload-mode-btn[data-mode="file"]');
+  if (fileBtn && !fileBtn.classList.contains('active')) fileBtn.click();
+  if (file) {
+    const excelInput = $('uploadFile');
+    if (excelInput) {
+      // Wrap the file in a fresh DataTransfer so we can assign to input.files.
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      excelInput.files = dt.files;
+      excelInput.dispatchEvent(new Event('change'));
+    }
+  }
+  toast(`Detected a spreadsheet — switched to Excel/CSV mode.`, 'ok', { title: 'Auto-mode' });
+}
+function _looksLikeExcelFile(f) {
+  if (!f) return false;
+  const n = String(f.name || '').toLowerCase();
+  return n.endsWith('.xlsx') || n.endsWith('.xls');
+}
 $('skuUploadFile')?.addEventListener('change', (e) => {
   const f = e.target.files?.[0];
-  if (f) _acceptSkuFile(f);
+  if (!f) return;
+  if (_looksLikeExcelFile(f)) { _autoSwitchToFileMode(f); e.target.value = ''; return; }
+  _acceptSkuFile(f);
 });
+// SKU drop zone: also handle Excel drops smart.
+(function wireSkuDropZone() {
+  const zone = $('skuDropZone');
+  const input = $('skuUploadFile');
+  if (!zone || !input) return;
+  zone.addEventListener('click', (e) => { if (e.target !== input) input.click(); });
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('hover'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('hover'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('hover');
+    const f = e.dataTransfer?.files?.[0];
+    if (!f) return;
+    if (_looksLikeExcelFile(f)) { _autoSwitchToFileMode(f); return; }
+    _acceptSkuFile(f);
+  });
+})();
 // Drag-drop on the textarea itself (in addition to the drop-zone box).
 const _skuTextEl = $('skuUploadText');
 if (_skuTextEl) {
@@ -729,7 +831,9 @@ if (_skuTextEl) {
   });
   _skuTextEl.addEventListener('drop', (e) => {
     const f = e.dataTransfer?.files?.[0];
-    if (f) _acceptSkuFile(f);
+    if (!f) return;
+    if (_looksLikeExcelFile(f)) { _autoSwitchToFileMode(f); return; }
+    _acceptSkuFile(f);
   });
 }
 // Preview button — hits upload-by-sku with dryRun=true.
