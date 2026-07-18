@@ -1229,6 +1229,24 @@ async function refreshDashboard() {
       }
     }
     state.workers = workers.workers || [];
+    // Auto-clear the activity-log worker filter if the filtered worker
+    // is stale/gone. Symptom (user reported): filter left set to a
+    // dead worker ID (e.g. PC-568BF8) after that PC's Chrome regenerated
+    // its worker ID → activity log shows 'No activity yet' even though
+    // new events are streaming under a fresh ID. Clear the filter after
+    // 4 min of no heartbeat so the log unblocks itself.
+    if (state.workerFilter) {
+      const w = state.workers.find(x => x.worker_id === state.workerFilter);
+      const hb = Number(w?.last_heartbeat || 0);
+      const stale = !w || !hb || (Date.now() - hb > 4 * 60 * 1000);
+      if (stale) {
+        toast(`Activity-log filter '${state.workerFilter}' is stale — showing all workers.`, 'warn', { title: 'Filter auto-cleared' });
+        state.workerFilter = '';
+        saveUI({ workerFilter: '' });
+        const sel = $('activityWorkerFilter'); if (sel) sel.value = '';
+        const sub = $('activityLogSub'); if (sub) sub.textContent = 'latest 120 events';
+      }
+    }
     // Enrich each worker with their most recent activity line so the
     // fleet grid can show 'what step is this worker on right now'.
     // Uses the whole-log fetch (activity.events) rather than a separate
@@ -2068,6 +2086,7 @@ function renderWorkerFleet() {
             <button data-worker="${esc(w.worker_id)}" data-cmd="stop"   class="danger-btn" title="Stop and disarm">■</button>
             <button data-worker="${esc(w.worker_id)}" data-wol="1" title="Wake-on-LAN — send magic packet to this PC's NIC (only works if this manager PC is on the same physical LAN as the target)" style="color: var(--info); border-color: var(--info);">🔌</button>
             <button data-worker="${esc(w.worker_id)}" data-recover="1" title="Recovery guide — step-by-step for bringing an OFFLINE worker back under manager control." style="color: var(--text-2);">?</button>
+            <button data-worker="${esc(w.worker_id)}" data-remove-worker="1" title="Remove this worker from the fleet roster (ghost — Chrome regenerated the ID, or this PC is decommissioned). Doesn't touch its claims — use ↻ Release claims first if it's holding jobs." style="color: var(--text-3);">🗑</button>
           </div>
         </td>
       </tr>`;
@@ -2140,6 +2159,22 @@ function renderWorkerFleet() {
       if (cmd === 'stop' && !confirm(`Stop worker ${workerId} and disarm it? They will not claim more work until you send Wake.`)) return;
       try { await api.commandsSend(workerId, cmd); toast(`${cmdLabel} → ${workerId}`, 'ok'); }
       catch (e) { toast(e.message, 'err', { title: 'Command failed' }); }
+    });
+  });
+  // Wire the 🗑 remove-worker button — for ghosts (Chrome regenerated
+  // the worker ID) or decommissioned PCs.
+  el.querySelectorAll('.worker-actions button[data-remove-worker]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const workerId = btn.dataset.worker;
+      const w = state.workers.find(x => x.worker_id === workerId);
+      const hbAgo = w?.last_heartbeat ? Math.round((Date.now() - Number(w.last_heartbeat)) / 60000) : null;
+      const hbMsg = hbAgo == null ? 'never heartbeat' : `${hbAgo} min ago`;
+      if (!confirm(`Remove worker "${workerId}" from the fleet roster?\n\nLast heartbeat: ${hbMsg}\n\nDoes NOT affect its jobs — if it's holding claims, release them first (↻ button).`)) return;
+      try {
+        const r = await api.deleteWorker(workerId);
+        toast(`Removed ${workerId}${r.deleted ? '' : ' (was already gone)'}`, 'ok');
+        refreshDashboard();
+      } catch (e) { toast(e.message, 'err', { title: 'Remove failed' }); }
     });
   });
   // Wire the Wake-on-LAN button — separate flow because it uses its
