@@ -2497,6 +2497,63 @@ $('cfgShopifyTestBtn')?.addEventListener('click', async () => {
   } finally { btn.disabled = false; btn.textContent = orig; }
 });
 
+// SKU-lookup diagnostic — runs the same 3-round GraphQL search as the
+// bulk upload for ONE SKU. Prettifies the raw Shopify response so the
+// user can see exactly what came back.
+$('cfgShopifyDiagBtn')?.addEventListener('click', async () => {
+  const sku = ($('cfgShopifyDiagSku').value || '').trim();
+  const box = $('cfgShopifyDiagResult');
+  if (!sku) { box.innerHTML = `<div class="banner warn">Enter a SKU first, e.g. <code>Dropy-B002OTT3US</code></div>`; return; }
+  const btn = $('cfgShopifyDiagBtn');
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Running…';
+  box.innerHTML = `<div class="hint">Querying Shopify…</div>`;
+  try {
+    const r = await api.shopifyDebugLookup(sku);
+    const roundsHtml = (r.rounds || []).map(rd => `
+      <div style="margin-top: 8px; padding: 8px; background: var(--bg-input); border: 1px solid var(--line-2); border-radius: 4px;">
+        <div style="font-family: var(--mono); font-size: 11px; color: var(--text-1);"><strong>${esc(rd.label)}</strong> · <span style="color: var(--text-3);">${rd.elapsedMs}ms · HTTP ${rd.shopifyStatus} · returned ${rd.returnedCount}</span></div>
+        ${rd.firstExactMatch ? `<div style="margin-top: 4px; color: var(--success); font-size: 12px;">✓ EXACT MATCH → <strong>${esc(rd.firstExactMatch.product.title || '(no title)')}</strong> <code style="font-size: 10px;">${esc(rd.firstExactMatch.product.handle)}</code></div>` : ''}
+        ${rd.returned && rd.returned.length ? `<details style="margin-top: 4px;">
+          <summary style="cursor: pointer; font-size: 11px; color: var(--text-3);">Returned ${rd.returned.length} variant(s)</summary>
+          <table class="tbl compact" style="margin-top: 4px; font-size: 10px;">
+            <thead><tr><th>Match?</th><th>SKU</th><th>Barcode</th><th>Product</th></tr></thead>
+            <tbody>${rd.returned.map(v => `
+              <tr>
+                <td>${v.exactMatch ? '<span style="color:var(--success);">✓</span>' : '<span style="color:var(--danger);">✗</span>'}</td>
+                <td class="mono">${esc(v.sku || '—')}</td>
+                <td class="mono">${esc(v.barcode || '—')}</td>
+                <td>${esc(v.product?.title || '')} <code style="font-size:9px; color:var(--text-3);">${esc(v.product?.handle || '')}</code></td>
+              </tr>`).join('')}</tbody>
+          </table>
+        </details>` : ''}
+        <details style="margin-top: 4px;"><summary style="cursor: pointer; font-size: 10px; color: var(--text-3);">GraphQL query sent</summary>
+          <pre style="margin: 4px 0 0 0; padding: 6px; background: var(--bg-input); border: 1px solid var(--line-1); border-radius: 3px; font-size: 10px; color: var(--text-2); white-space: pre-wrap; word-break: break-all;">${esc(rd.graphqlQuery)}</pre>
+        </details>
+      </div>`).join('');
+    box.innerHTML = `
+      <div class="banner ${r.conclusion?.startsWith('MATCH') ? 'ok' : 'warn'}" style="margin-top: 0;">
+        <strong>Input:</strong> <code>${esc(r.input)}</code> · <strong>ASIN:</strong> <code>${esc(r.parsedAsin || '(none)')}</code> · <strong>Shop:</strong> <code>${esc(r.shopifyDomain)}</code>
+        <div style="margin-top: 6px;"><strong>Conclusion:</strong> ${esc(r.conclusion || '(none)')}</div>
+      </div>
+      ${roundsHtml}
+      ${r.handleRound ? `<div style="margin-top: 8px; padding: 8px; background: var(--bg-input); border: 1px solid var(--line-2); border-radius: 4px;">
+        <div style="font-family: var(--mono); font-size: 11px;"><strong>handle:*${esc(r.handleRound.asin)}*</strong> · <span style="color: var(--text-3);">returned ${r.handleRound.returned?.length || 0}</span></div>
+        ${r.handleRound.returned?.length ? `<table class="tbl compact" style="margin-top: 4px; font-size: 10px;">
+          <thead><tr><th>Match?</th><th>Handle</th><th>Title</th></tr></thead>
+          <tbody>${r.handleRound.returned.map(v => `
+            <tr>
+              <td>${v.matchesAsin ? '<span style="color:var(--success);">✓</span>' : '<span style="color:var(--danger);">✗</span>'}</td>
+              <td class="mono">${esc(v.handle)}</td>
+              <td>${esc(v.title || '')}</td>
+            </tr>`).join('')}</tbody>
+        </table>` : ''}
+      </div>` : ''}`;
+  } catch (e) {
+    box.innerHTML = `<div class="banner err">Diagnostic failed: ${esc(e.message)}</div>`;
+  } finally { btn.disabled = false; btn.textContent = orig; }
+});
+
 // ═══════════════════════════════════════════════════════════════
 //  Selective wipe modal
 // ═══════════════════════════════════════════════════════════════

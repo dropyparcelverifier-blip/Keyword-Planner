@@ -843,6 +843,20 @@
                   <button class="secondary" id="cfgShopifyClearBtn">Clear credentials</button>
                 </div>
                 <div id="cfgShopifyResult"></div>
+                <!-- Per-SKU diagnostic: runs the same 3-round GraphQL
+                     search as the bulk upload for ONE SKU, shows the
+                     raw request + Shopify response inline. Use when
+                     bulk uploads resolve every SKU to the same wrong
+                     product ("what does Shopify actually return?"). -->
+                <div style="margin-top: var(--space-3); padding: var(--space-3); background: var(--bg-3); border: 1px solid var(--line-1); border-radius: var(--radius-sm);">
+                  <div style="font-family: var(--mono); font-size: 10px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px;">🔬 SKU lookup diagnostic</div>
+                  <div class="hint" style="margin-bottom: 8px;">Run the same GraphQL search the bulk upload uses for ONE SKU. Shows the raw Shopify response so you can see WHICH product it returns (or if it returns nothing). Great for debugging when many SKUs resolve to the wrong product.</div>
+                  <div class="row" style="gap: 6px; align-items: center;">
+                    <input type="text" id="cfgShopifyDiagSku" placeholder="Dropy-B002OTT3US" style="flex: 1; max-width: 260px;" />
+                    <button class="secondary" id="cfgShopifyDiagBtn">🔬 Run diagnostic</button>
+                  </div>
+                  <div id="cfgShopifyDiagResult" style="margin-top: 8px;"></div>
+                </div>
               </div>
               <aside class="shopify-config-side">
                 <div class="shopify-safety">
