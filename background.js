@@ -771,6 +771,8 @@ const ACTIVITY_BUFFER_CAP = 500;
 const ACTIVITY_STORAGE_KEY = 'adbrainActivityBuffer';
 let _activityPersistTimer = null;
 let _activityFlushScheduled = false;
+let _activityFlushTimer = null;
+let _activityFlushDelay = 0;
 
 function bufferActivity(entry) {
   if (!entry || !entry.message) return;
@@ -794,14 +796,36 @@ function bufferActivity(entry) {
     chrome.storage.local.set({ [ACTIVITY_STORAGE_KEY]: _activityBuffer.slice(-200) }).catch(() => {});
     _activityPersistTimer = null;
   }, 2000);
-  // Immediate flush for high-impact events so dashboard sees them within
-  // a few seconds instead of waiting for the 30s alarm.
+  // Fast-flush window: ANY buffered event triggers a flush within
+  // FAST_FLUSH_MS. Without this, normal info events (KP scrape, SERP,
+  // autosuggest) sat for up to 30s waiting on DASHBOARD_PUSH_ALARM and
+  // the manager painted the worker STUCK / "last activity —" during
+  // that first-30-seconds gap. Urgent events (err/warn/product
+  // complete/captcha) still flush in 1s; everything else flushes in 3s.
+  // The 30s alarm remains as a backstop for the SW-suspended case.
+  // If a flush is already scheduled at a longer delay, we tighten it
+  // when an urgent event arrives so the manager doesn't wait.
   const isUrgent = entry.level === 'err' || entry.level === 'warn'
     || /product (complete|partial|failed)/i.test(entry.message)
     || /captcha/i.test(entry.message);
-  if (isUrgent && !_activityFlushScheduled) {
+  const targetDelay = isUrgent ? 1000 : 3000;
+  if (_activityFlushScheduled) {
+    // Urgent event arriving after a normal-delay schedule: tighten.
+    if (isUrgent && _activityFlushDelay > 1000) {
+      clearTimeout(_activityFlushTimer);
+      _activityFlushDelay = 1000;
+      _activityFlushTimer = setTimeout(() => {
+        _activityFlushScheduled = false; _activityFlushTimer = null;
+        flushActivityBuffer();
+      }, 1000);
+    }
+  } else {
     _activityFlushScheduled = true;
-    setTimeout(() => { _activityFlushScheduled = false; flushActivityBuffer(); }, 1000);
+    _activityFlushDelay = targetDelay;
+    _activityFlushTimer = setTimeout(() => {
+      _activityFlushScheduled = false; _activityFlushTimer = null;
+      flushActivityBuffer();
+    }, targetDelay);
   }
 }
 
@@ -1075,6 +1099,27 @@ async function tickHeartbeat() {
     if (jobIds.length === 0) return;
     const r = await heartbeatClaims(state.workerId, jobIds);
     if (r.error) pushLog(`Heartbeat warning: ${r.error}`, 'err');
+    // Piggyback: heartbeat is a natural sync point. If there's buffered
+    // activity, drain it now so the manager's "last activity" field stays
+    // within ~1 heartbeat of reality instead of trailing by up to 30s.
+    if (_activityBuffer.length > 0) {
+      if (_activityFlushTimer) { clearTimeout(_activityFlushTimer); _activityFlushTimer = null; }
+      _activityFlushScheduled = false; _activityFlushDelay = 0;
+      flushActivityBuffer().catch(() => {});
+    }
+    // Drift detection: if the manager's active batch has moved (Reset,
+    // re-pin, etc.) and we have no in-flight work on the current cached
+    // batch, resync. Never yank a running job — only self-correct when idle.
+    if (r.activeBatchId && state.queueBatchId && r.activeBatchId !== state.queueBatchId) {
+      const busy = state.claimedJobs.length > 0 || state.isRunning;
+      if (!busy) {
+        pushLog(`Batch drift detected: cached ${state.queueBatchId} → manager ${r.activeBatchId}. Resyncing.`, 'warn');
+        state.queueBatchId = r.activeBatchId;
+        try { await chrome.storage.local.set({ [STORAGE_KEY_QUEUE_BATCH_ID]: r.activeBatchId }); } catch {}
+      } else {
+        pushLog(`Batch drift noted (manager: ${r.activeBatchId}, worker: ${state.queueBatchId}); deferring resync until claims finish.`, 'warn');
+      }
+    }
   } catch (e) {
     pushLog(`Heartbeat failed: ${e.message}`, 'err');
   }

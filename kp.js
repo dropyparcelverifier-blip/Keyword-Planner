@@ -679,15 +679,29 @@
         trs:    document.querySelectorAll('tr').length,
         loaders: document.querySelectorAll('[role="progressbar"], material-spinner, mat-spinner').length,
       };
-      kpLog(`table diag: ${JSON.stringify(dump)}`, 'err');
+      // Diagnostic-only — logged at 'warn' so it lands in the manager's
+      // activity log without pumping the Errors card. If we ended up
+      // taking the partial-scrape path this is expected noise, not a
+      // failure. Only the terminal throw() below counts as a real error.
+      kpLog(`table diag: ${JSON.stringify(dump)}`, 'warn');
       if (rows > 3) {
-        kpLog(`timeout but ${rows} rows present — attempting partial scrape`, 'err');
+        kpLog(`timeout but ${rows} rows present — attempting partial scrape`, 'warn');
         outcome = { kind: 'has-rows', rows };
+      } else if (dump.loaders === 0 && dump.grids >= 1 && rows <= 3) {
+        // Loader is DONE but grid has only header rows — Google finished
+        // computing and this seed has genuinely no expansion. Treat as
+        // no-results instead of hard-failing. Matches Aveeno-style seeds
+        // where KP metrics returned an empty result set silently (no
+        // "no results" banner, just a computed-but-empty grid).
+        kpLog(`timeout — loader stopped, grid present, ≤3 rows — treating as empty result set`, 'info');
+        return [];
       } else {
         // Also check no-results one more time in case banner just appeared
         const phrase = pageHasNoResultsBanner();
         if (phrase) {
-          kpLog(`timeout — found "no results" phrase late: "${phrase}"`, 'err');
+          // Late-arriving "no results" banner — this IS the answer, not
+          // an error. Google confirmed the seed produced 0 ideas.
+          kpLog(`timeout — found "no results" phrase late: "${phrase}" (empty result is legitimate)`, 'info');
           return [];
         }
         throw e;
@@ -1199,11 +1213,27 @@
       await waitForReact(hydrateTimeoutMs);
       await openSearchVolumeForecasts(list);
       await switchToHistoricalMetrics();
-      const out = await scrapeIdeasTable(maxResults, Math.max(tableTimeoutMs || 60000, 90000));
+      // Metrics flow is much slower than Discover — Google has to compute
+      // avg-searches + competition + bid for EVERY pasted keyword before
+      // showing the table. Discover shows ideas as they stream in; metrics
+      // waits for the plan to fully compute. Scale the timeout by list
+      // size: 2s per keyword, floored at 120s, capped at 300s. For a 100-
+      // keyword paste that's 200s (3.3 min) — enough to cover the slow
+      // compute path and the "still spinning" case the user hit.
+      const scaled = Math.min(300000, Math.max(120000, list.length * 2000));
+      const timeout = Math.max(tableTimeoutMs || 0, scaled);
+      kpLog(`metrics flow timeout: ${Math.round(timeout / 1000)}s (scaled to ${list.length} keyword(s))`);
+      const out = await scrapeIdeasTable(maxResults, timeout);
       kpLog(`metrics flow → ${out.length} row(s) scraped`, 'ok');
       return { ok: true, keywords: out };
     } catch (e) {
-      kpLog(`metrics flow FAILED: ${e.message}`, 'err');
+      // Metrics backfill failure is an ENRICHMENT miss, not a data loss.
+      // The underlying keyword rows (autosuggest / PAA / related-search)
+      // still exist and get pushed — they just won't have kp_volume /
+      // kp_competition columns filled. Downgraded to 'warn' so the
+      // manager's Errors card doesn't crowd with these while workers are
+      // producing thousands of legitimate rows.
+      kpLog(`metrics flow degraded (${e.message}) — keyword rows still produced, just no kp_* metric columns`, 'warn');
       return { ok: false, error: e.message, keywords: [] };
     }
   }
@@ -1285,7 +1315,10 @@
       await aggressiveClick(findRealClickTarget(tab) || tab);
       await humanPause(1800, 0.3);
     } else {
-      kpLog('"Historical metrics" tab not found — scraping current view (may already be historical)', 'err');
+      // Not an error — this is the graceful fallback path. Downgraded from
+      // 'err' to 'warn' so the manager's Errors card doesn't fill with
+      // these (they don't cause data loss, the current view is scraped).
+      kpLog('"Historical metrics" tab not found — scraping current view (may already be historical)', 'warn');
     }
   }
 })();

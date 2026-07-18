@@ -66,12 +66,15 @@ export async function claimJobs({ workerId, batchId, limit = 5 }) {
 }
 
 // WORKER: heartbeat in-flight claims (by job id).
+// Manager response now also echoes `active_batch_id` — the caller can compare
+// it against its cached queueBatchId to detect drift (e.g. after a manager
+// Reset re-pinned a new batch). Prevents orphan-batch keyword writes.
 export async function heartbeatClaims(workerId, jobIds) {
-  if (!workerId || !Array.isArray(jobIds) || jobIds.length === 0) return { updated: 0 };
+  if (!workerId || !Array.isArray(jobIds) || jobIds.length === 0) return { updated: 0, activeBatchId: null };
   try {
     const r = await _post('/api/jobs/heartbeat', { workerId, jobIds: jobIds.map(Number).filter(Number.isFinite) });
-    return { updated: r.updated || 0 };
-  } catch (e) { return { updated: 0, error: e.message }; }
+    return { updated: r.updated || 0, activeBatchId: r.active_batch_id || null };
+  } catch (e) { return { updated: 0, activeBatchId: null, error: e.message }; }
 }
 
 export async function markJobDone({ workerId, batchId, productUrl }) {
