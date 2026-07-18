@@ -470,7 +470,13 @@ document.addEventListener('DOMContentLoaded', () => {
 // Logged to the console so users can verify which build is actually
 // running when they refresh — 'my changes aren't showing' is almost
 // always a cached JS problem. Bumped whenever wiring changes.
-console.info('[adbrain] manager UI build 2026-07-18b (tabs + upload-mode delegation + inline fallback)');
+console.info('[adbrain] manager UI build 2026-07-18c (tabs + upload-mode + cache-warn)');
+// Clear the stale-cache banner if it was shown (inline script pre-set it).
+const _staleBanner = document.getElementById('globalErrorBanner');
+if (_staleBanner && _staleBanner.textContent.includes('STALE CACHE')) {
+  _staleBanner.style.display = 'none';
+  _staleBanner.textContent = '';
+}
 
 // ─────────── Tabs ───────────
 // Belt-and-suspenders: event delegation on the <nav.tabs> container so

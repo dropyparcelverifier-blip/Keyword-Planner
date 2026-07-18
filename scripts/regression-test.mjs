@@ -1598,6 +1598,23 @@ async function run() {
   assert(appFull.includes(".tabs')?.addEventListener"),                'ROBUST.6 delegation on .tabs container');
   assert(appFull.includes("console.warn('[adbrain] tab refresh threw'"), 'ROBUST.7 refresh throw does not prevent tab switch');
   assert(appFull.includes("console.info('[adbrain] manager UI build"), 'ROBUST.8 build banner in console');
+  // Stale-cache watchdog: user gets un-missable banner if module didn't load.
+  assert(htmlFull.includes('STALE CACHE DETECTED'),                    'ROBUST.9 stale-cache watchdog banner');
+  assert(htmlFull.includes('Ctrl+Shift+R'),                            'ROBUST.10 stale-cache instructions include hard-refresh');
+  assert(appFull.includes("_staleBanner.style.display = 'none'"),      'ROBUST.11 clear stale banner on module load');
+  // Excel/CSV drop-zone label mentions .txt (auto-switches to SKU mode).
+  assert(htmlFull.includes('Click or drag Excel / CSV / .txt here'),   'ROBUST.12 dropzone label mentions .txt');
+  // Raw HTML tags in text content (<title>, <script>, <style>, <iframe>)
+  // silently break the HTML parser — everything after gets absorbed into
+  // that tag's content. This bricked the entire manager UI until 002623d.
+  // These MUST be escaped as &lt;title&gt; etc.
+  const dangerousInlineTags = /(?<!\\|-)<(?:title|script|style|iframe|body|head|html)(?:\s|>)/i;
+  const htmlBodyOnly = htmlFull
+    .replace(/<script[\s\S]*?<\/script>/g, '')       // strip real scripts
+    .replace(/<style[\s\S]*?<\/style>/g, '')         // strip real styles
+    .replace(/<title>[^<]*<\/title>/g, '')           // strip real title in head
+    .replace(/<\/?(?:html|head|body|iframe)[^>]*>/g, ''); // strip real structural
+  assert(!dangerousInlineTags.test(htmlBodyOnly),   'ROBUST.13 no unescaped <title>/<script>/<style>/<iframe> in body text (bricks parser)');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');
