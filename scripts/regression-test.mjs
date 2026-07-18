@@ -1627,6 +1627,10 @@ async function run() {
   assert(kdSrcAmzn.includes('data-a-dynamic-image'),                   'AMZN.8 Amazon dynamic-image extraction');
   assert(kdSrcAmzn.includes('landingImage'),                           'AMZN.9 Amazon landingImage extraction');
   assert(kdSrcAmzn.includes('m\\.media'),                              'AMZN.10 <img> scan widened for Amazon CDN');
+  // URL seeds skip text-seed flow: saves 60-120s per URL by going
+  // straight to the 'Start with a website' fallback.
+  assert(kdSrcAmzn.includes('URL detected — skipping text-seed flow'), 'AMZN.11 URL seeds skip text-seed flow');
+  assert(kdSrcAmzn.includes("/^https?:\\/\\//i.test(seed.trim())"),    'AMZN.12 URL detection uses http/https prefix');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');
