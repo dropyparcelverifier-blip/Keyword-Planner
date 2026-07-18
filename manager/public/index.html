@@ -24,6 +24,27 @@
       b.style.display = 'block';
       b.textContent = `⚠ Promise rejected: ${ev.reason?.message || ev.reason || '(unknown)'}. Check the browser console (F12).`;
     });
+    // Stale-cache watchdog: if the module hasn't set window.adbrainSwitchTab
+    // within 1500ms of page load, it either failed to load or is a stale
+    // version from before that global existed. Show a big red banner
+    // telling the user exactly what to do — 90% of 'nothing works'
+    // reports are cache issues, and this makes it un-missable.
+    window.addEventListener('DOMContentLoaded', () => {
+      setTimeout(() => {
+        if (typeof window.adbrainSwitchTab !== 'function') {
+          const b = document.getElementById('globalErrorBanner');
+          if (!b) return;
+          b.style.display = 'block';
+          b.innerHTML = `
+            ⚠ <strong>STALE CACHE DETECTED</strong> —
+            the manager UI shipped a newer version than your browser has cached.
+            <strong>Fix:</strong> press <kbd style="background:#450a0a;padding:2px 6px;border-radius:3px;border:1px solid #dc2626;">Ctrl+Shift+R</kbd>
+            (or open DevTools → Network → check "Disable cache", then reload).
+            If the banner stays after that, restart <code style="background:#450a0a;padding:2px 6px;">node manager/server.js</code>.
+          `;
+        }
+      }, 1500);
+    });
   </script>
   <div class="topbar">
     <span class="brand"><span class="icon">◆</span> AdBrain Manager</span>
@@ -101,8 +122,11 @@
                   <span class="lbl">Product file</span>
                   <div class="drop-zone" id="uploadDropZone">
                     <div class="icon">📁</div>
-                    <div class="primary" id="uploadDropPrimary">Click or drag Excel / CSV here</div>
-                    <div class="sub" id="uploadDropSub">Required: <code>url</code> or <code>product_url</code>. Optional: <code>sku</code>, <code>product_name</code>, <code>priority</code>, <code>handles</code>, <code>brands</code>.</div>
+                    <div class="primary" id="uploadDropPrimary">Click or drag Excel / CSV / .txt here</div>
+                    <div class="sub" id="uploadDropSub">
+                      <div style="margin-bottom: 4px;"><strong style="color: var(--text-1);">Excel / CSV:</strong> required <code>url</code> or <code>product_url</code>; optional <code>sku</code>, <code>product_name</code>, <code>priority</code>, <code>handles</code>, <code>brands</code>.</div>
+                      <div><strong style="color: var(--text-1);">.txt / SKU list:</strong> one <code>Dropy-BXXX…</code> per line — auto-switches to SKU-list mode on drop.</div>
+                    </div>
                     <input type="file" id="uploadFile" accept=".xlsx,.xls,.csv,.txt,text/plain,text/csv" />
                   </div>
                 </label>
@@ -819,7 +843,7 @@
                   <div class="shopify-impact-title">Field-impact hierarchy — what will be updated</div>
                   <div class="impact-row"><span class="impact-badge crit">CRIT</span><code>title</code><span class="hint">primary rank signal</span></div>
                   <div class="impact-row"><span class="impact-badge crit">CRIT</span><code>handle</code><span class="hint">URL slug (careful on existing)</span></div>
-                  <div class="impact-row"><span class="impact-badge crit">CRIT</span><code>meta_title</code><span class="hint">SERP <title></span></div>
+                  <div class="impact-row"><span class="impact-badge crit">CRIT</span><code>meta_title</code><span class="hint">SERP &lt;title&gt;</span></div>
                   <div class="impact-row"><span class="impact-badge high">HIGH</span><code>meta_description</code><span class="hint">SERP CTR</span></div>
                   <div class="impact-row"><span class="impact-badge high">HIGH</span><code>body_html</code><span class="hint">SEO + conversion</span></div>
                   <div class="impact-row"><span class="impact-badge med">MED</span><code>tags</code><span class="hint">on-site search</span></div>
