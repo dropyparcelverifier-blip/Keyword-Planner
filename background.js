@@ -982,21 +982,36 @@ async function pollWorkerCommands() {
             setTimeout(() => workerAutoPollTick().catch(() => {}), 200);
           }
         } else if (c.command === 'resume') {
-          // Re-enable continuous-claim and kick off a fresh auto-connect
-          // cycle so this worker starts pulling jobs again. No-op if
-          // we're already running.
+          // Re-enable continuous-claim + auto-arm + kick off autoConnect.
+          // Previously used chrome.runtime.sendMessage to self, which is
+          // fragile: the SW→SW message may not deliver if the SW is
+          // about to suspend, and 'Receiving end does not exist' errors
+          // silently ate the resume. Now calls _doAutoConnectWorker
+          // directly so the entire arm+claim flow runs synchronously
+          // inside the poll handler.
           if (state.running) {
             bufferActivity({ level: 'info', source: 'cmd', message: `Resume command received but engine is already running — ignoring.` });
           } else {
+            // Clear the local-stop flags so autoConnectWorker doesn't
+            // fight them. Same semantics as `reconnect` — the manager
+            // is explicitly saying 'go run'.
+            state.workerArmed = true;
+            state.userStoppedArm = false;
+            state.stopRequested = false;
             state.continuousClaim = true;
-            await chrome.storage.local.set({ adbrainContinuousClaim: true }).catch(() => {});
+            state._runIntentClearedAt = 0;
+            await chrome.storage.local.set({
+              adbrainContinuousClaim: true,
+              adbrainWorkerArmed: true,
+              adbrainUserStoppedArm: false,
+            }).catch(() => {});
             await setRunIntent(true);
-            bufferActivity({ level: 'ok', source: 'cmd', message: `Resume command received — claiming next chunk.` });
-            // Fire async; don't await so command-ack still happens.
+            bufferActivity({ level: 'ok', source: 'cmd', message: `Resume command received — force-armed + claiming next chunk.` });
+            // Fire async so we don't block command-ack (autoConnect can
+            // take 5-10s claiming + fetching config).
             const wId = state.workerId;
-            setTimeout(() => {
-              chrome.runtime.sendMessage({ action: 'jobs:autoConnectWorker', workerId: wId, chunkSize: state.continuousChunkSize || 5 }, () => {});
-            }, 200);
+            const cs  = state.continuousChunkSize || 5;
+            setTimeout(() => { _doAutoConnectWorker({ workerId: wId, chunkSize: cs }).catch(() => {}); }, 200);
           }
         } else if (c.command === 'reset_local') {
           // Manager did a full reset. Purge our local state that

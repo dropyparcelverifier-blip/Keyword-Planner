@@ -320,7 +320,12 @@ $('stopBtn').addEventListener('click', async () => {
 });
 $('clearLogBtn').addEventListener('click', async () => {
   if (!confirm('Clear the local log on this worker PC?')) return;
-  await new Promise(r => chrome.storage.local.set({ adbrainLog: [] }, r));
+  // Route through background's clearLog RPC so it clears BOTH the
+  // in-memory buffer AND chrome.storage. Setting storage directly
+  // used to fail — background kept its own state.log in memory
+  // and re-wrote it on the next log event, so entries reappeared
+  // within seconds.
+  try { await rpc('clearLog'); } catch {}
   state.log = [];
   renderLog();
 });
