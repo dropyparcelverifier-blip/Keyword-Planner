@@ -1656,6 +1656,22 @@ async function run() {
   // jobs/list must return handles+brands so the queue-manager UI can
   // display them (bulk update + enriched Shopify uploads populate these).
   assert(srvFull.includes('sku, product_url, product_name, priority, status, claimed_by, claimed_at, heartbeat_at, done_at, failed_reason, attempts, handles, brands'), 'CTRL.4 jobs/list returns handles+brands columns');
+  // Phantom-done detection: done jobs with ZERO keyword rows.
+  assert(srvFull.includes('done_empty'),                               'PHANTOM.1 summary query flags done_empty count');
+  assert(srvFull.includes("'/api/jobs/done-empty'"),                   'PHANTOM.2 GET /done-empty endpoint');
+  assert(srvFull.includes("'/api/jobs/requeue-done-empty'"),           'PHANTOM.3 POST /requeue-done-empty endpoint');
+  assert(srvFull.includes('doneEmptyJobs: db.prepare'),                'PHANTOM.4 doneEmptyJobs prepared statement');
+  assert(srvFull.includes('requeueDoneEmpty: db.prepare'),             'PHANTOM.5 requeueDoneEmpty prepared statement');
+  assert(apiCrud.includes('jobsDoneEmpty:'),                           'PHANTOM.6 client wrapper for done-empty');
+  assert(apiCrud.includes('jobsRequeueDoneEmpty:'),                    'PHANTOM.7 client wrapper for requeue-done-empty');
+  assert(appFull.includes('data-requeue-empty'),                       'PHANTOM.8 UI has Requeue empty button');
+  assert(appFull.includes('b.done_empty > 0'),                         'PHANTOM.9 UI conditionally shows the warning');
+  // Worker reorder: push MUST come before markJobDone.
+  assert(bgSrcCtrl.includes('ORDER MATTERS. We PUSH KEYWORDS FIRST'),  'PHANTOM.10 worker reorder documented');
+  const bgOrderCheck = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
+  const pushIdx = bgOrderCheck.indexOf('auto-push this product', bgOrderCheck.indexOf('onProductDone: async'));
+  const markIdx = bgOrderCheck.indexOf('markJobDone({', bgOrderCheck.indexOf('onProductDone: async'));
+  assert(pushIdx > 0 && markIdx > 0 && pushIdx < markIdx, 'PHANTOM.11 push comes before markJobDone in onProductDone');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');

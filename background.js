@@ -1310,45 +1310,18 @@ async function _handleStartInner(msg) {
               state.doneProducts.push(cleanUrl);
               await persistDone();
             }
-            // Distributed mode: mark this job done in the shared queue
-            // and drop it from this worker's claim list. Other workers
-            // can now see it as done; heartbeat skips it on the next tick.
+            // ORDER MATTERS. We PUSH KEYWORDS FIRST, then markJobDone.
+            // Previous order (markDone first, push after) caused the
+            // 'phantom done' bug: worker died between the two calls,
+            // job stays 'done' with zero keyword rows forever. New
+            // order guarantees the manager either has the data OR the
+            // job is still 'claimed' (heartbeat keeps the lock, other
+            // workers won't touch it, this worker retries on next
+            // tick). Enqueued pending pushes retry via alarm.
             //
-            // Don't gate on claimedJobs.length > 0 — if the worker crashed
-            // and resumed without persisting claimedJobs, the in-flight
-            // row is still claimed in the DB and we need to attempt the
-            // PATCH anyway. The PATCH is WHERE claimed_by=workerId so it's
-            // safe (no-op if the row was reclaimed by another PC).
-            if (state.workerId && state.queueBatchId) {
-              try {
-                const r = await markJobDone({
-                  workerId: state.workerId,
-                  batchId:  state.queueBatchId,
-                  productUrl: cleanUrl,
-                });
-                // Only remove from claimedJobs AFTER the DB PATCH
-                // succeeds. Otherwise a network failure would leave the
-                // row 'claimed' in the DB but missing from our heartbeat
-                // list, so it'd go stale → get reclaimed by another
-                // worker → double-processing.
-                if (r && !r.error) {
-                  const idx = state.claimedJobs.findIndex(j => j.productUrl === cleanUrl);
-                  if (idx >= 0) {
-                    state.claimedJobs.splice(idx, 1);
-                    await chrome.storage.local.set({ [STORAGE_KEY_CLAIMED_JOBS]: state.claimedJobs }).catch(() => {});
-                  }
-                } else if (r && r.error) {
-                  pushLog(`jobs:markDone retry-needed: ${r.error} — keeping in claim list so heartbeat keeps it locked`, 'err');
-                }
-              } catch (e) {
-                // Network/auth failure — keep the job in claimedJobs so
-                // heartbeat continues refreshing the lock. The next
-                // onProductDone won't fire for this URL, so this is a
-                // permanent leak unless the user manually triggers a
-                // re-mark — log loudly.
-                pushLog(`jobs:markDone failed (will retry on heartbeat): ${e.message}`, 'err');
-              }
-            }
+            // Distributed mode: mark this job done in the shared queue
+            // and drop it from this worker's claim list — DEFERRED
+            // until after keywords are pushed.
             if (runOpts.autoExport) {
               const productRows = state.report.filter(r => r.productUrl === cleanUrl);
               if (productRows.length > 0) {
@@ -1442,6 +1415,29 @@ async function _handleStartInner(msg) {
                   });
                   enqueuePendingPush(cleanUrl, productRows, state.queueBatchId);
                 }
+              }
+            }
+            // NOW mark the job done in the shared queue (after the
+            // push attempt above landed OR was queued to pending).
+            // Same PATCH-then-drop-from-claim semantics as before.
+            if (state.workerId && state.queueBatchId) {
+              try {
+                const r = await markJobDone({
+                  workerId: state.workerId,
+                  batchId:  state.queueBatchId,
+                  productUrl: cleanUrl,
+                });
+                if (r && !r.error) {
+                  const idx = state.claimedJobs.findIndex(j => j.productUrl === cleanUrl);
+                  if (idx >= 0) {
+                    state.claimedJobs.splice(idx, 1);
+                    await chrome.storage.local.set({ [STORAGE_KEY_CLAIMED_JOBS]: state.claimedJobs }).catch(() => {});
+                  }
+                } else if (r && r.error) {
+                  pushLog(`jobs:markDone retry-needed: ${r.error} — keeping in claim list so heartbeat keeps it locked`, 'err');
+                }
+              } catch (e) {
+                pushLog(`jobs:markDone failed (will retry on heartbeat): ${e.message}`, 'err');
               }
             }
           },
