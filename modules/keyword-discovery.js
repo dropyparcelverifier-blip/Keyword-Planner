@@ -885,6 +885,18 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
   for (let i = 0; i < seedList.length; i++) {
     const seed = seedList[i];
     if (accumulated.length >= maxResults) break;
+    // URL-shaped seeds (http:// or https:// prefix) don't work in the
+    // "Discover new keywords" text-input flow — Google treats them as
+    // literal keyword text, no seed chip commits, "Get results" never
+    // enables → 30-60s wasted per attempt before we fall through to
+    // the website flow. Skip the text-seed loop entirely for URL seeds
+    // and let the website-fallback block below handle them (which
+    // clicks "Start with a website" instead — the correct entry point).
+    if (/^https?:\/\//i.test(seed.trim())) {
+      log(`KP seed ${i + 1}/${seedList.length}: URL detected — skipping text-seed flow, will use "Start with a website" fallback`);
+      seedErrors.push(`seed ${i + 1}: URL seed skipped (use website fallback)`);
+      continue;
+    }
     let succeeded = false;
     for (let attempt = 1; attempt <= SEED_MAX_ATTEMPTS && !succeeded; attempt++) {
       try {
