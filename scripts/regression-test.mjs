@@ -1640,7 +1640,9 @@ async function run() {
   // Excel/CSV uploads carry: product_name (title), handles (handle +
   // tags + product_type), brands (vendor). Engine uses these for seed
   // derivation and brand-domain confirmation.
-  assert(srvFull.includes('fields=handle,title,tags,vendor,product_type'), 'ENRICH.1 Shopify fetch pulls tags/vendor/product_type');
+  // ENRICH.1 (was: REST fetch fields) — now via GraphQL productVariants
+  //          → product { handle title tags vendor productType }.
+  assert(srvFull.includes('id handle title tags vendor productType'),  'ENRICH.1 Shopify fetch pulls tags/vendor/productType via GraphQL');
   assert(srvFull.includes("entry.handles = handleParts.length ? handleParts.join"), 'ENRICH.2 handles concat (handle + tags + product_type)');
   assert(srvFull.includes('entry.brands  = p.vendor'),                  'ENRICH.3 brands from Shopify vendor');
   assert(srvFull.includes('r.handles, r.brands'),                       'ENRICH.4 insertJob passes enriched handles + brands');
@@ -1678,11 +1680,16 @@ async function run() {
   assert(srvFull.includes('https://${publicHost}/products/'),          'STORE.3 URL template uses publicHost');
   assert(srvFull.includes('no Shopify variant/product found (tried'),  'STORE.4 unresolved SKUs get explanatory note (all fallback paths listed)');
   // Widened SKU search: multiple case variants + barcode + handle fallback
-  assert(srvFull.includes('ASIN upper'),                               'STORE.5 tries ASIN upper case');
-  assert(srvFull.includes('ASIN lower'),                               'STORE.5b tries ASIN lower case');
-  assert(srvFull.includes("&barcode="),                                'STORE.6 barcode fallback for Amazon-sourced stores');
-  assert(srvFull.includes("&handle="),                                 'STORE.7 handle-by-ASIN fallback');
+  assert(srvFull.includes("pushCand('ASIN only'"),                     'STORE.5 tries ASIN only');
+  assert(srvFull.includes("pushCand('Dropy-<ASIN>'"),                  'STORE.5b tries Dropy-<ASIN> variant');
+  assert(srvFull.includes("`barcode:${c.sku}`"),                       'STORE.6 barcode search (GraphQL)');
+  assert(srvFull.includes('handle:*'),                                 'STORE.7 handle wildcard search (GraphQL)');
   assert(srvFull.includes('matched via ${matchedVia}'),                'STORE.8 preview shows which variant path matched');
+  // GraphQL migration — REST /variants.json?sku= doesn't actually filter,
+  // it silently returns all variants. Must use GraphQL productVariants.
+  assert(srvFull.includes('productVariants(first: 1, query'),          'STORE.9 uses GraphQL productVariants query');
+  assert(srvFull.includes('graphql.json'),                             'STORE.10 hits Shopify GraphQL endpoint');
+  assert(!srvFull.includes('variants.json?fields=id,sku,product_id&limit=1&sku='), 'STORE.11 broken REST ?sku= filter removed');
   // Worker status: distinguish long-offline (probably powered off) from
   // brief-offline (Chrome closed / network blip).
   assert(appFull.includes("`SHUT DOWN ("),                             'STATUS.1 SHUT DOWN state for >4h no heartbeat');
