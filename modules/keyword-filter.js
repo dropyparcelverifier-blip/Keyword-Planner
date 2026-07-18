@@ -1561,7 +1561,14 @@ export function classifyKeyword(keyword, productContext) {
   }
   if (hasAnchor) {
     if (_hasCommercialIntent(kw)) {
-      return reject('anchor_commercial_no_brand');
+      // Tier 3-Lite: anchor + commercial-intent modifier (buy/best/price/
+      // review/etc.), no brand match. Previously rejected wholesale, which
+      // starved R1 for niche brands (Ancient Greek face oil, Always Maxi,
+      // Aveeno kids shampoo) where the brand string rarely appears inside
+      // KP-returned ideas. These queries are still SERP-loadable — Google
+      // may surface OUR product in Shopping / popular_products even
+      // without our brand in the query. Accepted, cycled, expanded.
+      return { relevant: true, tier: 'anchor_commercial', loadSERP: true, expand: true, reason: null };
     }
     return reject('anchor_only_no_commercial');
   }

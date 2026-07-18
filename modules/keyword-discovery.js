@@ -3839,6 +3839,16 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
               .sort((a, b) => b[1] - a[1])
               .map(([k, v]) => `${k}:${v}`)
               .join(' | ');
+            // High-commercial-intent zone matches — Shopping carousel and
+            // 'Popular products' rail. Used by R2 seed selection: a keyword
+            // that Google surfaced OUR product in Shopping is a much stronger
+            // R2 candidate than one that only matched an organic thumbnail,
+            // even if the raw imageCount is low.
+            const _msb = serpData.matchSourceBreakdown || {};
+            row.shoppingMatchCount =
+              (Number(_msb.shopping_carousel) || 0) +
+              (Number(_msb.popular_products) || 0) +
+              (Number(_msb.sponsored) || 0);
             const _tCap = serpData.thumbCount || 0;
             const _tMatched = serpData.count || 0;
             const _tUnv = serpData.unverifiedCount || 0;
@@ -4230,6 +4240,47 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       const kpPicks = [...highSignalKp, ...lowSignalKp].slice(0, MAX_R1_KP_SERP_SEEDS);
       for (const r of kpPicks) round1Seeds.push(r);
 
+      // Commercial-modifier expansion — synthesize buy/best/price/review
+      // variants of the TOP seeds so we widen the SERP-cycled pool with
+      // high-intent commercial queries. Turns a 7-seed batch (like
+      // 'Always Maxi Overnight') into 7 + top5×4 = 27 seeds, each of
+      // which then produces its own SERP + autosuggest expansion.
+      // User feedback: 'we can take buy/best/price/review modifier for
+      // same product' — this is that.
+      const COMMERCIAL_MODIFIERS = ['buy', 'best', 'price', 'review'];
+      const MAX_MOD_EXPANSION = 5;   // top-5 seeds get modifier variants
+      const seenSeedKw = new Set(round1Seeds.map(r => String(r.keyword || '').toLowerCase().trim()));
+      const modifierSeeds = [];
+      for (const base of kpPicks.slice(0, MAX_MOD_EXPANSION)) {
+        const baseKw = String(base.keyword || '').trim();
+        if (!baseKw) continue;
+        for (const mod of COMMERCIAL_MODIFIERS) {
+          const variants = [`${mod} ${baseKw}`, `${baseKw} ${mod}`];
+          for (const v of variants) {
+            const key = v.toLowerCase().trim();
+            if (seenSeedKw.has(key)) continue;
+            seenSeedKw.add(key);
+            // Copy the base row's metadata so the SERP-cycle treats it
+            // as a real KP-seeded query (uses the same scoring path).
+            modifierSeeds.push({
+              ...base,
+              keyword: v,
+              _source: 'commercial_modifier',
+              _baseKw: baseKw,
+              _modifier: mod,
+            });
+          }
+        }
+      }
+      for (const m of modifierSeeds) round1Seeds.push(m);
+      if (modifierSeeds.length > 0) {
+        onProgress?.({
+          currentProduct: productName,
+          currentAction: `+${modifierSeeds.length} commercial-modifier seeds synthesized (buy/best/price/review × top-${MAX_MOD_EXPANSION}) — total R1 seeds: ${round1Seeds.length}`,
+          logKind: 'info',
+        });
+      }
+
       // FALLBACK SEED: if KP returned zero AND there are zero PAA questions
       // (worst case — engine has nothing to cycle), seed R1 with the product
       // name itself + a few obvious variants. Without this fallback, the
@@ -4333,26 +4384,46 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       const r1KpSeedSet = new Set(
         kp1RowsArr.map(r => String(r.keyword || '').toLowerCase().trim())
       );
-      // Candidates = rows that R1 surfaced as strong winners (image_count
-      // >= 3 — single-match seeds drag too-generic competitor floods into
-      // R2's KP scrape). Also exclude brand-other rows and the original
-      // R1 KP seeds (no point re-asking KP about a seed it already gave us).
+      // Candidates = rows that R1 surfaced as strong winners. The gate is a
+      // COMPOSITE signal — any of three confirmations lets a row through:
+      //   (a) imageCount >= 3           — organic SERP CLIP matches
+      //   (b) linkVerifiedCount >= 1    — matched-link CLIP re-verification
+      //   (c) shoppingMatchCount >= 1   — Google Shopping / popular_products / sponsored
+      // Widening from image-only to link+shopping means R2 fires on niche
+      // products where the organic column returns few thumbnails but Google
+      // Shopping placed our product, or matched destination pages verified.
+      // Also exclude brand-other rows and the original R1 KP seeds (no
+      // point re-asking KP about a seed it already gave us).
       const R2_MIN_IMAGE_MATCHES = 3;
+      const R2_MIN_LINK_MATCHES  = 1;
+      const R2_MIN_SHOPPING      = 1;
+      const r2SignalScore = (r) => {
+        const img  = Number(r.imageCount || 0);
+        const link = Number(r.linkVerifiedCount || 0);
+        const shop = Number(r.shoppingMatchCount || 0);
+        // Weighted composite for sorting: shopping placement outranks link,
+        // both outrank raw image count (product surface in Shopping/matched
+        // destination = higher purchase-intent signal than an organic thumb).
+        return shop * 5 + link * 3 + img;
+      };
       const r2Candidates = Array.from(productRows).filter(r => {
         const kwLower = String(r.keyword || '').toLowerCase().trim();
         if (!kwLower) return false;
         if (r.tier === 'brand_other') return false;
         if (r1KpSeedSet.has(kwLower)) return false;
-        if ((r.imageCount || 0) < R2_MIN_IMAGE_MATCHES) return false;
+        const img  = Number(r.imageCount || 0);
+        const link = Number(r.linkVerifiedCount || 0);
+        const shop = Number(r.shoppingMatchCount || 0);
+        if (img < R2_MIN_IMAGE_MATCHES &&
+            link < R2_MIN_LINK_MATCHES &&
+            shop < R2_MIN_SHOPPING) return false;
         if (!r2SeedQualityOk(r.keyword)) return false;
         return true;
       });
-      // Sort: image matches first (Google confirmed our product), then by
-      // adRating. Take top N. Dedupe via seedsAreSimilar so we don't
-      // re-expand near-identical seeds.
+      // Sort by composite signal score, then adRating tiebreak.
       r2Candidates.sort((a, b) => {
-        const imgDiff = (b.imageCount || 0) - (a.imageCount || 0);
-        if (imgDiff !== 0) return imgDiff;
+        const sDiff = r2SignalScore(b) - r2SignalScore(a);
+        if (sDiff !== 0) return sDiff;
         return (b.adRating || 0) - (a.adRating || 0);
       });
       const kp1ForR2 = [];

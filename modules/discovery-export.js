@@ -429,7 +429,8 @@ export async function pushToAdBrain(report) {
   const managerToken = String(_cfg.adbrainManagerToken || '').trim();
   const endpoint = `${managerBase}/api/keywords`;
   const BATCH = 100;
-  let success = 0, failed = 0;
+  let success = 0, failed = 0, rejectedOrphan = 0;
+  let managerActiveBatchId = null;
   const errors = [];
 
   for (let i = 0; i < report.length; i += BATCH) {
@@ -527,7 +528,17 @@ export async function pushToAdBrain(report) {
         body: JSON.stringify({ rows: slice }),
       });
       if (resp.ok || resp.status === 201) {
-        success += slice.length;
+        // Manager echoes the current active_batch_id so we can detect stale
+        // queueBatchId drift, and reports how many rows it rejected as
+        // orphan-batch writes. Surface both to the caller so background.js
+        // can log + force a batch resync.
+        let data = null; try { data = await resp.json(); } catch {}
+        const inserted = Number(data?.inserted ?? slice.length);
+        const rej = Number(data?.rejected || 0);
+        success += inserted;
+        rejectedOrphan += rej;
+        if (data?.active_batch_id) managerActiveBatchId = data.active_batch_id;
+        if (rej > 0) errors.push(`${rej} row(s) rejected as orphan_batch — manager active is ${data?.active_batch_id || 'unknown'}`);
       } else {
         failed += slice.length;
         const text = await resp.text();
@@ -539,5 +550,5 @@ export async function pushToAdBrain(report) {
     }
   }
 
-  return { success, failed, total: report.length, errors };
+  return { success, failed, rejectedOrphan, managerActiveBatchId, total: report.length, errors };
 }

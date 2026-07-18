@@ -444,6 +444,7 @@ const Q = {
   listBatchNames:  db.prepare(`SELECT batch_id, display_name, updated_at FROM batch_names`),
   newestPendingBatch: db.prepare(`SELECT batch_id FROM jobs WHERE status='pending' GROUP BY batch_id ORDER BY MAX(created_at) DESC LIMIT 1`),
   batchHasPending: db.prepare(`SELECT 1 FROM jobs WHERE batch_id=? AND status='pending' LIMIT 1`),
+  batchExists:     db.prepare(`SELECT 1 FROM jobs WHERE batch_id=? LIMIT 1`),
   existsActiveUrl: db.prepare(`SELECT 1 FROM jobs WHERE product_url=? AND batch_id<>? AND status IN ('pending','claimed','done') LIMIT 1`),
 };
 
@@ -1276,7 +1277,14 @@ const server = http.createServer(async (req, res) => {
       const b = await readJson(req); const t = now();
       let n = 0;
       for (const id of (Array.isArray(b.jobIds) ? b.jobIds : [])) { const info = Q.heartbeatById.run(t, Number(id), b.workerId); n += info.changes; }
-      return send(res, 200, { ok: true, updated: n });
+      // Echo the manager's authoritative active batch back to the worker so
+      // it can detect drift (worker's cached queueBatchId != manager's pin).
+      // Prevents orphan-batch writes when the manager re-pins after a Reset.
+      const cfgHb = Q.getConfig.get();
+      const pinnedHb = (cfgHb?.active_batch_id || '').trim();
+      let activeHb = pinnedHb && Q.batchHasPending.get(pinnedHb) ? pinnedHb : null;
+      if (!activeHb) activeHb = Q.newestPendingBatch.get()?.batch_id || null;
+      return send(res, 200, { ok: true, updated: n, active_batch_id: activeHb });
     }
     if (m === 'POST' && p === '/api/jobs/requeue') {
       const b = await readJson(req); const info = Q.requeue.run(Number(b.jobId));
@@ -1585,16 +1593,39 @@ const server = http.createServer(async (req, res) => {
     if (m === 'POST' && p === '/api/keywords') {
       const b = await readJson(req);
       const rows = Array.isArray(b.rows) ? b.rows : [];
+      // Orphan-batch guard: refuse writes whose batch_id references a batch
+      // that has no jobs. This was the root cause of "orphan" batches in the
+      // UI — workers with a cached queueBatchId kept writing keyword rows
+      // after a Reset deleted the batch, so the rows had nowhere to hang.
+      // Rejecting here forces the worker to re-sync via /api/jobs/active-batch.
+      const seenBatches = new Set();
+      const rejected = [];
+      const accepted = [];
+      for (const r of rows) {
+        const bid = r.batch_id || b.batchId || null;
+        if (!bid) { rejected.push({ row: r, reason: 'no_batch_id' }); continue; }
+        if (!seenBatches.has(bid)) {
+          if (!Q.batchExists.get(bid)) { rejected.push({ row: r, reason: 'orphan_batch' }); continue; }
+          seenBatches.add(bid);
+        }
+        accepted.push(r);
+      }
       let n = 0;
       db.exec('BEGIN');
       try {
-        for (const r of rows) {
+        for (const r of accepted) {
           Q.insertKeyword.run(r.batch_id || b.batchId || null, r.sku || null, r.keyword || '', r.product_url || '', JSON.stringify(r));
           n++;
         }
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
-      return send(res, 200, { ok: true, inserted: n });
+      // Tell the worker the current active batch so it can self-correct after
+      // a rejection — same escape hatch as heartbeat.
+      const cfgKw = Q.getConfig.get();
+      const pinnedKw = (cfgKw?.active_batch_id || '').trim();
+      let activeKw = pinnedKw && Q.batchHasPending.get(pinnedKw) ? pinnedKw : null;
+      if (!activeKw) activeKw = Q.newestPendingBatch.get()?.batch_id || null;
+      return send(res, 200, { ok: true, inserted: n, rejected: rejected.length, active_batch_id: activeKw });
     }
     if (m === 'GET' && p === '/api/keywords') {
       const rows = Q.keywordsByBatch.all(url.searchParams.get('batchId') || '').map(r => { try { return JSON.parse(r.data); } catch { return null; } }).filter(Boolean);

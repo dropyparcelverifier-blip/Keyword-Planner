@@ -1022,10 +1022,28 @@ async function run() {
   assert('orphanRows' in orph.data, '20n.4 orphanRows count returned');
   assert('claimedNow' in orph.data, '20n.5 claimedNow (in-flight) returned');
   assert('activeWorkers' in orph.data, '20n.6 activeWorkers returned');
-  // Create an orphan: push a keyword with a batch_id that has no jobs
-  await req('POST', '/api/keywords', { rows: [{ batch_id: 'ghost-batch-xyz', keyword: 'ghost', product_url: 'https://x' }] });
+  // Create an orphan via the real-world path: upload a batch with a job,
+  // push a keyword to it, then delete the batch — the keyword row is left
+  // pointing at a non-existent batch_id. The batchExists guard on
+  // /api/keywords is designed to REJECT writes to a fully-nonexistent
+  // batch (see 20n-guard.1 below), so a ghost-batch push no longer creates
+  // an orphan directly. Legacy orphans (batch deleted after keyword push)
+  // are still what the cleanup endpoint is for.
+  const orphanBatchId = 'orphan-test-batch';
+  await req('POST', '/api/jobs/upload', { batchId: orphanBatchId, products: [{ product_url: 'https://orphan.example/p', product_name: 'Orphan' }] });
+  await req('POST', '/api/keywords', { rows: [{ batch_id: orphanBatchId, keyword: 'ghost', product_url: 'https://orphan.example/p' }] });
+  // Wipe ONLY the jobs (not the keywords) to reproduce the real orphan
+  // scenario — /api/jobs/delete-batch cascades to keywords too, which
+  // would defeat the setup.
+  await req('POST', '/api/wipe-selective', { confirm: 'WIPE', flags: { jobs: true }, batchId: orphanBatchId });
   const orph2 = await req('GET', '/api/keywords/orphans');
   assert(orph2.data.orphanRows >= 1, '20n.7 orphan row detected after synthetic push');
+  // 20n-guard.1: verify the batchExists guard rejects direct ghost-batch writes.
+  const ghost = await req('POST', '/api/keywords', { rows: [{ batch_id: 'ghost-batch-xyz-nonexistent', keyword: 'ghost', product_url: 'https://x' }] });
+  assertEq(ghost.status, 200, '20n-guard.1 ghost-batch push returns 200 (guard is soft)');
+  assert(Number(ghost.data?.rejected || 0) >= 1, '20n-guard.2 ghost-batch push reports rejected count');
+  assertEq(Number(ghost.data?.inserted || 0), 0, '20n-guard.3 ghost-batch push inserts 0 rows');
+  assert('active_batch_id' in ghost.data, '20n-guard.4 response echoes manager active_batch_id for drift-detection');
   // Cleanup requires confirm string
   const cleanNo = await req('POST', '/api/keywords/cleanup-orphans', {});
   assertEq(cleanNo.status, 400, '20n.8 cleanup requires confirm string');

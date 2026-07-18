@@ -16,6 +16,7 @@ const state = {
   activeBatch: '',        // dashboard-selected batch
   dashTimer: null,
   dashIntervalMs: 10000,
+  liveTimer: null,        // fast-refresh (3s) for Activity + Output panels
   logs: [],
   workers: [],
   batches: [],
@@ -495,6 +496,7 @@ function _switchTab(btn) {
     else stopDashPolling();
     if (btn.dataset.tab === 'upload') refreshUploadSidebar();
     if (btn.dataset.tab === 'analytics') refreshAnalyticsTab();
+    if (btn.dataset.tab !== 'analytics') stopAnalyticsPolling();
     if (btn.dataset.tab === 'config') { loadConfigForm(); refreshOrphanCount(); refreshBackupsList(); refreshQuiesceStatus(); }
     if (btn.dataset.tab === 'workers') refreshWorkersTab();
     if (btn.dataset.tab === 'downloads') refreshDownloadsTab();
@@ -1174,9 +1176,44 @@ function startDashPolling() {
   if (state.dashIntervalMs > 0) {
     state.dashTimer = setInterval(refreshDashboard, state.dashIntervalMs);
   }
+  // Live-loop for the two panels that matter most while the worker is
+  // producing keywords — Activity log + Output uploaded to manager.
+  // Runs independently at 3s, so the manager reflects new events within
+  // one worker flush cycle (also 3s after my SW-side patch), instead of
+  // the full-dashboard 10s cadence which fires 6+ API calls.
+  refreshLivePanels();
+  state.liveTimer = setInterval(refreshLivePanels, 3000);
 }
 function stopDashPolling() {
   if (state.dashTimer) { clearInterval(state.dashTimer); state.dashTimer = null; }
+  if (state.liveTimer) { clearInterval(state.liveTimer); state.liveTimer = null; }
+}
+
+// Live refresh — 2 API calls only. Cheap enough for 3s cadence. Silently
+// swallows errors (health pill on the top bar surfaces persistent trouble).
+let _liveInflight = false;
+async function refreshLivePanels() {
+  if (_liveInflight) return; // skip if previous tick still running
+  _liveInflight = true;
+  try {
+    const activity = await api.activityGet(state.activeBatch, 120, state.workerFilter).catch(() => null);
+    if (activity) renderActivity(activity.events || []);
+    if (state.activeBatch) {
+      const stats = await fetchBatchKeywordStats(state.activeBatch).catch(() => null);
+      if (stats) renderOutputStats(stats);
+    } else {
+      renderOutputStats(null); // shows the "Pick a batch above" prompt
+    }
+    // Pulse the LIVE dot so the user can SEE the panel just refreshed.
+    // If someone unplugs the manager, the dots stop pulsing — instant tell.
+    const pulse = (id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.classList.remove('pulse'); void el.offsetWidth; el.classList.add('pulse');
+    };
+    pulse('activityLiveDot');
+    pulse('outputLiveDot');
+  } finally { _liveInflight = false; }
 }
 
 async function refreshDashboard() {
@@ -1336,6 +1373,34 @@ function populateBatchSelects() {
     const cur = el.value;
     el.innerHTML = `<option value="">— none —</option>${allOpts}`;
     if (cur && Array.from(el.options).some(o => o.value === cur)) el.value = cur;
+  }
+  // Auto-pick the active batch for the Dashboard tab so the Output +
+  // Activity panels don't sit forever on "Batch has no SKUs yet" just
+  // because the user never touched the dropdown. Priority:
+  //   1. Existing selection wins.
+  //   2. Manager's pinned active_batch_id (if it still has jobs).
+  //   3. Only one batch exists → use it.
+  //   4. Newest batch with pending / claimed / in-flight work.
+  const dashSel = $('dashBatchSelect');
+  if (dashSel && !dashSel.value) {
+    const opts = Array.from(dashSel.options).filter(o => o.value);
+    let pick = '';
+    const pinned = (state.activeBatchPinned || '').trim();
+    if (pinned && opts.some(o => o.value === pinned)) pick = pinned;
+    else if (opts.length === 1) pick = opts[0].value;
+    else {
+      const withWork = state.batches.filter(b => (b.pending || 0) + (b.claimed || 0) > 0)
+        .sort((a, b) => String(b.batch_id).localeCompare(String(a.batch_id)));
+      if (withWork[0]) pick = withWork[0].batch_id;
+    }
+    if (pick) {
+      dashSel.value = pick;
+      state.activeBatch = pick;
+      saveUI({ batch: pick });
+      // Kick the live refresh immediately so the two panels populate
+      // without waiting for the next 3s tick.
+      refreshLivePanels();
+    }
   }
   for (const id of ['pinBatchSelect', 'deleteBatchSelect']) {
     const el = $(id);
@@ -1984,10 +2049,26 @@ function renderWorkerFleet() {
       // worker; fall back to _lastActivity if empty.
       const eAct = worker._lastEngineActivity || (act && act.source !== 'cmd' ? act : null);
       const lastActTs = eAct ? Number(new Date(eAct.ts).getTime() || 0) : 0;
-      const actAgo = lastActTs > 0 ? Date.now() - lastActTs : Infinity;
       const inFlight = Number(worker.in_flight || 0);
-      if (actAgo > 5 * 60 * 1000 && inFlight > 0) {
-        return { label: 'STUCK (heartbeat ok, engine frozen)', color: 'var(--danger)', stuck: true };
+      // Grace window: if we've NEVER seen an engine event for this
+      // worker (activity_log empty / just Cleared / worker just started /
+      // drift-resync just repointed the batch), we can't legitimately
+      // call it stuck — the SW's 30s activity-flush alarm hasn't run yet.
+      // Instead show WARMING UP while heartbeats prove the SW is alive.
+      // Only escalate to STUCK once heartbeat has been fresh for >6 min
+      // AND we still have zero engine events — a genuine hang.
+      if (lastActTs === 0) {
+        if (inFlight > 0 && ago > 6 * 60 * 1000) {
+          return { label: 'STUCK (no engine activity ever)', color: 'var(--danger)', stuck: true };
+        }
+        if (inFlight > 0) {
+          return { label: 'warming up', color: 'var(--info)' };
+        }
+      } else {
+        const actAgo = Date.now() - lastActTs;
+        if (actAgo > 5 * 60 * 1000 && inFlight > 0) {
+          return { label: 'STUCK (heartbeat ok, engine frozen)', color: 'var(--danger)', stuck: true };
+        }
       }
     }
     if (!act) return { label: 'idle', color: 'var(--text-3)' };
@@ -3103,6 +3184,17 @@ function rowsToCsv(rows) {
 const analytics = {
   batchId: '',
   sku: '',
+  // Live-refresh loop — polls the currently selected batch every 4s so
+  // Analytics reflects new SKUs the moment their keyword rows land at the
+  // manager, instead of the user having to wait for the whole batch to
+  // finish and click Refresh. Started when the tab activates + a batch is
+  // loaded; stopped when the tab is left.
+  liveTimer: null,
+  liveIntervalMs: 4000,
+  liveInFlight: false,
+  // Fingerprint of the last-rendered dataset — used to skip the re-render
+  // when nothing changed, so filters/scroll/sort don't reset every 4s.
+  lastFingerprint: '',
   // Rows for the currently selected batch (fetched once, filtered client-side).
   allRows: [],
   // Rows for the currently selected SKU.
@@ -3858,6 +3950,45 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('');
   L.push('Every field you write is a lever to move that ranking. If a choice would produce prettier copy but lose to Amazon on relevance, choose the ranking one.');
   L.push('');
+  L.push('## RANKING RUBRIC — the 4-tier framework this prompt is scored against');
+  L.push('Use this as the mental model for every writing decision. Items marked **[ON-PAGE]** are your responsibility in the JSON you return. Items marked **[OFF-SCOPE]** cannot be delivered by this single Shopify update and are handled by separate systems — do NOT waste output tokens on them.');
+  L.push('');
+  L.push('### Tier 1 — Highest impact');
+  L.push('- **[ON-PAGE]** Unique product copy — never copy manufacturer / Amazon / competitor text verbatim. Every sentence rewritten from the keyword research below.');
+  L.push('- **[ON-PAGE, CONDITIONAL]** Genuine reviews — emit `AggregateRating` inside Product JSON-LD **only if** review data is supplied below. Never fabricate ratings or review counts.');
+  L.push('- **[ON-PAGE]** Product FAQ answering real buyer questions — pulled from the question-shaped queries in the research pool.');
+  L.push('- **[ON-PAGE]** Fast page speed — keep `body_html` lean (see HARD CONSTRAINTS: no base64 images, no external assets, ≤ 40 KB payload).');
+  L.push('- **[ON-PAGE]** Complete Product schema — `name`, `description`, `sku`, `brand`, `image`, `offers` (with `price`, `priceCurrency: INR`, `availability`, `url`, `priceValidUntil`), `gtin` if research data has a barcode, `aggregateRating` conditional on real reviews.');
+  L.push('- **[OFF-SCOPE]** Backlinks — outreach / PR / HARO track. Not this prompt.');
+  L.push('- **[ON-PAGE]** Optimized title + meta description — see playbook items 1, 3, 4.');
+  L.push('- **[OFF-SCOPE]** Original product images / video — media pipeline. Reference existing image URLs in schema; do not invent new ones.');
+  L.push('');
+  L.push('### Tier 2 — Very important');
+  L.push('- **[ON-PAGE]** Buying guide — the `<h2>` "Buying guide" block inside body_html captures "best X for Y" queries directly.');
+  L.push('- **[ON-PAGE]** Comparison — the `<h2>` "How it compares" table compares this product against its OWN variants and neutral category alternatives (concentration, size, use frequency, price band). Do NOT name competitor brands in prose.');
+  L.push('- **[ON-PAGE]** Ingredient / key-actives explanations — dedicated `<h3>` per active ingredient with what it does, at what strength.');
+  L.push('- **[ON-PAGE]** Internal linking — the `<h2>` "Related on dropy.in" block must link to `/collections/<category>`, `/collections/<brand>`, `/collections/<use-case>`, and `/collections/<ingredient>` (e.g. `/collections/benzoyl-peroxide-products`). Anchor text = keyword-rich, not "click here".');
+  L.push('- **[OFF-SCOPE]** Standalone buying guides / comparison articles as separate blog pages — content pipeline track.');
+  L.push('');
+  L.push('### Tier 3 — Often overlooked');
+  L.push('- **[ON-PAGE]** Medical references — cite AAD / DermNet NZ / PubMed by name when discussing ingredients or claims. Link only to `dermnetnz.org`, `aad.org`, `pubmed.ncbi.nlm.nih.gov` search URLs (`https://dermnetnz.org/search?q=<term>` is always valid) — never invent article paths.');
+  L.push('- **[ON-PAGE]** Usage instructions — how to use, frequency, side effects, storage. All four required.');
+  L.push('- **[ON-PAGE]** People-Also-Ask FAQ — 6-10 FAQ entries using the question-shaped queries from the research verbatim.');
+  L.push('- **[OFF-SCOPE]** Video content — media pipeline. If the current product data has a video URL, reference it in schema; otherwise skip.');
+  L.push('- **[ON-PAGE, CONDITIONAL]** UGC photos — reference existing image URLs from research. Do not invent.');
+  L.push('- **[ON-PAGE]** Rich snippet triggers — Product + FAQPage + HowTo schemas, plus AggregateRating when real, plus `offers` for price+availability rich results.');
+  L.push('- **[ON-PAGE]** Freshness — include a `<time datetime="…">` "Last updated" line + `dateModified` in Product schema.');
+  L.push('');
+  L.push('### Tier 4 — Advanced');
+  L.push('- **[OFF-SCOPE]** Topical authority (dozens of category blog posts) — content pipeline track.');
+  L.push('- **[OFF-SCOPE]** Brand authority (About page, editorial policy, expert-review process) — global site pages, not this product.');
+  L.push('- **[OFF-SCOPE]** Core Web Vitals (LCP / INP / CLS) — theme optimization, not per-product. Your job is to not make it worse via bloat / external assets.');
+  L.push('- **[ON-PAGE, CONDITIONAL]** Canonical URL — if a canonical field is in the allowlist below, emit it as the clean product URL (no query parameters).');
+  L.push('- **[ON-PAGE]** Long-tail optimization — target the top-50 keywords BELOW verbatim; each becomes a section heading, a FAQ, an ingredient explanation, or a buying-guide scenario. Do not just rank for the brand token.');
+  L.push('- **[ON-PAGE]** CTR — meta title + meta description are your CTR levers. Include a benefit + a trust signal + a CTA.');
+  L.push('- **[ON-PAGE]** Bounce-rate reduction — above-the-fold clarity (opening `<p>` + featured-snippet block), then FAQ + comparison + related products so users have somewhere to go on-page.');
+  L.push('- **[ON-PAGE]** E-E-A-T — link to `/policies/shipping-policy`, `/policies/refund-policy`, `/pages/contact`, `/pages/about-us` (Shopify defaults). Mention COD, GST invoice, secure checkout, customer service email in Shipping & returns.');
+  L.push('');
   L.push('## COMPETITIVE LANDSCAPE (who we\'re beating)');
   L.push('Below are the domains that appeared MOST OFTEN in Google SERPs across our keyword research.');
   L.push('These are the pages our copy has to displace.');
@@ -3886,16 +4017,21 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('2. **Handle** — kebab-case slug MUST contain the primary keyword. If the current handle is generic (e.g. `product-1234`), replace it. If it already contains the primary keyword, KEEP IT (changing loses backlinks + existing SEO).');
   L.push('3. **Meta title** — 55-60 chars. Different phrasing than title. Include the #1 buying-intent keyword + one benefit hook + `| dropy.in` at the end for brand-trust CTR.');
   L.push('4. **Meta description** — 150-160 chars. Include primary keyword in first 60 chars. Include a CTA verb ("Shop", "Order", "Get"). Include a trust signal ("Pan-India delivery" / "COD available" / "Free shipping"). Never truncated — count chars.');
-  L.push('5. **Body HTML** — 800-1500 words, structured for scannability AND for Google. Required sections in this order:');
+  L.push('5. **Body HTML** — 1200-2000 words, structured for scannability AND for Google. Required sections IN THIS ORDER:');
   L.push('   - `<p>` opening — 2-3 sentences, primary keyword in the first sentence, benefit in the second. This is the ranking anchor.');
   L.push('   - `<h2>` FEATURED-SNIPPET TARGET — 40-60 word direct answer to the highest-volume question-shaped query.');
   L.push('   - `<h2>` Why it works — bullet list of 4-6 benefits, each with a **bold benefit** + supporting sentence.');
-  L.push('   - `<h2>` How to use — numbered `<ol>` with 3-5 steps. Google promotes this to a HowTo rich result if schema is present (include the JSON-LD, see below).');
-  L.push('   - `<h2>` Specifications / Ingredients — a `<table>` with 4-8 rows. Structured data helps rank.');
+  L.push('   - `<h2>` Ingredient / key-actives breakdown — for each key ingredient (or key spec, for non-cosmetic products), a `<h3>` with the ingredient name + one paragraph explaining what it does, at what strength, and what claims it supports. Cite dermatology sources by name in prose (AAD, DermNet NZ, PubMed) — link only to `dermnetnz.org`, `aad.org`, or `pubmed.ncbi.nlm.nih.gov` (do NOT invent URLs — use `https://dermnetnz.org/search?q=<term>` style search URLs which are always valid).');
+  L.push('   - `<h2>` How to use — numbered `<ol>` with 3-5 steps + a `<p>` for frequency, side effects, storage. Feeds the HowTo schema below.');
+  L.push('   - `<h2>` Specifications — a `<table>` with 4-8 rows (weight, dimensions, key claim, country of origin, etc). Structured data helps rank. Include `<td>` for any GTIN/UPC/EAN if the research data has it.');
+  L.push('   - `<h2>` How it compares — a `<table>` comparing THIS product against 2-3 NEUTRAL alternatives in the same category (e.g. "4% vs 10% strength", "creamy vs foaming", "size options"). Compare **objective features** (concentration, price band, pack size, use frequency) — NOT competitor brand names. This IS a comparison article for on-page purposes; keeps users on the page and signals topical depth.');
+  L.push('   - `<h2>` Buying guide — a `<h3>` "How to choose the right variant for your need" block with 3-5 short scenarios matching the buying-intent keywords from research. This is the mini-buying-guide that captures "best X for Y" queries directly on the PDP.');
   L.push('   - `<h2>` Who it\'s for — India-specific use cases (cold Delhi winter, Bengaluru AC skin, Mumbai humidity, Chennai heat). Rank on regional queries.');
-  L.push('   - `<h2>` FAQs — 5-8 `<details><summary>Q</summary>A</details>` blocks. Use the question-shaped queries below verbatim. Each answer 40-80 words.');
-  L.push('   - `<h2>` Shipping & returns — India-first: pan-India, COD, GST invoice, return policy. Trust signals.');
-  L.push('   - `<script type="application/ld+json">` block at the end with THREE schemas: `Product`, `FAQPage`, `HowTo`. Uses only fields you know for certain (no invented ratings/reviews).');
+  L.push('   - `<h2>` FAQs — 6-10 `<details><summary>Q</summary>A</details>` blocks. Use the question-shaped queries below verbatim (People-Also-Ask style), each answer 40-80 words. Include at least one "Can I use this every day?", one "How long does it take to work?", one price/availability question, one safety question, one usage-specifics question.');
+  L.push('   - `<h2>` Related on dropy.in — 3-6 `<a>` INTERNAL LINKS with keyword-rich anchor text. Target patterns (dropy uses standard Shopify URLs): `/collections/<category-slug>` for category (e.g. `/collections/acne-face-wash`), `/collections/<brand-slug>` for brand siblings, `/collections/<use-case-slug>` for concern (e.g. `/collections/body-acne`). Pick collections from the top themes below. Only invent slugs if they clearly match a research theme — a dead link is worse than no link.');
+  L.push('   - `<h2>` Shipping & returns — India-first: pan-India delivery, COD, GST invoice, return policy days, customer-support contact. Trust signals. Link to `/policies/shipping-policy`, `/policies/refund-policy`, `/pages/contact` (these paths exist on every Shopify store by default).');
+  L.push('   - `<p class="hint">` Last updated: `<time datetime="YYYY-MM-DD">Month YYYY</time>` — freshness signal. Use today\'s date.');
+  L.push('   - `<script type="application/ld+json">` block at the end. See SCHEMA REQUIREMENTS below — this must include richer Product schema than before.');
   L.push('6. **Tags** — 10-15 tags. Include: primary keyword, category, use-case terms, top 5 themes below. Drives on-site search + auto-collections.');
   L.push('7. **Product type** — the single most-searched category term (from the themes below).');
   L.push('8. **Vendor** — keep current unless clearly wrong. Amazon/brand ranking depends on brand consistency.');
@@ -3904,11 +4040,21 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('- **NEVER produce**: `price`, `weight`, `weight_unit`, `location`, `inventory_quantity`, `variants`, `images`, `sku`. The manager strips them server-side; wasted output tokens.');
   L.push('- **ONLY produce keys** from this allowlist: ' + allowlist.map(f => `\`${f}\``).join(', ') + '.');
   L.push('- **Return format**: reasoning paragraph, then ONE fenced ```json``` block. No other JSON. No commentary after.');
-  L.push('- **India-first**. Currency ₹. Pan-India context. Every trust signal India-specific.');
+  L.push('- **India-first**. Currency ₹ and `INR` in schema. Pan-India context. Every trust signal India-specific.');
   L.push('- **No invented claims** — do not add "clinically proven", "dermatologist tested", certifications, awards, specific test results unless they appear in the research data.');
-  L.push('- **No competitor names in copy** — no "unlike Amazon", "similar to X brand". Never.');
-  L.push('- **Schema.org JSON-LD is REQUIRED**. `Product` + `FAQPage` + `HowTo`. Skipping them costs rich-result opportunities.');
-  L.push('- **No `<script>` tags in `body_html` EXCEPT** the one `application/ld+json` schema block. No inline JS.');
+  L.push('- **No invented URLs** — dropy internal collection slugs must be plausible (kebab-case of a research theme). External references only to `dermnetnz.org/search?q=…`, `aad.org/search?q=…`, `pubmed.ncbi.nlm.nih.gov/?term=…` — always-valid search URLs. Do NOT invent article paths.');
+  L.push('- **No competitor brand names in copy** — no "unlike Amazon", "similar to X brand". Never. (Schema `brand` field is different — that\'s our own product\'s brand and is required.)');
+  L.push('- **Schema.org JSON-LD is REQUIRED** and MUST include ALL of these three types in a single `<script type="application/ld+json">` block containing an array of objects:');
+  L.push('  1. `Product` — with `name`, `description`, `sku` (echo from research context above), `brand` (as `{"@type":"Brand","name":"…"}` — use current vendor), `image` (from the READ-ONLY image URLs above; do NOT invent), `offers` (as `{"@type":"Offer","price":"…","priceCurrency":"INR","availability":"https://schema.org/InStock","url":"<product URL>","priceValidUntil":"<YYYY-12-31 of current year>"}` — use current price from variant data above; if multiple variants exist, use lowest), `mpn` if known, `gtin13`/`gtin14` if a barcode appears in the research context, `dateModified` = today, and `aggregateRating` **only if real review data is provided** (never fabricate).');
+  L.push('  2. `FAQPage` — one `mainEntity` per FAQ, each with `Question` name and `Answer` text (exact match to the FAQ block in body_html).');
+  L.push('  3. `HowTo` — with `name`, `step` array matching your How-to-use `<ol>`, plus `totalTime` in ISO-8601 (e.g. `PT2M`).');
+  L.push('- **Page-speed guardrails** (protects Core Web Vitals):');
+  L.push('  · `body_html` payload ≤ 40 KB (roughly ≤ 40,000 characters).');
+  L.push('  · No `<script>` tags EXCEPT the one `application/ld+json` schema block. No inline JS.');
+  L.push('  · No `<link rel="stylesheet">`, no `<style>` blocks over 500 chars, no `<iframe>`, no external `<link>` prefetch/preload.');
+  L.push('  · No `data:` base64 image URIs — every image is one of the READ-ONLY URLs above or omitted.');
+  L.push('  · No `@import` in any style. No `<video>` unless a real video URL is in the research context.');
+  L.push('  · Prefer semantic HTML over deeply-nested `<div>` chains — max 4 levels of nesting.');
   L.push('');
   L.push('## FIELD ALLOWLIST + IMPACT HIERARCHY');
   L.push('| Priority | Field | Impact | Why it matters |');
@@ -3984,18 +4130,37 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('}');
   L.push('```');
   L.push('');
-  L.push('### Sanity checklist BEFORE returning');
-  L.push('- [ ] `title` contains the primary keyword in the first 3 words.');
+  L.push('### Sanity checklist BEFORE returning — Tier 1-4 rubric self-check');
+  L.push('**Tier 1**');
+  L.push('- [ ] `title` contains the primary keyword in the first 3 words (Tier 1 · CTR + relevance).');
   L.push('- [ ] `handle` contains the primary keyword.');
-  L.push('- [ ] `metafields_global_title_tag` is 55-60 chars (count them).');
-  L.push('- [ ] `metafields_global_description_tag` is 150-160 chars (count them) and includes a CTA verb.');
-  L.push('- [ ] `body_html` has ≥ 800 words.');
-  L.push('- [ ] `body_html` has a featured-snippet block (40-60 words directly under the first `<h2>`).');
-  L.push('- [ ] `body_html` has 5-8 FAQ entries using `<details>` accordion.');
-  L.push('- [ ] `body_html` has a `<script type="application/ld+json">` block with Product + FAQPage + HowTo schemas.');
-  L.push('- [ ] `body_html` mentions India-specific trust signals (pan-India / COD / GST / regional).');
-  L.push('- [ ] `tags` has 10-15 entries.');
-  L.push('- [ ] Zero competitor brand names in the actual copy.');
+  L.push('- [ ] `metafields_global_title_tag` is 55-60 chars (count them). Includes a benefit + `| dropy.in`.');
+  L.push('- [ ] `metafields_global_description_tag` is 150-160 chars (count them), primary keyword in first 60 chars, includes a CTA verb + a trust signal.');
+  L.push('- [ ] `body_html` ≥ 1200 words. Zero copy-pasted sentences from research context; every sentence rewritten (Tier 1 · unique content).');
+  L.push('- [ ] `body_html` payload ≤ 40 KB (Tier 1 · page speed).');
+  L.push('- [ ] Product JSON-LD includes: name, description, sku, brand, image, offers {price, priceCurrency:INR, availability, url, priceValidUntil}, dateModified. GTIN if research data has one. AggregateRating ONLY if real review data provided.');
+  L.push('**Tier 2**');
+  L.push('- [ ] `<h2>` Ingredient / key-actives breakdown present with per-ingredient explanation.');
+  L.push('- [ ] `<h2>` How it compares table present (concentration / size / use frequency / price band — never competitor brand names).');
+  L.push('- [ ] `<h2>` Buying guide present with 3-5 scenario blocks matched to buying-intent keywords below.');
+  L.push('- [ ] `<h2>` Related on dropy.in has 3-6 internal `<a href="/collections/…">` links with keyword-rich anchor text.');
+  L.push('**Tier 3**');
+  L.push('- [ ] Usage instructions section covers how / frequency / side effects / storage — all four.');
+  L.push('- [ ] FAQPage schema present. 6-10 FAQ entries; each answer 40-80 words; uses question-shaped queries from research verbatim.');
+  L.push('- [ ] At least one dermatology-source citation (AAD / DermNet NZ / PubMed) if any medical claim is made; link is to a search URL only.');
+  L.push('- [ ] `<time datetime="…">` freshness line present. Product schema `dateModified` = today.');
+  L.push('**Tier 4**');
+  L.push('- [ ] Top 15 long-tail keywords from research each appear at least once in `body_html`, `tags`, or FAQ.');
+  L.push('- [ ] Body opens with clear above-the-fold answer to primary query (bounce-rate lever).');
+  L.push('- [ ] Shipping & returns section links to `/policies/shipping-policy`, `/policies/refund-policy`, `/pages/contact` (E-E-A-T).');
+  L.push('**Hard rules**');
+  L.push('- [ ] Zero competitor brand names in the actual `body_html` copy (schema `brand` for our own product is fine).');
+  L.push('- [ ] Zero fabricated ratings / reviews / certifications / awards.');
+  L.push('- [ ] Zero invented image URLs; only READ-ONLY URLs from context above.');
+  L.push('- [ ] Zero `<script>` tags in `body_html` except the ONE `application/ld+json` block.');
+  L.push('- [ ] Zero base64 `data:` URIs, zero `<iframe>`, zero external stylesheets.');
+  L.push('- [ ] `tags` has 10-15 entries drawn from top research themes.');
+  L.push('- [ ] Every non-schema field is a full rewrite; no copied sentences from current listing above.');
   L.push('');
   L.push('Begin. Ranking rationale first, then the single JSON block.');
   return L.join('\n');
@@ -4217,6 +4382,73 @@ $('anExportBtn').addEventListener('click', () => {
   URL.revokeObjectURL(a.href);
 });
 
+// Start the live-refresh loop for the Analytics tab. Polls every 4s;
+// only re-renders when the row set actually changed (checked via a cheap
+// row-count + max-id fingerprint) so filters, sort, scroll position, and
+// the selected SKU are preserved across ticks with no data churn.
+function startAnalyticsPolling() {
+  stopAnalyticsPolling();
+  if (!analytics.batchId) return;
+  analytics.liveTimer = setInterval(() => tickAnalyticsLive().catch(() => {}), analytics.liveIntervalMs);
+}
+function stopAnalyticsPolling() {
+  if (analytics.liveTimer) { clearInterval(analytics.liveTimer); analytics.liveTimer = null; }
+}
+async function tickAnalyticsLive() {
+  if (analytics.liveInFlight || !analytics.batchId) return;
+  analytics.liveInFlight = true;
+  try {
+    const [r, jr] = await Promise.all([
+      api.keywordsGet(analytics.batchId),
+      api.jobsPerProduct(analytics.batchId).catch(() => ({ rows: [] })),
+    ]);
+    const rows = r.rows || [];
+    // Fingerprint: row count + max keyword id + jobs-done count. If none
+    // changed, skip render (avoids resetting scroll / filters every tick).
+    const jobs = jr.rows || [];
+    const doneN = jobs.filter(j => j.status === 'done').length;
+    const maxId = rows.reduce((m, x) => Math.max(m, Number(x.id) || 0), 0);
+    const fp = `${rows.length}|${maxId}|${doneN}`;
+    if (fp === analytics.lastFingerprint) {
+      pulseAnalyticsLiveDot();
+      return;
+    }
+    analytics.lastFingerprint = fp;
+    _treeJobCache.set(analytics.batchId, jobs);
+    analytics.allRows = rows;
+    analytics.columnSet = new Set();
+    for (const row of rows) for (const k of Object.keys(row)) analytics.columnSet.add(k);
+    // Re-populate the SKU dropdown so newly-completed SKUs appear as
+    // options without waiting for a manual reload.
+    const bySku = new Map();
+    for (const row of rows) {
+      const key = row.sku || row.product_url || 'unknown';
+      if (!bySku.has(key)) bySku.set(key, { key, productName: row.product_name || '', rows: [] });
+      bySku.get(key).rows.push(row);
+    }
+    const skuList = Array.from(bySku.values()).sort((a, b) => b.rows.length - a.rows.length);
+    const skuSel = $('anSkuSelect');
+    if (skuSel) {
+      const cur = analytics.sku;
+      skuSel.innerHTML = `<option value="">— all SKUs in batch —</option>` + skuList.map(g =>
+        `<option value="${esc(g.key)}">${esc(g.key)} — ${g.rows.length} kw${g.productName ? ` · ${esc(g.productName)}` : ''}</option>`
+      ).join('');
+      if (cur && bySku.has(cur)) skuSel.value = cur;
+      else if (!cur && skuList[0]) { analytics.sku = skuList[0].key; skuSel.value = analytics.sku; }
+    }
+    const sh = $('anSkuHint'); if (sh) sh.textContent = `${skuList.length} SKU(s) in this batch`;
+    filterAndRenderAnalytics();
+    // Also refresh the sidebar tree so new SKUs light up as they finish.
+    await renderAnalyticsTree();
+    pulseAnalyticsLiveDot();
+  } finally { analytics.liveInFlight = false; }
+}
+function pulseAnalyticsLiveDot() {
+  const el = document.getElementById('anLiveDot');
+  if (!el) return;
+  el.classList.remove('pulse'); void el.offsetWidth; el.classList.add('pulse');
+}
+
 async function loadAnalyticsBatch(batchId) {
   const summary = $('anSummary');
   if (!batchId) {
@@ -4226,6 +4458,7 @@ async function loadAnalyticsBatch(batchId) {
     $('anTopChartCard').style.display = 'none';
     $('anTableCard').style.display = 'none';
     $('anExportBtn').disabled = true;
+    stopAnalyticsPolling();
     return;
   }
   summary.innerHTML = `<div class="empty">Loading batch data…</div>`;
@@ -4239,6 +4472,33 @@ async function loadAnalyticsBatch(batchId) {
     ]);
     _treeJobCache.set(batchId, jr.rows || []);
     analytics.allRows = r.rows || [];
+    // Empty-batch guard: when a batch has zero keyword rows, the downstream
+    // filterAndRenderAnalytics() shows the "empty" placeholder — but the
+    // placeholder text was still "Loading batch data…" from the setup
+    // above, so the tab looked hung forever. Rewrite the placeholder now
+    // and diagnose the LIKELY cause from the job list so the user gets a
+    // useful message instead of an infinite spinner.
+    if (analytics.allRows.length === 0) {
+      const jobs = jr.rows || [];
+      const doneJobs   = jobs.filter(j => j.status === 'done').length;
+      const failedJobs = jobs.filter(j => j.status === 'failed').length;
+      const pendingJobs= jobs.filter(j => j.status === 'pending' || j.status === 'claimed').length;
+      let diagnosis;
+      if (doneJobs > 0 && pendingJobs === 0 && failedJobs === 0) {
+        diagnosis = `${doneJobs} SKU(s) finished but produced <strong>zero keyword rows</strong>. Common causes: (1) KP session expired / KP FAILED for every seed, (2) all candidates rejected by the relevance filter, (3) worker pushed to an orphan batch — check <em>Config → orphan cleanup</em> and the Activity log for "orphan_batch" or "KP FAILED" lines.`;
+      } else if (pendingJobs > 0) {
+        diagnosis = `${pendingJobs} SKU(s) still in flight (pending/claimed). Keyword rows only land at the manager once a SKU completes and the worker's activity buffer flushes (~1-3s). Refresh in a moment.`;
+      } else if (failedJobs === jobs.length && jobs.length > 0) {
+        diagnosis = `All ${failedJobs} SKU(s) failed. Check the Dashboard's <em>Failed jobs</em> card for the reasons.`;
+      } else {
+        diagnosis = `No keyword rows for this batch yet. Confirm the worker is running and pointed at this batch id.`;
+      }
+      summary.innerHTML = `<div class="banner warn" style="margin: 8px 0;">
+        <strong>No keyword data yet for this batch.</strong><br>
+        ${diagnosis}<br>
+        <span style="color: var(--text-3); font-size: 11px;">Batch <code>${esc(batchId)}</code> · ${jobs.length} SKU(s) total · ${doneJobs} done · ${pendingJobs} in-flight · ${failedJobs} failed.</span>
+      </div>`;
+    }
     // Column set for the CSV export — union of keys across all rows.
     analytics.columnSet = new Set();
     for (const row of analytics.allRows) for (const k of Object.keys(row)) analytics.columnSet.add(k);
@@ -4270,6 +4530,10 @@ async function loadAnalyticsBatch(batchId) {
     return;
   }
   filterAndRenderAnalytics();
+  // Reset fingerprint so the first live tick doesn't skip render, then
+  // start the 4s live loop for this batch. Tab-switch stops it.
+  analytics.lastFingerprint = '';
+  startAnalyticsPolling();
 }
 
 // Global click delegation for cross-filter chips — one listener handles

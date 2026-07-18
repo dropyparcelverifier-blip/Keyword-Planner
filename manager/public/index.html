@@ -271,6 +271,7 @@
             <div class="card-head">
               <span class="card-icon">📦</span>
               <span class="card-title">Output uploaded to manager</span>
+              <span class="live-dot" id="outputLiveDot" title="Live — refreshes every 3s"></span>
               <span class="card-sub" id="outputStatsHeader">—</span>
             </div>
             <div class="card-body" style="max-height: 240px; overflow: auto;">
@@ -323,6 +324,7 @@
             <div class="card-head">
               <span class="card-icon">📜</span>
               <span class="card-title">Activity log</span>
+              <span class="live-dot" id="activityLiveDot" title="Live — refreshes every 3s"></span>
               <span class="card-sub" id="activityLogSub">latest 120 events</span>
               <select id="activityWorkerFilter" style="margin-left:auto; min-width: 140px; font-size: 11px; padding: 3px 6px;">
                 <option value="">All workers</option>
@@ -367,6 +369,7 @@
         <main class="an-pane" id="anPane">
           <div class="an-actionbar">
             <div class="an-actionbar-hint" id="anActionHint">Pick a batch to begin.</div>
+            <span class="live-dot" id="anLiveDot" title="Live — polls every 4s; new SKUs appear as they complete"></span>
             <span class="spacer" style="flex:1;"></span>
             <button class="small" id="anClaudeBtn" disabled title="Assemble a Claude prompt from this SKU's keyword research (title, subtitle, description, ingredients, how-to-use, FAQs, SEO, ad copy).">Claude brief</button>
             <button class="small" id="anShopifyBtn" disabled title="Fetch this SKU's current Shopify listing, merge with keyword research, generate a Claude prompt, then push Claude's structured JSON back to Shopify (price/weight/location stripped server-side).">🛍 Shopify update</button>
