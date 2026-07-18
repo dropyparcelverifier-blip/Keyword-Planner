@@ -96,6 +96,7 @@ export const api = {
   jobsBulkDelete:      (jobIds, force) => _fetch('/api/jobs/bulk-delete', { method: 'POST', body: { jobIds, force: !!force } }),
   jobsDoneEmpty:       (batchId)       => _fetch(`/api/jobs/done-empty${batchId ? `?batchId=${encodeURIComponent(batchId)}` : ''}`),
   jobsRequeueDoneEmpty:(batchId)       => _fetch('/api/jobs/requeue-done-empty', { method: 'POST', body: { batchId: batchId || null } }),
+  shopifyDebugLookup:  (sku)           => _fetch(`/api/shopify/debug-lookup?sku=${encodeURIComponent(sku)}`),
 };
 
 // Live keyword stats — mirrors the extension's dashboard fetchBatchKeywordStats.
