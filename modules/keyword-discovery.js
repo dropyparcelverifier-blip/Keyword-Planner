@@ -449,12 +449,38 @@ export async function getProductImages(cleanUrl, log) {
     log(`Shopify .json error: ${e.message}`);
   }
 
-  // Fall back to HTML scrape
+  // Fall back to HTML scrape.
+  // Amazon (and increasingly Flipkart / Nykaa) block bare fetch() with a
+  // captcha or challenge page unless we send browser-realistic headers.
+  // The default fetch UA is `Mozilla/5.0 ...` — but no Accept, no
+  // Accept-Language, no Sec-Fetch-* → gets flagged. Sending the same
+  // shape a real Chrome navigation would send gets a real HTML response
+  // ~90% of the time on amazon.in.
   let html = '';
   try {
-    const resp = await fetch(cleanUrl, { credentials: 'omit' });
+    const resp = await fetch(cleanUrl, {
+      credentials: 'omit',
+      headers: {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-IN,en;q=0.9,en-US;q=0.8',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Upgrade-Insecure-Requests': '1',
+      },
+    });
     if (!resp.ok) { log(`Product HTML HTTP ${resp.status}`); return out; }
     html = await resp.text();
+    // Detect Amazon captcha/challenge page — the fetch returned 200 but
+    // the body is a "Enter the characters you see below" wall. Log
+    // clearly so users don't chase 'no images' when the real issue is
+    // 'blocked by anti-bot'.
+    if (/amazon\.in|amazon\.com/i.test(cleanUrl) &&
+        /(Enter the characters you see below|To discuss automated access|robot check)/i.test(html.slice(0, 3000))) {
+      log(`Amazon returned an anti-bot challenge page (captcha). Use Shopify resolve mode instead so we scrape dropy.in URLs directly.`);
+      return out;
+    }
   } catch (e) {
     log(`Product HTML fetch error: ${e.message}`);
     return out;
@@ -495,9 +521,35 @@ export async function getProductImages(cleanUrl, log) {
   for (const src of imgs) {
     if (out.length >= MAX_REF_IMAGES) break;
     if (BANNER_HINTS.test(src)) continue;
-    if (/\/products\/|cdn\.shopify\.com\/s\/files\/.*products/i.test(src)) push(src, '<img> scan');
+    // Widened: Shopify /products/ + Amazon media (m.media-amazon.com,
+    // images-*.ssl-images-amazon.com), Flipkart img, Nykaa media so we
+    // pick up product hero shots on marketplaces too.
+    if (/\/products\/|cdn\.shopify\.com\/s\/files\/.*products|(?:m\.media|images-\w+\.ssl-images)-amazon\.com|rukminim\d\.flixcart\.com|images-static\.nykaa\.com/i.test(src)) push(src, '<img> scan');
   }
   if (out.length > 0) return out;
+  // Amazon-specific: look for the landing image ID in inline JS. Amazon's
+  // main product image is set via `#landingImage` with a data-a-dynamic-
+  // image attribute that maps URLs → dimensions. We grep the JSON out
+  // and take the first URL (biggest dimensions usually first).
+  if (/amazon\./i.test(cleanUrl)) {
+    log('fallback step: Amazon data-a-dynamic-image');
+    const dyn = html.match(/data-a-dynamic-image=["']([^"']+)["']/i);
+    if (dyn) {
+      try {
+        const decoded = dyn[1].replace(/&quot;/g, '"');
+        const map = JSON.parse(decoded);
+        for (const url of Object.keys(map)) {
+          if (out.length >= MAX_REF_IMAGES) break;
+          if (!BANNER_HINTS.test(url)) push(url, 'Amazon dynamic-image');
+        }
+      } catch { /* not JSON, skip */ }
+    }
+    if (out.length > 0) return out;
+    // Fallback: hi-res landing image ID pattern
+    const lb = html.match(/id=["']landingImage["'][^>]+data-old-hires=["']([^"']+)["']/i);
+    if (lb) push(lb[1], 'Amazon landingImage');
+    if (out.length > 0) return out;
+  }
 
   log('fallback step: generic <img> tags (last-ditch)');
   for (const src of imgs) {

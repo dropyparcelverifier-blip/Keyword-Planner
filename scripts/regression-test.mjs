@@ -1615,6 +1615,18 @@ async function run() {
     .replace(/<title>[^<]*<\/title>/g, '')           // strip real title in head
     .replace(/<\/?(?:html|head|body|iframe)[^>]*>/g, ''); // strip real structural
   assert(!dangerousInlineTags.test(htmlBodyOnly),   'ROBUST.13 no unescaped <title>/<script>/<style>/<iframe> in body text (bricks parser)');
+  // Amazon-URL rejection: worker + UI both warn about this failure mode.
+  assert(htmlFull.includes('id="skuResolveWarn"'),                     'AMZN.1 Amazon-mode warning banner in HTML');
+  assert(htmlFull.includes('Amazon URLs fail keyword discovery'),      'AMZN.2 warning names the failure mode');
+  assert(appFull.includes('_updateSkuResolveWarn'),                    'AMZN.3 warning show/hide handler');
+  assert(appFull.includes("sel.value = 'shopify'"),                    'AMZN.4 smart-default to shopify when configured');
+  const kdSrcAmzn = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+  assert(kdSrcAmzn.includes("'Accept-Language': 'en-IN"),              'AMZN.5 browser-realistic Accept-Language on product fetch');
+  assert(kdSrcAmzn.includes("'Sec-Fetch-Mode': 'navigate'"),           'AMZN.6 Sec-Fetch headers on product fetch');
+  assert(kdSrcAmzn.includes('Amazon returned an anti-bot challenge'),  'AMZN.7 Amazon captcha detection + clear log');
+  assert(kdSrcAmzn.includes('data-a-dynamic-image'),                   'AMZN.8 Amazon dynamic-image extraction');
+  assert(kdSrcAmzn.includes('landingImage'),                           'AMZN.9 Amazon landingImage extraction');
+  assert(kdSrcAmzn.includes('m\\.media'),                              'AMZN.10 <img> scan widened for Amazon CDN');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');
