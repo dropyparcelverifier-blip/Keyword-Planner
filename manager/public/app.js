@@ -823,6 +823,34 @@ function _skuUploadRecount() {
   // wired by preview result.
 }
 $('skuUploadText')?.addEventListener('input', _skuUploadRecount);
+// Warn hard when Amazon resolve mode is picked — Amazon URLs fail
+// both the image-scrape (captcha) and KP seed (rejected). Users need
+// dropy.in URLs, which come from Shopify resolve mode.
+function _updateSkuResolveWarn() {
+  const sel = $('skuUploadResolve');
+  const warn = $('skuResolveWarn');
+  if (!sel || !warn) return;
+  warn.style.display = sel.value === 'amazon' ? '' : 'none';
+}
+$('skuUploadResolve')?.addEventListener('change', _updateSkuResolveWarn);
+// Smart-default: when Shopify creds are configured, default to shopify.
+// Fires once on module load.
+(async () => {
+  const sel = $('skuUploadResolve');
+  if (!sel) return;
+  try {
+    const cfg = await api.configGet();
+    const shop = cfg.config?.shopify || {};
+    if (shop.shopDomain && shop.adminToken) {
+      sel.value = 'shopify';
+    } else {
+      // No Shopify creds — try 'both' so if user later configures Shopify
+      // they get resolution; today falls back to Amazon.
+      sel.value = 'both';
+    }
+    _updateSkuResolveWarn();
+  } catch {}
+})();
 // Textarea can also accept a .txt file drop directly.
 function _acceptSkuFile(file) {
   if (!file) return;

@@ -152,12 +152,21 @@
                 </label>
                 <label class="field">
                   <span class="lbl">Resolve SKU → URL via</span>
-                  <select id="skuUploadResolve" style="max-width: 480px;">
-                    <option value="amazon">Amazon.in — build <code>https://www.amazon.in/dp/&lt;ASIN&gt;</code> (fast, no Shopify needed)</option>
-                    <option value="shopify">Shopify — look up handle by SKU (canonical dropy.in URL; requires Shopify configured)</option>
-                    <option value="both">Both — try Shopify first, fall back to Amazon.in</option>
+                  <select id="skuUploadResolve" style="max-width: 520px;">
+                    <option value="shopify">🛍 Shopify — real dropy.in URL by SKU  (RECOMMENDED — this is what you want)</option>
+                    <option value="both">🛍 Both — Shopify first, Amazon.in fallback</option>
+                    <option value="amazon">⚠ Amazon.in only — build amazon.in/dp/&lt;ASIN&gt;  (will fail keyword discovery)</option>
                   </select>
                 </label>
+                <div id="skuResolveWarn" class="banner warn" style="display:none; margin-top: 6px; font-size: 12px;">
+                  <strong>⚠ Amazon URLs fail keyword discovery.</strong>
+                  Amazon.in serves a captcha challenge to any automated fetch, so:
+                  <ul style="margin: 6px 0 0 20px; padding: 0;">
+                    <li>Product-image extraction returns empty → engine aborts with <code>no_product_image</code></li>
+                    <li>Google Keyword Planner rejects Amazon URLs as seeds → <code>Timed out waiting for enabled Get results button</code></li>
+                  </ul>
+                  Configure <strong>Config → Shopify integration</strong> and pick <strong>Shopify</strong> or <strong>Both</strong> so we resolve to real dropy.in URLs, where every worker path works and the keyword data actually drives your dropy.in ranking (which is what you want to rank anyway).
+                </div>
                 <div id="skuUploadPreview"></div>
                 <div class="row" style="margin-top: 10px;">
                   <button class="secondary" id="skuPreviewBtn">👁 Preview (dry run)</button>
@@ -188,8 +197,12 @@
               <span class="card-title">Tips</span>
             </div>
             <div class="card-body" style="font-size: 12px; color: var(--text-2); line-height: 1.6;">
-              <div style="margin-bottom: 10px;"><strong style="color: var(--text-1);">📊 Excel / CSV mode:</strong> column names are case-insensitive. <code>Product URL</code>, <code>url</code>, <code>product_url</code>, <code>link</code> all work.</div>
-              <div style="margin-bottom: 10px;"><strong style="color: var(--text-1);">📝 SKU list mode:</strong> one <code>Dropy-BXXXXXXXXX</code> per line (or raw <code>BXXXXXXXXX</code> ASIN). Comments start with <code>#</code>. <code>.txt</code> file drop works too.</div>
+              <div style="margin-bottom: 10px; padding: 8px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 4px;">
+                <strong style="color: var(--warn);">⚡ dropy.in is the target.</strong>
+                Workers scrape the URL for the product image (CLIP-matched against SERPs) and feed it to Keyword Planner as a seed. Amazon.in URLs fail BOTH: captcha on image fetch, and KP rejects them as seeds. <strong>Use Shopify resolve mode</strong> (or upload a spreadsheet with real dropy.in URLs) — this is how your dropy.in pages get the keyword data to out-rank Amazon.
+              </div>
+              <div style="margin-bottom: 10px;"><strong style="color: var(--text-1);">📊 Excel / CSV mode:</strong> column names are case-insensitive. <code>Product URL</code>, <code>url</code>, <code>product_url</code>, <code>link</code> all work. Best when you already have dropy.in URLs in a spreadsheet.</div>
+              <div style="margin-bottom: 10px;"><strong style="color: var(--text-1);">📝 SKU list mode:</strong> one <code>Dropy-BXXXXXXXXX</code> per line. Manager resolves each to a real dropy.in URL via Shopify. <code>.txt</code> file drop works too.</div>
               <div style="margin-bottom: 10px;"><strong style="color: var(--text-1);">Cross-batch dedup:</strong> a URL already pending/claimed/done in another batch is skipped automatically.</div>
               <div><strong style="color: var(--text-1);">Priority:</strong> integers 1 / 2 / 3 (1 = highest). Anything else defaults to 100 (lowest).</div>
             </div>
