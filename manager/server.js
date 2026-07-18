@@ -432,6 +432,8 @@ const Q = {
       mac_address=COALESCE(NULLIF(excluded.mac_address, ''), workers.mac_address),
       hostname=COALESCE(NULLIF(excluded.hostname, ''), workers.hostname)`),
   listWorkers: db.prepare(`SELECT worker_id, first_seen, last_seen, mac_address, hostname FROM workers ORDER BY last_seen DESC`),
+  deleteWorker: db.prepare(`DELETE FROM workers WHERE worker_id=?`),
+  deleteStaleWorkers: db.prepare(`DELETE FROM workers WHERE last_seen < ?`),
   getWorker:   db.prepare(`SELECT * FROM workers WHERE worker_id = ?`),
   // Batch display names — user-friendly labels ("Aquaphor Round 2") that
   // replace opaque timestamp IDs in every dropdown / list. Underlying
@@ -1465,6 +1467,22 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, mac: cleaned });
     }
     if (m === 'GET' && p === '/api/workers/list') return send(res, 200, { ok: true, workers: Q.listWorkers.all() });
+    // Ghost-worker cleanup — remove worker rows that haven't checked
+    // in for `olderThanMinutes`. Used when a Chrome reload spawns a new
+    // workerId and the OLD id is stuck in the fleet display.
+    if (m === 'POST' && p === '/api/workers/delete') {
+      const b = await readJson(req);
+      const wId = String(b.workerId || '').trim();
+      if (!wId) return send(res, 400, { ok: false, error: 'workerId required' });
+      const info = Q.deleteWorker.run(wId);
+      return send(res, 200, { ok: true, deleted: info.changes });
+    }
+    if (m === 'POST' && p === '/api/workers/prune-stale') {
+      const b = await readJson(req);
+      const cutoff = now() - Math.max(60, Number(b.olderThanMinutes) || 240) * 60 * 1000;
+      const info = Q.deleteStaleWorkers.run(cutoff);
+      return send(res, 200, { ok: true, deleted: info.changes });
+    }
     // Quiesce broadcast — send 'pause' to every worker. Returns the current
     // in-flight snapshot so the UI can poll until it hits zero. Doesn't
     // reset or delete anything — just tells workers to stop claiming.

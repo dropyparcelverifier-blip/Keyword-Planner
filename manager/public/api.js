@@ -97,6 +97,8 @@ export const api = {
   jobsDoneEmpty:       (batchId)       => _fetch(`/api/jobs/done-empty${batchId ? `?batchId=${encodeURIComponent(batchId)}` : ''}`),
   jobsRequeueDoneEmpty:(batchId)       => _fetch('/api/jobs/requeue-done-empty', { method: 'POST', body: { batchId: batchId || null } }),
   shopifyDebugLookup:  (sku)           => _fetch(`/api/shopify/debug-lookup?sku=${encodeURIComponent(sku)}`),
+  deleteWorker:        (workerId)      => _fetch('/api/workers/delete', { method: 'POST', body: { workerId } }),
+  pruneStaleWorkers:   (olderThanMinutes) => _fetch('/api/workers/prune-stale', { method: 'POST', body: { olderThanMinutes: olderThanMinutes || 240 } }),
 };
 
 // Live keyword stats — mirrors the extension's dashboard fetchBatchKeywordStats.

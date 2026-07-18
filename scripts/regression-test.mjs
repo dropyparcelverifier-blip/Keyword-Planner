@@ -1697,6 +1697,11 @@ async function run() {
   // Worker status: distinguish long-offline (probably powered off) from
   // brief-offline (Chrome closed / network blip).
   assert(appFull.includes("`SHUT DOWN ("),                             'STATUS.1 SHUT DOWN state for >4h no heartbeat');
+  // Ghost-worker cleanup — auto-clear stale activity filter + remove workers.
+  assert(appFull.includes("Filter auto-cleared"),                      'GHOST.1 stale activity-log filter auto-cleared');
+  assert(appFull.includes('data-remove-worker'),                       'GHOST.2 remove-worker button in fleet row');
+  assert(srvFull.includes("'/api/workers/delete'"),                    'GHOST.3 delete-worker endpoint');
+  assert(srvFull.includes("'/api/workers/prune-stale'"),               'GHOST.4 prune-stale endpoint');
   assert(appFull.includes('4 * 3600 * 1000'),                          'STATUS.2 4h threshold for shut-down detection');
   assert(appFull.includes("'never seen'"),                             'STATUS.3 never-seen state for workers with hb=0');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
