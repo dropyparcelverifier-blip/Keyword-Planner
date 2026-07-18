@@ -951,7 +951,15 @@ $('skuPreviewBtn')?.addEventListener('click', async () => {
       <div class="banner ${r.resolved > 0 ? 'ok' : 'warn'}" style="margin: var(--space-3) 0;">
         <strong>${r.resolved}</strong> resolved · <strong>${r.unresolved || 0}</strong> unresolved · <strong>${r.badFormat || 0}</strong> bad format
         ${r.badFormat > 0 ? ` · samples: ${(r.badFormatSamples || []).slice(0, 3).map(s => `<code>${esc(s)}</code>`).join(' ')}` : ''}
-        ${shopifyMissing ? ' · <strong>Shopify not configured</strong> — configure in Config → Shopify integration, or switch to Amazon.in resolve.' : ''}
+        ${shopifyMissing ? `
+        <div style="margin-top: 10px; padding: 10px 12px; background: var(--danger-soft); border: 1px solid var(--danger); border-radius: var(--radius-sm);">
+          <div style="color: var(--danger); font-weight: 700; margin-bottom: 6px;">⚠ Shopify not configured — that's why all ${r.unresolved} resolved to "unresolved"</div>
+          <div class="hint">Shopify credentials are needed so the manager can look up each SKU's real dropy.in URL + title + tags + vendor. Two clicks to fix:</div>
+          <div class="row" style="margin-top: 8px; gap: 8px;">
+            <button id="skuGotoShopify" style="background: var(--accent); color: #0a0a15; font-weight: 700;">⚙ Configure Shopify now →</button>
+            <button class="secondary" id="skuUseAmazon">Use Amazon.in instead (workers may fail)</button>
+          </div>
+        </div>` : ''}
         <div class="hint" style="margin-top: 6px;">When resolved via Shopify: <strong>title</strong>, <strong>handles</strong> (URL slug + tags + product type), and <strong>brand</strong> (vendor) auto-fill from your dropy.in listing — same columns Excel/CSV uploads carry.</div>
       </div>
       <div class="tbl-wrap" style="max-height: 340px; overflow-y: auto;">
@@ -963,6 +971,29 @@ $('skuPreviewBtn')?.addEventListener('click', async () => {
       </div>`;
     btn.disabled = r.resolved === 0;
     btn.textContent = r.resolved > 0 ? `Import → queue (${r.resolved} SKU${r.resolved === 1 ? '' : 's'})` : 'Import → queue';
+    // Wire the two rescue buttons in the 'Shopify not configured' box.
+    box.querySelector('#skuGotoShopify')?.addEventListener('click', () => {
+      // Jump straight to Config → Shopify integration + pre-fill dropy.in
+      // as the default domain if the field is empty.
+      _switchTab(document.querySelector('.tab[data-tab="config"]'));
+      setTimeout(() => {
+        const domain = $('cfgShopifyDomain');
+        if (domain) {
+          if (!domain.value) domain.value = 'dropy.in';
+          // Expand the collapsible Shopify card if collapsed, then focus.
+          domain.closest('.card')?.classList.remove('collapsed');
+          domain.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          domain.focus();
+          domain.select();
+        }
+      }, 200);
+    });
+    box.querySelector('#skuUseAmazon')?.addEventListener('click', () => {
+      const sel = $('skuUploadResolve');
+      if (sel) { sel.value = 'amazon'; _updateSkuResolveWarn?.(); }
+      // Re-run the preview automatically so the user sees results immediately.
+      $('skuPreviewBtn')?.click();
+    });
   } catch (e) {
     box.innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
   }
@@ -2355,9 +2386,11 @@ async function loadConfigForm() {
     if (cfg.match_profile) $('cfgMatchProfile').value = cfg.match_profile;
     if (Number.isFinite(cfg.chunk_size)) $('cfgChunkSize').value = cfg.chunk_size;
     if (Number.isFinite(cfg.clip_threshold)) $('cfgClipThreshold').value = cfg.clip_threshold;
-    // Shopify creds — token echoed back masked, domain visible.
+    // Shopify creds — token echoed back masked, domain visible. Default
+    // shop domain to 'dropy.in' when nothing is stored yet, so users only
+    // need to paste the admin API token to configure.
     const sh = cfg.shopify || {};
-    if ($('cfgShopifyDomain')) $('cfgShopifyDomain').value = sh.shopDomain || '';
+    if ($('cfgShopifyDomain')) $('cfgShopifyDomain').value = sh.shopDomain || 'dropy.in';
     if ($('cfgShopifyToken'))  $('cfgShopifyToken').value  = sh.adminToken ? '•'.repeat(Math.min(sh.adminToken.length, 32)) : '';
     if ($('cfgShopifyApiVersion')) $('cfgShopifyApiVersion').value = sh.apiVersion || '';
     const statusSub = $('shopifyStatusSub');
