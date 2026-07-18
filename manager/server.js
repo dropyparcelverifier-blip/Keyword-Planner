@@ -939,11 +939,33 @@ const server = http.createServer(async (req, res) => {
       const apiVer = shop.apiVersion || '2024-10';
       const shopifyConfigured = !!(shop.shopDomain && shop.adminToken);
       const shopifyDomain = shop.shopDomain ? String(shop.shopDomain).replace(/^https?:\/\//, '').replace(/\/+$/, '') : null;
+      // Look up the STOREFRONT host (the public dropy.in domain, NOT
+      // the *.myshopify.com admin host). Shopify's /admin/api/shop.json
+      // returns .primary_domain.host which is what customers browse.
+      // Cache for the duration of this request only.
+      let storefrontHost = shop.storefrontDomain
+        ? String(shop.storefrontDomain).replace(/^https?:\/\//, '').replace(/\/+$/, '')
+        : null;
+      if (!storefrontHost && shopifyConfigured) {
+        try {
+          const sr = await shopifyRequest({
+            shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+            method: 'GET', apiPath: `/admin/api/${apiVer}/shop.json?fields=primary_domain`,
+          });
+          if (sr.ok && sr.data?.shop?.primary_domain?.host) {
+            storefrontHost = sr.data.shop.primary_domain.host;
+          }
+        } catch { /* fall back to shopifyDomain below */ }
+      }
+      // Fall back to the admin domain if we couldn't get the primary_domain.
+      const publicHost = storefrontHost || shopifyDomain;
       const resolved = [];
       for (const [asin, entry] of parsed) {
         let url = null, source = null, note = null;
         const wantShopify = (resolveMode === 'shopify' || resolveMode === 'both') && shopifyConfigured;
+        let shopifyTried = false;
         if (wantShopify) {
+          shopifyTried = true;
           try {
             // Shopify variant lookup by SKU — try both the literal SKU
             // ('Dropy-B00...') and just the ASIN, since customers may
@@ -967,7 +989,10 @@ const server = http.createServer(async (req, res) => {
                 });
                 if (pr.ok && pr.data?.product?.handle) {
                   const p = pr.data.product;
-                  url = `https://${shopifyDomain}/products/${p.handle}`;
+                  // Use the PUBLIC storefront host (dropy.in) not the
+                  // admin *.myshopify.com host — that's the URL the
+                  // engine will actually scrape and rank.
+                  url = `https://${publicHost}/products/${p.handle}`;
                   source = 'shopify';
                   entry.product_name = p.title || null;
                   // handles = product handle + tags + product_type combined
@@ -984,7 +1009,11 @@ const server = http.createServer(async (req, res) => {
                 }
               }
             }
-          } catch (e) { note = `shopify lookup: ${e.message}`; }
+          } catch (e) { note = `shopify lookup error: ${e.message}`; }
+        }
+        // If Shopify was tried but didn't match, log WHY so the user sees it.
+        if (shopifyTried && !url && !note) {
+          note = `no Shopify variant found for SKU '${entry.sku}' (also tried '${entry.asin}' and 'Dropy-${entry.asin}')`;
         }
         if (!url && (resolveMode === 'amazon' || resolveMode === 'both')) {
           url = `https://www.amazon.in/dp/${entry.asin}`;
