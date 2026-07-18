@@ -921,6 +921,51 @@ async function run() {
   assert(!impact.data.allowlist.includes('weight'),   '20s.10 allowlist excludes weight');
   assert(!impact.data.allowlist.includes('variants'), '20s.11 allowlist excludes variants');
 
+  // ===== Bulk SKU import — Dropy-<ASIN> → amazon.in/dp/<ASIN> =====
+  const bulkBatch = 'bulk-import-test';
+  // Dry-run first — should NOT insert.
+  const dryR = await req('POST', '/api/jobs/upload-by-sku', {
+    batchId: bulkBatch, resolve: 'amazon', dryRun: true,
+    skus: [
+      'Dropy-B002OTT3US', 'Dropy-B07KYD25MF', '# comment',
+      '', 'BADFORMAT', 'B00X6ZNWG0', 'dropy-b00cefzkzy',
+    ],
+  });
+  assertEq(dryR.status, 200, '20b.1 upload-by-sku dry-run ok');
+  assertEq(dryR.data.dryRun, true, '20b.2 dry-run flag set');
+  assertEq(dryR.data.parsed, 4, '20b.3 parsed 4 valid SKUs (dedupes case-insensitively)');
+  assertEq(dryR.data.resolved, 4, '20b.4 all 4 resolved to amazon.in URLs');
+  assertEq(dryR.data.badFormat, 1, '20b.5 BADFORMAT flagged');
+  assert(dryR.data.preview.some(p => p.url === 'https://www.amazon.in/dp/B002OTT3US'), '20b.6 amazon URL correctly built');
+  // Verify nothing inserted by dry-run.
+  const sumAfterDry = await req('GET', '/api/jobs/summary');
+  assert(!(sumAfterDry.data.batches || []).find(b => b.batch_id === bulkBatch), '20b.7 dry-run inserted zero rows');
+  // Real insert.
+  const realR = await req('POST', '/api/jobs/upload-by-sku', {
+    batchId: bulkBatch, resolve: 'amazon', dryRun: false,
+    skus: ['Dropy-B002OTT3US', 'Dropy-B07KYD25MF', 'Dropy-B0B3FBK9KW'],
+  });
+  assertEq(realR.status, 200, '20b.8 upload-by-sku real ok');
+  assertEq(realR.data.inserted, 3, '20b.9 inserted 3 rows');
+  const listR = await req('GET', `/api/jobs/list?batchId=${bulkBatch}`);
+  assertEq(listR.data.rows.length, 3, '20b.10 3 rows visible in jobs list');
+  assert(listR.data.rows.every(r => r.product_url.startsWith('https://www.amazon.in/dp/')), '20b.11 all rows have amazon URLs');
+
+  // ===== Bulk update / delete =====
+  const jobIds = listR.data.rows.map(r => r.id);
+  const bulkUp = await req('POST', '/api/jobs/bulk-update', { jobIds, patch: { priority: 999 } });
+  assertEq(bulkUp.data.updated, 3, '20b.12 bulk-update set priority on all 3');
+  const listR2 = await req('GET', `/api/jobs/list?batchId=${bulkBatch}`);
+  assert(listR2.data.rows.every(r => r.priority === 999), '20b.13 priority actually persisted');
+  // Bulk-update require patch.
+  const bulkUpBad = await req('POST', '/api/jobs/bulk-update', { jobIds, patch: {} });
+  assertEq(bulkUpBad.status, 400, '20b.14 bulk-update refuses empty patch');
+  // Bulk delete.
+  const bulkDel = await req('POST', '/api/jobs/bulk-delete', { jobIds });
+  assertEq(bulkDel.data.deleted, 3, '20b.15 bulk-delete removed all 3');
+  const listR3 = await req('GET', `/api/jobs/list?batchId=${bulkBatch}`);
+  assertEq(listR3.data.rows.length, 0, '20b.16 jobs list empty after bulk delete');
+
   // ===== 20l-late. RESET BROADCAST + WORKERS-ROSTER WIPE =====
   // The 20e reset above ran; verify the side-effects that fix the
   // 'workers still heartbeat phantom jobs after reset' bug.
@@ -1502,6 +1547,22 @@ async function run() {
   assert(srvFull.includes('stripToShopifyAllowlist'),                  'SHOP.10 allowlist filter fn');
   assert(apiCrud.includes('shopifyGetProduct:'),                       'SHOP.11 client shopifyGetProduct wrapper');
   assert(apiCrud.includes('shopifyUpdateProduct:'),                    'SHOP.12 client shopifyUpdateProduct wrapper');
+  // Bulk SKU import + bulk CRUD
+  assert(srvFull.includes("'/api/jobs/upload-by-sku'"),                'BULK.1 upload-by-sku endpoint');
+  assert(srvFull.includes("'/api/jobs/bulk-update'"),                  'BULK.2 bulk-update endpoint');
+  assert(srvFull.includes("'/api/jobs/bulk-delete'"),                  'BULK.3 bulk-delete endpoint');
+  assert(apiCrud.includes('jobsUploadBySku:'),                         'BULK.4 client jobsUploadBySku wrapper');
+  assert(apiCrud.includes('jobsBulkUpdate:'),                          'BULK.5 client jobsBulkUpdate wrapper');
+  assert(apiCrud.includes('jobsBulkDelete:'),                          'BULK.6 client jobsBulkDelete wrapper');
+  assert(appFull.includes('function renderQmBulkImportPane'),          'BULK.7 bulk-import UI defined');
+  assert(appFull.includes('qmSelectAll'),                              'BULK.8 select-all checkbox');
+  assert(appFull.includes('qmBulkDelete'),                             'BULK.9 bulk delete button');
+  assert(appFull.includes('qmBulkReset'),                              'BULK.10 bulk reset button');
+  assert(appFull.includes('qmBulkPrio'),                               'BULK.11 bulk priority button');
+  assert(appFull.includes("_qmState.statusFilter"),                    'BULK.12 status filter state persists across refresh');
+  assert(appFull.includes("_qmState.search"),                          'BULK.13 search state persists across refresh');
+  assert(cssFull.includes('.qm-bulkbar'),                              'BULK.14 bulk toolbar styled');
+  assert(cssFull.includes('.qm-filter-btn'),                           'BULK.15 filter chip styled');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');

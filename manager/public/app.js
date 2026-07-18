@@ -1061,6 +1061,14 @@ async function openQueueManager(batchId) {
   }, 5000);
 }
 
+// Queue-manager UI state — persists across the 5s auto-refresh so the
+// user's search + status filter + selected checkboxes survive rebinds.
+const _qmState = {
+  search: '',
+  statusFilter: 'all',
+  selected: new Set(),
+  paneOpen: null,    // 'add' | 'bulkImport' | null
+};
 async function refreshQueueManager(batchId) {
   const body = $('queueManageBody');
   if (!body) return;
@@ -1071,6 +1079,20 @@ async function refreshQueueManager(batchId) {
   }
   const stat = { pending: 0, claimed: 0, done: 0, failed: 0 };
   for (const r of rows) stat[r.status] = (stat[r.status] || 0) + 1;
+  // Apply client-side filters. Search hits SKU + product name + URL.
+  const q = (_qmState.search || '').trim().toLowerCase();
+  const filtered = rows.filter(r => {
+    if (_qmState.statusFilter !== 'all' && r.status !== _qmState.statusFilter) return false;
+    if (!q) return true;
+    return (r.sku && r.sku.toLowerCase().includes(q))
+        || (r.product_name && r.product_name.toLowerCase().includes(q))
+        || (r.product_url && r.product_url.toLowerCase().includes(q));
+  });
+  // Prune _qmState.selected to only IDs still in the filtered set (so
+  // 'bulk delete selected' can't accidentally hit a hidden row).
+  const visibleIds = new Set(filtered.map(r => r.id));
+  for (const id of _qmState.selected) if (!visibleIds.has(id)) _qmState.selected.delete(id);
+  const selCount = _qmState.selected.size;
   const statusColor = (s) => s === 'done' ? 'var(--success)'
                             : s === 'failed' ? 'var(--danger)'
                             : s === 'claimed' ? 'var(--accent)'
@@ -1078,18 +1100,31 @@ async function refreshQueueManager(batchId) {
   body.innerHTML = `
     <div class="qm-strip">
       <span><strong>${rows.length}</strong> total</span>
-      <span style="color:var(--text-2);"><strong>${stat.pending || 0}</strong> pending</span>
-      <span style="color:var(--accent);"><strong>${stat.claimed || 0}</strong> claimed</span>
-      <span style="color:var(--success);"><strong>${stat.done || 0}</strong> done</span>
-      <span style="color:var(--danger);"><strong>${stat.failed || 0}</strong> failed</span>
+      <button class="qm-filter-btn ${_qmState.statusFilter === 'pending' ? 'active' : ''}" data-status="pending" style="color:var(--text-2);"><strong>${stat.pending || 0}</strong> pending</button>
+      <button class="qm-filter-btn ${_qmState.statusFilter === 'claimed' ? 'active' : ''}" data-status="claimed" style="color:var(--accent);"><strong>${stat.claimed || 0}</strong> claimed</button>
+      <button class="qm-filter-btn ${_qmState.statusFilter === 'done' ? 'active' : ''}" data-status="done" style="color:var(--success);"><strong>${stat.done || 0}</strong> done</button>
+      <button class="qm-filter-btn ${_qmState.statusFilter === 'failed' ? 'active' : ''}" data-status="failed" style="color:var(--danger);"><strong>${stat.failed || 0}</strong> failed</button>
+      ${_qmState.statusFilter !== 'all' ? `<button class="qm-filter-btn" data-status="all" title="Clear filter" style="color:var(--text-3);">× clear</button>` : ''}
       <span class="spacer" style="flex:1;"></span>
-      <button class="small secondary" id="qmAddBtn">+ Add SKU</button>
+      <input type="search" id="qmSearch" placeholder="Search SKU / name / URL" value="${esc(_qmState.search)}" style="min-width: 200px; padding: 4px 8px; font-size: 11px;" />
+      <button class="small secondary" id="qmBulkImportBtn" title="Paste a list of SKUs (Dropy-BXXXXXXXXX, one per line) to add as jobs.">📋 Bulk import SKUs</button>
+      <button class="small secondary" id="qmAddBtn">+ Add one</button>
     </div>
-    <div id="qmAddForm" style="display:none; margin-bottom: var(--space-3);"></div>
-    <div class="tbl-wrap" style="max-height: 480px; overflow-y: auto;">
+    ${selCount > 0 ? `
+    <div class="qm-bulkbar">
+      <strong>${selCount}</strong> selected
+      <span class="spacer" style="flex:1;"></span>
+      <button class="small secondary" id="qmBulkReset" title="Reset selected jobs back to pending — releases their claims. Refuses claimed jobs without force.">↺ Reset selected</button>
+      <button class="small secondary" id="qmBulkPrio" title="Change priority for the selected jobs (higher = claimed first).">↑ Set priority</button>
+      <button class="small danger" id="qmBulkDelete" title="Delete selected jobs and their keyword rows. Refuses claimed jobs without force.">✕ Delete selected</button>
+      <button class="small secondary" id="qmBulkClear">Clear selection</button>
+    </div>` : ''}
+    <div id="qmSubPane" style="margin-bottom: var(--space-3);"></div>
+    <div class="tbl-wrap" style="max-height: 460px; overflow-y: auto;">
       <table class="tbl compact">
         <thead>
           <tr>
+            <th style="width:30px;"><input type="checkbox" id="qmSelectAll" title="Select all visible" ${filtered.length > 0 && filtered.every(r => _qmState.selected.has(r.id)) ? 'checked' : ''} /></th>
             <th style="width:60px;">ID</th>
             <th style="width:70px;" class="num">Prio</th>
             <th>SKU</th>
@@ -1100,8 +1135,9 @@ async function refreshQueueManager(batchId) {
             <th style="width:180px;">Actions</th>
           </tr>
         </thead>
-        <tbody>${rows.map(r => `
-          <tr data-job-id="${r.id}">
+        <tbody>${filtered.length === 0 ? `<tr><td colspan="9" style="text-align:center; padding: 20px; color:var(--text-3);">No jobs match this filter.</td></tr>` : filtered.map(r => `
+          <tr data-job-id="${r.id}" class="${_qmState.selected.has(r.id) ? 'qm-row-sel' : ''}">
+            <td><input type="checkbox" class="qm-select" data-job-id="${r.id}" ${_qmState.selected.has(r.id) ? 'checked' : ''} /></td>
             <td class="mono" style="color:var(--text-3);">${r.id}</td>
             <td class="num"><input type="number" class="qm-prio" data-job-id="${r.id}" value="${r.priority}" min="0" max="9999" step="10" style="width: 60px; padding: 2px 4px; font-size: 11px;" /></td>
             <td class="mono">${esc(r.sku || '—')}</td>
@@ -1110,19 +1146,109 @@ async function refreshQueueManager(batchId) {
             <td><span class="chip" style="background:transparent; color:${statusColor(r.status)}; border:1px solid ${statusColor(r.status)};">${r.status}</span></td>
             <td class="mono" style="color:var(--text-2); font-size:10px;">${esc(r.claimed_by || '—')}</td>
             <td>
-              <button class="tiny secondary qm-reset" data-job-id="${r.id}" title="Reset to pending (re-queue). Warns if the job is already done.">↺ Reset</button>
-              <button class="tiny danger qm-delete" data-job-id="${r.id}" title="Delete this SKU from the queue. Refuses claimed jobs unless force is checked below.">✕ Delete</button>
+              <button class="tiny secondary qm-reset" data-job-id="${r.id}" title="Reset to pending (re-queue).">↺</button>
+              <button class="tiny danger qm-delete" data-job-id="${r.id}" title="Delete this SKU + its keyword rows.">✕</button>
             </td>
           </tr>`).join('')}
         </tbody>
       </table>
     </div>
     <div class="hint" style="margin-top: var(--space-2);">
-      Auto-refreshes every 5s. Priority edits save on blur or Enter.
-      Delete/Reset on a <strong>claimed</strong> job will prompt for force — use only if the worker is truly hung.
+      ${filtered.length} of ${rows.length} shown · Auto-refreshes every 5s · Priority edits save on blur/Enter · Bulk import accepts <code>Dropy-BXXXXXXXXX</code> or raw <code>BXXXXXXXXX</code> ASINs, one per line.
     </div>`;
 
-  // Wire priority edits — save on blur / Enter.
+  // Restore sub-pane if it was open before the refresh.
+  if (_qmState.paneOpen === 'add') renderQmAddPane(batchId);
+  else if (_qmState.paneOpen === 'bulkImport') renderQmBulkImportPane(batchId);
+
+  // ── Filter chips ──
+  body.querySelectorAll('.qm-filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _qmState.statusFilter = btn.dataset.status;
+      refreshQueueManager(batchId);
+    });
+  });
+  // ── Search — debounced 200ms; keep focus + caret position ──
+  const searchInp = body.querySelector('#qmSearch');
+  if (searchInp) {
+    if (_qmState.search) {
+      // Preserve caret at end of input after re-render.
+      const v = searchInp.value;
+      searchInp.setSelectionRange(v.length, v.length);
+      searchInp.focus();
+    }
+    let searchDebounce = null;
+    searchInp.addEventListener('input', () => {
+      clearTimeout(searchDebounce);
+      searchDebounce = setTimeout(() => {
+        _qmState.search = searchInp.value;
+        refreshQueueManager(batchId);
+      }, 200);
+    });
+  }
+  // ── Select-all + per-row checkboxes ──
+  body.querySelector('#qmSelectAll')?.addEventListener('change', (e) => {
+    if (e.target.checked) filtered.forEach(r => _qmState.selected.add(r.id));
+    else filtered.forEach(r => _qmState.selected.delete(r.id));
+    refreshQueueManager(batchId);
+  });
+  body.querySelectorAll('input.qm-select').forEach(cb => {
+    cb.addEventListener('change', (e) => {
+      const id = Number(cb.dataset.jobId);
+      if (e.target.checked) _qmState.selected.add(id);
+      else _qmState.selected.delete(id);
+      refreshQueueManager(batchId);
+    });
+  });
+  // ── Bulk actions ──
+  body.querySelector('#qmBulkClear')?.addEventListener('click', () => {
+    _qmState.selected.clear(); refreshQueueManager(batchId);
+  });
+  body.querySelector('#qmBulkReset')?.addEventListener('click', async () => {
+    const ids = [..._qmState.selected];
+    if (!confirm(`Reset ${ids.length} selected job(s) back to pending? Their claims will be released.`)) return;
+    try {
+      let r = await api.jobsBulkUpdate(ids, { status: 'pending' }, false);
+      if (r.updated < ids.length && confirm(`${r.updated}/${ids.length} reset. ${ids.length - r.updated} were claimed. Force-reset those too?`)) {
+        r = await api.jobsBulkUpdate(ids, { status: 'pending' }, true);
+      }
+      toast(`${r.updated} job(s) reset`, 'ok');
+      _qmState.selected.clear(); refreshQueueManager(batchId);
+    } catch (e) { toast(e.message, 'err'); }
+  });
+  body.querySelector('#qmBulkPrio')?.addEventListener('click', async () => {
+    const val = prompt(`Set priority for ${_qmState.selected.size} selected job(s):\n\n· 0 = never claim\n· 100 = default\n· 1000 = urgent (claimed first)`, '500');
+    if (val === null) return;
+    const num = Number(val);
+    if (!Number.isFinite(num)) { toast('Priority must be a number', 'warn'); return; }
+    try {
+      const r = await api.jobsBulkUpdate([..._qmState.selected], { priority: num }, false);
+      toast(`Priority → ${num} on ${r.updated} job(s)`, 'ok');
+      _qmState.selected.clear(); refreshQueueManager(batchId);
+    } catch (e) { toast(e.message, 'err'); }
+  });
+  body.querySelector('#qmBulkDelete')?.addEventListener('click', async () => {
+    const ids = [..._qmState.selected];
+    if (!confirm(`Delete ${ids.length} selected job(s) + every keyword row collected for them? Cannot be undone.`)) return;
+    try {
+      let r = await api.jobsBulkDelete(ids, false);
+      if (r.deleted < ids.length && confirm(`${r.deleted}/${ids.length} deleted. ${ids.length - r.deleted} were claimed. Force-delete those too?`)) {
+        r = await api.jobsBulkDelete(ids, true);
+      }
+      toast(`${r.deleted} job(s) + ${r.keywordsDeleted} keyword row(s) deleted`, 'ok');
+      _qmState.selected.clear(); refreshQueueManager(batchId);
+    } catch (e) { toast(e.message, 'err'); }
+  });
+  // ── Sub-pane toggles ──
+  body.querySelector('#qmAddBtn')?.addEventListener('click', () => {
+    _qmState.paneOpen = _qmState.paneOpen === 'add' ? null : 'add';
+    refreshQueueManager(batchId);
+  });
+  body.querySelector('#qmBulkImportBtn')?.addEventListener('click', () => {
+    _qmState.paneOpen = _qmState.paneOpen === 'bulkImport' ? null : 'bulkImport';
+    refreshQueueManager(batchId);
+  });
+  // ── Priority edits — save on blur / Enter ──
   body.querySelectorAll('input.qm-prio').forEach(inp => {
     const save = async () => {
       const id = Number(inp.dataset.jobId);
@@ -1163,32 +1289,115 @@ async function refreshQueueManager(batchId) {
       } else if (e.status !== 409) { toast(e.message, 'err'); }
     }
   }));
-  // Wire "add SKU" toggle.
-  body.querySelector('#qmAddBtn')?.addEventListener('click', () => {
-    const form = body.querySelector('#qmAddForm');
-    if (form.style.display === 'none') {
-      form.innerHTML = `
-        <div style="display:grid; grid-template-columns: 1fr 1fr auto; gap: var(--space-2); padding: var(--space-3); background: var(--bg-2); border: 1px solid var(--line-2); border-radius: var(--radius-sm);">
-          <input id="qmAddUrl" placeholder="Product URL (required)" style="grid-column: 1 / -1;" />
-          <input id="qmAddSku" placeholder="SKU (optional)" />
-          <input id="qmAddName" placeholder="Product name (optional)" />
-          <button id="qmAddSubmit">Add</button>
+}
+// Single-row add pane — used for one-off SKU additions.
+function renderQmAddPane(batchId) {
+  const pane = $('qmSubPane');
+  if (!pane) return;
+  pane.innerHTML = `
+    <div style="padding: var(--space-3); background: var(--bg-3); border: 1px solid var(--line-2); border-radius: var(--radius-sm);">
+      <div class="hint" style="margin-bottom: var(--space-2);"><strong>Add one job</strong> — for a specific product URL you want in this batch.</div>
+      <div style="display:grid; grid-template-columns: 1fr 1fr auto; gap: var(--space-2);">
+        <input id="qmAddUrl" placeholder="Product URL (required)" style="grid-column: 1 / -1;" />
+        <input id="qmAddSku" placeholder="SKU (optional)" />
+        <input id="qmAddName" placeholder="Product name (optional)" />
+        <button id="qmAddSubmit">Add</button>
+      </div>
+    </div>`;
+  pane.querySelector('#qmAddSubmit')?.addEventListener('click', async () => {
+    const url  = pane.querySelector('#qmAddUrl').value.trim();
+    if (!url) { toast('URL required', 'warn'); return; }
+    const sku  = pane.querySelector('#qmAddSku').value.trim();
+    const name = pane.querySelector('#qmAddName').value.trim();
+    try {
+      const r = await api.jobAddOne(batchId, { url, sku: sku || null, product_name: name || null, priority: 100 });
+      toast(`Added job ${r.jobId}`, 'ok');
+      _qmState.paneOpen = null;
+      refreshQueueManager(batchId);
+    } catch (e) { toast(e.message, 'err'); }
+  });
+}
+// Bulk SKU import pane — the main new feature. Paste a plaintext list
+// (Dropy-BXXXXXXXXX or raw ASIN), pick a resolve mode (Amazon URL /
+// Shopify handle / both), preview via dry-run, then commit.
+function renderQmBulkImportPane(batchId) {
+  const pane = $('qmSubPane');
+  if (!pane) return;
+  pane.innerHTML = `
+    <div style="padding: var(--space-3); background: var(--bg-3); border: 1px solid var(--line-2); border-radius: var(--radius-sm);">
+      <div class="hint" style="margin-bottom: var(--space-2);">
+        <strong>Bulk import SKUs</strong> — paste a list, one SKU per line. Accepts <code>Dropy-BXXXXXXXXX</code>, <code>bxxxxxxxxx</code>, or raw <code>BXXXXXXXXX</code> ASINs. Lines starting with <code>#</code> are comments; blank lines are skipped.
+      </div>
+      <textarea id="qmBulkText" spellcheck="false" placeholder="Dropy-B002OTT3US&#10;Dropy-B07KYD25MF&#10;Dropy-B0B3FBK9KW&#10;# comment lines start with hash&#10;B00X6ZNWG0" style="width:100%; min-height:180px; font-family:var(--mono); font-size:11px; padding:8px; background:var(--bg-input); border:1px solid var(--line-2); border-radius:6px; resize:vertical;"></textarea>
+      <div class="row" style="margin-top: var(--space-2); align-items:center;">
+        <label class="field" style="margin: 0; flex: 0 0 auto;">
+          <span class="lbl" style="margin-bottom: 2px;">Resolve via</span>
+          <select id="qmBulkResolve" style="width: 220px;">
+            <option value="amazon">Amazon.in — build https://www.amazon.in/dp/&lt;ASIN&gt;</option>
+            <option value="shopify">Shopify — look up handle by SKU (needs Shopify configured)</option>
+            <option value="both">Both — try Shopify first, fall back to Amazon.in</option>
+          </select>
+        </label>
+        <span class="spacer" style="flex:1;"></span>
+        <button class="small secondary" id="qmBulkPreview">👁 Preview (dry run)</button>
+        <button class="small" id="qmBulkCommit" disabled>Import → queue</button>
+      </div>
+      <div id="qmBulkResult" style="margin-top: var(--space-2);"></div>
+    </div>`;
+  pane.querySelector('#qmBulkPreview')?.addEventListener('click', async () => {
+    const text = pane.querySelector('#qmBulkText').value;
+    const skus = text.split(/\r?\n/);
+    const resolve = pane.querySelector('#qmBulkResolve').value;
+    const box = pane.querySelector('#qmBulkResult');
+    box.innerHTML = '<div class="hint">Resolving…</div>';
+    try {
+      const r = await api.jobsUploadBySku(batchId, skus, resolve, true);
+      const rowsHtml = (r.preview || []).slice(0, 50).map(x => `
+        <tr>
+          <td class="mono" style="font-size:11px;">${esc(x.sku)}</td>
+          <td class="mono" style="font-size:11px; color:var(--text-3);">${esc(x.asin)}</td>
+          <td style="max-width:340px; overflow:hidden; text-overflow:ellipsis;">${x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener" style="font-size:11px;">${esc(x.url.replace(/^https?:\/\//, ''))}</a>` : '<span style="color:var(--danger);">unresolved</span>'}</td>
+          <td class="mono" style="font-size:10px; color:${x.source === 'shopify' ? 'var(--success)' : x.source === 'amazon' ? 'var(--warn)' : 'var(--danger)'};">${esc(x.source || '—')}</td>
+        </tr>`).join('');
+      box.innerHTML = `
+        <div class="banner ${r.resolved > 0 ? 'ok' : 'warn'}" style="margin-bottom: var(--space-2);">
+          ${r.resolved} resolved · ${r.unresolved || 0} unresolved · ${r.badFormat || 0} bad format
+          ${r.badFormat > 0 ? ` · samples: ${(r.badFormatSamples || []).slice(0, 3).map(s => `<code>${esc(s)}</code>`).join(' ')}` : ''}
+          ${resolve !== 'amazon' && !r.shopifyConfigured ? ' · <strong>Shopify not configured</strong> — configure in Config → Shopify integration, or use resolve=amazon.' : ''}
+        </div>
+        <div class="tbl-wrap" style="max-height: 240px; overflow-y: auto;">
+          <table class="tbl compact">
+            <thead><tr><th>SKU</th><th>ASIN</th><th>Resolved URL</th><th>Source</th></tr></thead>
+            <tbody>${rowsHtml || '<tr><td colspan="4" style="text-align:center; padding:20px; color:var(--text-3);">nothing to preview</td></tr>'}</tbody>
+          </table>
+          ${(r.preview?.length || 0) > 50 ? `<div class="hint" style="padding: 6px 0;">…and ${r.preview.length - 50} more.</div>` : ''}
         </div>`;
-      form.style.display = '';
-      form.querySelector('#qmAddSubmit').addEventListener('click', async () => {
-        const url = form.querySelector('#qmAddUrl').value.trim();
-        if (!url) { toast('URL required', 'warn'); return; }
-        const sku = form.querySelector('#qmAddSku').value.trim();
-        const name = form.querySelector('#qmAddName').value.trim();
-        try {
-          const r = await api.jobAddOne(batchId, { url, sku: sku || null, product_name: name || null, priority: 100 });
-          toast(`Added job ${r.jobId}`, 'ok');
-          form.style.display = 'none';
-          refreshQueueManager(batchId);
-        } catch (e) { toast(e.message, 'err'); }
-      });
-    } else {
-      form.style.display = 'none';
+      const commitBtn = pane.querySelector('#qmBulkCommit');
+      commitBtn.disabled = r.resolved === 0;
+      commitBtn.textContent = `Import → queue (${r.resolved} SKU${r.resolved === 1 ? '' : 's'})`;
+    } catch (e) {
+      box.innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
+    }
+  });
+  pane.querySelector('#qmBulkCommit')?.addEventListener('click', async () => {
+    const text = pane.querySelector('#qmBulkText').value;
+    const skus = text.split(/\r?\n/);
+    const resolve = pane.querySelector('#qmBulkResolve').value;
+    const box = pane.querySelector('#qmBulkResult');
+    box.innerHTML = '<div class="hint">Inserting…</div>';
+    try {
+      const r = await api.jobsUploadBySku(batchId, skus, resolve, false);
+      box.innerHTML = `
+        <div class="banner ok">
+          ✓ ${r.inserted} job(s) inserted.
+          ${r.skippedActive ? ` ${r.skippedActive} skipped (already active in another batch: ${(r.skippedSkus || []).slice(0, 5).map(s => `<code>${esc(s)}</code>`).join(' ')})` : ''}
+          ${r.unresolved ? ` ${r.unresolved} unresolved.` : ''}
+        </div>`;
+      toast(`${r.inserted} SKU(s) added to queue`, 'ok');
+      _qmState.paneOpen = null;
+      setTimeout(() => refreshQueueManager(batchId), 800);
+    } catch (e) {
+      box.innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
     }
   });
 }

@@ -876,6 +876,165 @@ const server = http.createServer(async (req, res) => {
     if (m === 'GET' && p === '/api/health') return send(res, 200, { ok: true, ts: now() });
 
     // ----- Jobs / queue -----
+    // Bulk-import SKUs from a plaintext list (one SKU per line). Handles
+    // Dropy-<ASIN> format used by dropy.in — the trailing 10-char token
+    // is the Amazon ASIN. Client sends:
+    //   { batchId, skus: ['Dropy-B002OTT3US', ...], resolve: 'amazon' | 'shopify' | 'both', dryRun?: true }
+    // Server:
+    //   - Parses each line, trims whitespace, skips blanks/comments (# ...)
+    //   - Extracts ASIN via /^(?:Dropy-)?([A-Z0-9]{10})$/i
+    //   - resolve='amazon': generates https://www.amazon.in/dp/<ASIN>
+    //   - resolve='shopify': calls Shopify Admin API to find the variant
+    //     by SKU (needs Shopify creds configured), then builds the
+    //     dropy.in product URL from the returned handle
+    //   - resolve='both': tries shopify first, falls back to amazon
+    //   - dryRun=true: parses + resolves + returns the preview WITHOUT
+    //     inserting rows (so the UI can show 'we'll add these 25')
+    if (m === 'POST' && p === '/api/jobs/upload-by-sku') {
+      const b = await readJson(req);
+      const batchId = String(b.batchId || '').trim();
+      const skus    = Array.isArray(b.skus) ? b.skus : [];
+      const resolveMode = ['amazon', 'shopify', 'both'].includes(b.resolve) ? b.resolve : 'amazon';
+      const dryRun = !!b.dryRun;
+      if (!batchId) return send(res, 400, { ok: false, error: 'batchId required' });
+      if (skus.length === 0) return send(res, 400, { ok: false, error: 'skus (array) required' });
+      // Parse: trim, drop blanks + '#' comments, dedup case-insensitively.
+      const parsed = new Map();
+      const badFormat = [];
+      for (const raw of skus) {
+        const line = String(raw || '').trim();
+        if (!line || line.startsWith('#')) continue;
+        // Accept 'Dropy-BXXXXXXXXX', 'dropy-bXXXXXXXXX', or just 'BXXXXXXXXX'
+        const m2 = line.match(/^(?:Dropy-)?([A-Z0-9]{10})$/i);
+        if (!m2) { badFormat.push(line); continue; }
+        const asin = m2[1].toUpperCase();
+        const key = asin;
+        if (!parsed.has(key)) parsed.set(key, { sku: line, asin });
+      }
+      // Resolve each SKU to a URL.
+      const cfgRow = Q.getConfig.get();
+      const cfg = cfgRow?.config ? JSON.parse(cfgRow.config) : {};
+      const shop = cfg.shopify || {};
+      const apiVer = shop.apiVersion || '2024-10';
+      const shopifyConfigured = !!(shop.shopDomain && shop.adminToken);
+      const shopifyDomain = shop.shopDomain ? String(shop.shopDomain).replace(/^https?:\/\//, '').replace(/\/+$/, '') : null;
+      const resolved = [];
+      for (const [asin, entry] of parsed) {
+        let url = null, source = null, note = null;
+        const wantShopify = (resolveMode === 'shopify' || resolveMode === 'both') && shopifyConfigured;
+        if (wantShopify) {
+          try {
+            // Shopify variant lookup by SKU — try both the literal SKU
+            // ('Dropy-B00...') and just the ASIN, since customers may
+            // store either as the variant SKU field.
+            for (const candidateSku of [entry.sku, entry.asin, `Dropy-${entry.asin}`]) {
+              const r = await shopifyRequest({
+                shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+                method: 'GET',
+                apiPath: `/admin/api/${apiVer}/variants.json?fields=id,sku,product_id&limit=1&sku=${encodeURIComponent(candidateSku)}`,
+              });
+              if (r.ok && r.data?.variants?.length) {
+                const productId = r.data.variants[0].product_id;
+                const pr = await shopifyRequest({
+                  shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+                  method: 'GET',
+                  apiPath: `/admin/api/${apiVer}/products/${productId}.json?fields=handle,title`,
+                });
+                if (pr.ok && pr.data?.product?.handle) {
+                  url = `https://${shopifyDomain}/products/${pr.data.product.handle}`;
+                  source = 'shopify';
+                  entry.product_name = pr.data.product.title || null;
+                  break;
+                }
+              }
+            }
+          } catch (e) { note = `shopify lookup: ${e.message}`; }
+        }
+        if (!url && (resolveMode === 'amazon' || resolveMode === 'both')) {
+          url = `https://www.amazon.in/dp/${entry.asin}`;
+          source = 'amazon';
+        }
+        resolved.push({ sku: entry.sku, asin: entry.asin, url, source, note, product_name: entry.product_name || null });
+      }
+      const withUrl = resolved.filter(r => r.url);
+      const withoutUrl = resolved.filter(r => !r.url);
+      // Dry-run: return preview, do not insert.
+      if (dryRun) {
+        return send(res, 200, {
+          ok: true, dryRun: true, batchId,
+          parsed: parsed.size, badFormat: badFormat.length, resolved: withUrl.length,
+          unresolved: withoutUrl.length,
+          preview: resolved.slice(0, 200),
+          badFormatSamples: badFormat.slice(0, 20),
+          shopifyConfigured,
+        });
+      }
+      // Real insert: use existing upload path (cross-batch dedup + insert).
+      let inserted = 0, skippedActive = 0;
+      const skippedSkus = [];
+      db.exec('BEGIN');
+      try {
+        for (const r of withUrl) {
+          if (Q.existsActiveUrl.get(r.url, batchId)) { skippedActive++; skippedSkus.push(r.sku); continue; }
+          Q.insertJob.run(batchId, r.sku, r.url, r.product_name, 100, null, null);
+          inserted++;
+        }
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      return send(res, 200, {
+        ok: true, dryRun: false, batchId, inserted,
+        parsed: parsed.size, badFormat: badFormat.length,
+        unresolved: withoutUrl.length,
+        skippedActive, skippedSkus: skippedSkus.slice(0, 20),
+        badFormatSamples: badFormat.slice(0, 20),
+        shopifyConfigured,
+      });
+    }
+    // Bulk mutate: apply the same {status|priority} update to N job IDs.
+    // Used by the queue-manager multi-select toolbar. Force gate on
+    // claimed jobs (server refuses claimed unless {force:true}).
+    if (m === 'POST' && p === '/api/jobs/bulk-update') {
+      const b = await readJson(req);
+      const ids = Array.isArray(b.jobIds) ? b.jobIds.map(Number).filter(Number.isFinite) : [];
+      const patch = b.patch || {};
+      const force = !!b.force;
+      if (ids.length === 0) return send(res, 400, { ok: false, error: 'jobIds required' });
+      const allowed = ['priority', 'status', 'failed_reason'];
+      const setCols = [];
+      const args = [];
+      for (const col of allowed) {
+        if (col in patch) { setCols.push(`${col} = ?`); args.push(patch[col]); }
+      }
+      if (setCols.length === 0) return send(res, 400, { ok: false, error: 'patch must set at least one of: priority, status, failed_reason' });
+      // Status=pending resets claim + heartbeat too (same as jobReset semantics).
+      let extraCols = '';
+      if (patch.status === 'pending') extraCols = ', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, failed_reason=NULL';
+      let sql = `UPDATE jobs SET ${setCols.join(', ')}${extraCols} WHERE id IN (${ids.map(() => '?').join(',')})`;
+      if (!force) sql += ` AND status != 'claimed'`;
+      const info = db.prepare(sql).run(...args, ...ids);
+      return send(res, 200, { ok: true, updated: info.changes, requested: ids.length });
+    }
+    // Bulk delete: same semantics as jobDelete but for N IDs.
+    if (m === 'POST' && p === '/api/jobs/bulk-delete') {
+      const b = await readJson(req);
+      const ids = Array.isArray(b.jobIds) ? b.jobIds.map(Number).filter(Number.isFinite) : [];
+      const force = !!b.force;
+      if (ids.length === 0) return send(res, 400, { ok: false, error: 'jobIds required' });
+      db.exec('BEGIN');
+      let deleted = 0, keywordsDeleted = 0;
+      try {
+        for (const id of ids) {
+          const row = db.prepare('SELECT id, batch_id, product_url, status FROM jobs WHERE id=?').get(id);
+          if (!row) continue;
+          if (row.status === 'claimed' && !force) continue;
+          keywordsDeleted += Q.deleteKeywordsForProduct.run(row.batch_id, row.product_url).changes;
+          Q.deleteJob.run(id);
+          deleted++;
+        }
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      return send(res, 200, { ok: true, deleted, keywordsDeleted, requested: ids.length });
+    }
     if (m === 'POST' && p === '/api/jobs/upload') {
       const b = await readJson(req);
       const batchId = String(b.batchId || b.batch_id || '');

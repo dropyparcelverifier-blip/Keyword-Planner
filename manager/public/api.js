@@ -91,6 +91,9 @@ export const api = {
   shopifyFieldImpact:  ()              => _fetch('/api/shopify/field-impact'),
   shopifyGetProduct:   (productUrl)    => _fetch(`/api/shopify/get-product?url=${encodeURIComponent(productUrl)}`),
   shopifyUpdateProduct:(productId, patch) => _fetch('/api/shopify/update-product', { method: 'POST', body: { confirm: 'PUSH', productId, patch } }),
+  jobsUploadBySku:     (batchId, skus, resolve, dryRun) => _fetch('/api/jobs/upload-by-sku', { method: 'POST', body: { batchId, skus, resolve, dryRun } }),
+  jobsBulkUpdate:      (jobIds, patch, force) => _fetch('/api/jobs/bulk-update', { method: 'POST', body: { jobIds, patch, force: !!force } }),
+  jobsBulkDelete:      (jobIds, force) => _fetch('/api/jobs/bulk-delete', { method: 'POST', body: { jobIds, force: !!force } }),
 };
 
 // Live keyword stats — mirrors the extension's dashboard fetchBatchKeywordStats.
