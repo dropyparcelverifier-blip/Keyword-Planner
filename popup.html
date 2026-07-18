@@ -5,48 +5,59 @@
   <title>AdBrain Worker</title>
   <style>
     :root {
-      --bg-0:       #0b1020;
-      --bg-1:       #0f1631;
-      --bg-2:       #161e35;
-      --bg-3:       #1d2742;
-      --bg-input:   #0e1424;
-      --bg-hover:   #202c4a;
-      --line-1:     #1f2942;
-      --line-2:     #2a3658;
-      --line-3:     #3a4775;
-      --text-0:     #f1f4fb;
-      --text-1:     #d8dff0;
-      --text-2:     #9aa6c3;
-      --text-3:     #6b7799;
-      --accent:     #5a8cff;
-      --accent-2:   #3a6eee;
-      --accent-soft: rgba(90,140,255,0.14);
-      --success:    #34d399;
-      --success-soft: rgba(52,211,153,0.10);
-      --warn:       #fbbf24;
-      --warn-soft:  rgba(251,191,36,0.10);
-      --danger:     #f87171;
-      --danger-soft: rgba(248,113,113,0.10);
-      --info:       #60a5fa;
-      --info-soft:  rgba(96,165,250,0.10);
+      /* 'High-contrast operator' palette — near-black base + amber ops
+         accent. Matches the manager exactly so worker + manager read as
+         one product. */
+      --bg-0:       #050510;
+      --bg-1:       #0a0a15;
+      --bg-2:       #0d0d1a;
+      --bg-3:       #12121e;
+      --bg-input:   #08080e;
+      --bg-hover:   #16162a;
+      --line-1:     #1a1a2e;
+      --line-2:     #22223a;
+      --line-3:     #2f2f4c;
+      --text-0:     #ffffff;
+      --text-1:     #fafafa;
+      --text-2:     #cbd5e1;
+      --text-3:     #64748b;
+      --accent:     #f59e0b;
+      --accent-2:   #fbbf24;
+      --accent-soft: rgba(245,158,11,0.14);
+      --success:    #10b981;
+      --success-2:  #34d399;
+      --success-soft: rgba(16,185,129,0.14);
+      --warn:       #eab308;
+      --warn-soft:  rgba(234,179,8,0.14);
+      --danger:     #ef4444;
+      --danger-soft: rgba(239,68,68,0.14);
+      --info:       #38bdf8;
+      --info-soft:  rgba(56,189,248,0.14);
       --mono: 'JetBrains Mono','Fira Code',Consolas,monospace;
       --space-1: 4px;
       --space-2: 8px;
       --space-3: 12px;
       --space-4: 16px;
       --space-5: 24px;
+      --ease: cubic-bezier(0.16, 1, 0.3, 1);
     }
     * { box-sizing: border-box; }
     html, body {
       margin: 0; padding: 0; background: var(--bg-0); color: var(--text-1);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       font-size: 13px; line-height: 1.5;
       min-width: 380px;
+      font-feature-settings: 'cv02', 'cv03', 'cv11', 'ss01';
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: optimizeLegibility;
     }
-    /* Keyboard focus rings — accessibility. */
+    /* Keyboard focus rings — amber for accessibility + brand consistency. */
     button:focus-visible, a:focus-visible {
-      outline: none; box-shadow: 0 0 0 3px rgba(90,140,255,0.35);
+      outline: 2px solid var(--accent); outline-offset: 1px;
     }
+    /* Consistent code + kbd. */
+    code, kbd { font-family: var(--mono); font-size: 0.92em; padding: 1px 4px; background: var(--bg-3); border: 1px solid var(--line-1); border-radius: 3px; color: var(--accent-2); }
 
     /* ─────────── Compact top bar ─────────── */
     .topbar {
@@ -54,7 +65,12 @@
       padding: 8px 14px;
       background: var(--bg-1); border-bottom: 1px solid var(--line-1);
     }
-    .topbar .brand { font-weight: 700; font-size: 12px; color: var(--text-1); letter-spacing: 0.3px; }
+    .topbar {
+      /* Amber accent stripe on the left edge so the popup identifies as
+         'AdBrain' at a glance without a large logo. */
+      border-left: 2px solid var(--accent);
+    }
+    .topbar .brand { font-weight: 700; font-size: 12px; color: var(--text-0); letter-spacing: 0.5px; text-transform: uppercase; }
     .topbar .brand .icon { color: var(--accent); }
     .topbar .spacer { flex: 1; }
     .topbar .worker-id { font-family: var(--mono); font-size: 10px; color: var(--text-3); }
@@ -78,10 +94,10 @@
       box-shadow: 0 0 0 3px rgba(255,255,255,0.03);
       flex: 0 0 auto;
     }
-    .hero.state-running  .hero-dot { background: var(--success); box-shadow: 0 0 0 4px var(--success-soft); animation: heroPulse 1.2s ease-in-out infinite; }
-    .hero.state-armed    .hero-dot { background: var(--info);    box-shadow: 0 0 0 4px var(--info-soft);    animation: heroPulse 2s ease-in-out infinite; }
-    .hero.state-paused   .hero-dot { background: var(--warn);    box-shadow: 0 0 0 4px var(--warn-soft); }
-    .hero.state-stopped  .hero-dot { background: var(--danger);  box-shadow: 0 0 0 4px var(--danger-soft); }
+    .hero.state-running  .hero-dot { background: var(--success-2); box-shadow: 0 0 0 4px var(--success-soft); animation: heroPulse 1.2s ease-in-out infinite; }
+    .hero.state-armed    .hero-dot { background: var(--accent-2);  box-shadow: 0 0 0 4px var(--accent-soft);  animation: heroPulse 2s ease-in-out infinite; }
+    .hero.state-paused   .hero-dot { background: var(--warn);      box-shadow: 0 0 0 4px var(--warn-soft); }
+    .hero.state-stopped  .hero-dot { background: var(--danger);    box-shadow: 0 0 0 4px var(--danger-soft); }
     @keyframes heroPulse {
       0%, 100% { opacity: 1; transform: scale(1); }
       50%      { opacity: 0.5; transform: scale(0.85); }
@@ -107,7 +123,7 @@
       padding: 4px 8px; border-radius: 4px;
       background: var(--bg-3); border: 1px solid var(--line-2);
     }
-    .hero-countdown.imminent { color: var(--info); border-color: var(--info); }
+    .hero-countdown.imminent { color: var(--accent-2); border-color: var(--accent-2); background: var(--accent-soft); }
 
     /* ─────────── Batch progress bar ─────────── */
     .batch-progress {
@@ -126,8 +142,8 @@
     }
     .batch-progress-fill {
       height: 100%;
-      background: linear-gradient(90deg, var(--accent) 0%, var(--info) 100%);
-      transition: width 400ms cubic-bezier(0.22,1,0.36,1);
+      background: linear-gradient(90deg, var(--accent) 0%, var(--accent-2) 100%);
+      transition: width 400ms var(--ease);
     }
 
     /* ─────────── Body / cards ─────────── */
@@ -135,13 +151,18 @@
        380px window, every pixel of vertical space matters. */
     .body { padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
     .card {
-      background: var(--bg-2); border: 1px solid var(--line-2);
+      background: var(--bg-2); border: 1px solid var(--line-1);
       border-radius: 6px;
+      transition: border-color 100ms var(--ease);
     }
+    .card:hover { border-color: var(--line-2); }
     .card-head {
       padding: 6px var(--space-3); border-bottom: 1px solid var(--line-1);
       display: flex; align-items: center; gap: var(--space-2);
-      font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-2);
+      font-family: var(--mono);
+      font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--text-3);
+      background: var(--bg-3);
     }
     .card-body { padding: var(--space-2) var(--space-3); }
 
@@ -177,8 +198,8 @@
       text-transform: uppercase; letter-spacing: 0.5px;
       margin-top: 4px;
     }
-    .today-tile.done .val { color: var(--success); }
-    .today-tile.kw   .val { color: var(--info); }
+    .today-tile.done .val { color: var(--success-2); }
+    .today-tile.kw   .val { color: var(--accent-2); }
     .today-tile.avg  .val { color: var(--text-0); }
 
     /* 12-hour sparkline for rows landed */
@@ -187,11 +208,13 @@
       height: 26px; margin-top: 10px;
     }
     .sparkline .bar {
-      flex: 1; background: var(--info);
+      flex: 1; background: var(--accent);
+      opacity: 0.7;
       border-radius: 1px; min-height: 2px;
-      transition: height 200ms;
+      transition: height 200ms var(--ease), opacity 100ms var(--ease);
     }
-    .sparkline .bar.now { background: var(--success); }
+    .sparkline .bar:hover { opacity: 1; }
+    .sparkline .bar.now { background: var(--success-2); opacity: 1; }
 
     /* ─────────── Recent SKUs strip ─────────── */
     .recent-list { list-style: none; padding: 0; margin: 0; }
@@ -230,13 +253,15 @@
       background: transparent; color: var(--text-1);
       border: 1px solid var(--line-2);
       border-radius: 6px; cursor: pointer; font-family: inherit;
+      letter-spacing: 0.005em;
       user-select: none;
-      transition: background 120ms, border-color 120ms, transform 120ms;
+      transition: background 100ms var(--ease), border-color 100ms var(--ease), transform 60ms var(--ease);
     }
     button:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--line-3); }
     button:active:not(:disabled) { transform: translateY(1px); }
-    button:disabled { opacity: 0.35; cursor: not-allowed; }
-    button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    /* Primary = solid amber, black text. Reads as the CTA against near-black. */
+    button.primary { background: var(--accent); color: #0a0a15; border-color: var(--accent); font-weight: 700; }
     button.primary:hover:not(:disabled) { background: var(--accent-2); border-color: var(--accent-2); }
     button.warn  { color: var(--warn);   border-color: var(--warn); }
     button.warn:hover:not(:disabled)  { background: var(--warn-soft); }
@@ -265,8 +290,8 @@
       font-size: 10px; color: var(--text-3);
       display: flex; align-items: center; gap: 8px;
     }
-    .footer a { color: var(--accent); text-decoration: none; }
-    .footer a:hover { text-decoration: underline; }
+    .footer a { color: var(--accent-2); text-decoration: none; font-weight: 600; }
+    .footer a:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
   </style>
 </head>
 <body>
