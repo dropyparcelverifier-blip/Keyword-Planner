@@ -1676,7 +1676,13 @@ async function run() {
   assert(srvFull.includes('primary_domain.host'),                      'STORE.1 Shopify shop.json queried for primary_domain');
   assert(srvFull.includes('const publicHost = storefrontHost'),        'STORE.2 URL builder uses publicHost, not shopifyDomain');
   assert(srvFull.includes('https://${publicHost}/products/'),          'STORE.3 URL template uses publicHost');
-  assert(srvFull.includes("no Shopify variant found for SKU"),         'STORE.4 unresolved SKUs get explanatory note');
+  assert(srvFull.includes('no Shopify variant/product found (tried'),  'STORE.4 unresolved SKUs get explanatory note (all fallback paths listed)');
+  // Widened SKU search: multiple case variants + barcode + handle fallback
+  assert(srvFull.includes('ASIN upper'),                               'STORE.5 tries ASIN upper case');
+  assert(srvFull.includes('ASIN lower'),                               'STORE.5b tries ASIN lower case');
+  assert(srvFull.includes("&barcode="),                                'STORE.6 barcode fallback for Amazon-sourced stores');
+  assert(srvFull.includes("&handle="),                                 'STORE.7 handle-by-ASIN fallback');
+  assert(srvFull.includes('matched via ${matchedVia}'),                'STORE.8 preview shows which variant path matched');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');
