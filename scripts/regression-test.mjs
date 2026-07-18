@@ -1589,6 +1589,15 @@ async function run() {
   assert(appFull.includes(".upload-mode-toggle')?.addEventListener"),   'BULK.33 tab-toggle uses event delegation');
   assert(appFull.includes('function _switchUploadMode'),               'BULK.34 shared mode switcher');
   assert(appFull.includes("e.target.closest('.upload-mode-btn')"),     'BULK.35 closest() so clicks on emoji/text still switch');
+  // Tab switching robustness: three redundant paths ensure clicks always work.
+  assert(appFull.includes('function _switchTab'),                      'ROBUST.1 shared _switchTab function');
+  assert(appFull.includes('window.adbrainSwitchTab'),                  'ROBUST.2 window.adbrainSwitchTab exposed');
+  assert(appFull.includes('window.adbrainSwitchUploadMode'),           'ROBUST.3 window.adbrainSwitchUploadMode exposed');
+  assert(htmlFull.includes('window.adbrainSwitchTab &amp;&amp; window.adbrainSwitchTab'), 'ROBUST.4 inline onclick fallback on tabs');
+  assert(htmlFull.includes('window.adbrainSwitchUploadMode &amp;&amp; window.adbrainSwitchUploadMode'), 'ROBUST.5 inline onclick fallback on upload-mode');
+  assert(appFull.includes(".tabs')?.addEventListener"),                'ROBUST.6 delegation on .tabs container');
+  assert(appFull.includes("console.warn('[adbrain] tab refresh threw'"), 'ROBUST.7 refresh throw does not prevent tab switch');
+  assert(appFull.includes("console.info('[adbrain] manager UI build"), 'ROBUST.8 build banner in console');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');

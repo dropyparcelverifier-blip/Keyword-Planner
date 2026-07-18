@@ -33,13 +33,16 @@
     <span class="health" id="healthPill" title="Click to recheck">checking…</span>
   </div>
 
+  <!-- Inline onclick as ultimate fallback — module JS also delegates from
+       the container, but if a stale cache leaves that unbound, inline
+       still fires via window.adbrainSwitchTab set on module load. -->
   <nav class="tabs">
-    <button class="tab active" data-tab="upload">📤 Upload<kbd>1</kbd></button>
-    <button class="tab" data-tab="dashboard">📊 Dashboard<kbd>2</kbd></button>
-    <button class="tab" data-tab="analytics">📈 Analytics<kbd>3</kbd></button>
-    <button class="tab" data-tab="config">⚙ Config<kbd>4</kbd></button>
-    <button class="tab" data-tab="workers">🔗 Workers<kbd>5</kbd></button>
-    <button class="tab" data-tab="downloads">📦 Downloads<kbd>6</kbd></button>
+    <button type="button" class="tab active" data-tab="upload"    onclick="window.adbrainSwitchTab &amp;&amp; window.adbrainSwitchTab('upload')">📤 Upload<kbd>1</kbd></button>
+    <button type="button" class="tab" data-tab="dashboard" onclick="window.adbrainSwitchTab &amp;&amp; window.adbrainSwitchTab('dashboard')">📊 Dashboard<kbd>2</kbd></button>
+    <button type="button" class="tab" data-tab="analytics" onclick="window.adbrainSwitchTab &amp;&amp; window.adbrainSwitchTab('analytics')">📈 Analytics<kbd>3</kbd></button>
+    <button type="button" class="tab" data-tab="config"    onclick="window.adbrainSwitchTab &amp;&amp; window.adbrainSwitchTab('config')">⚙ Config<kbd>4</kbd></button>
+    <button type="button" class="tab" data-tab="workers"   onclick="window.adbrainSwitchTab &amp;&amp; window.adbrainSwitchTab('workers')">🔗 Workers<kbd>5</kbd></button>
+    <button type="button" class="tab" data-tab="downloads" onclick="window.adbrainSwitchTab &amp;&amp; window.adbrainSwitchTab('downloads')">📦 Downloads<kbd>6</kbd></button>
   </nav>
 
   <!-- Global stats bar — always visible. Refreshed every 15s. -->
@@ -77,9 +80,13 @@
               <!-- Mode toggle — swap between the file-with-URL flow and
                    the plain SKU-list flow (accepts Dropy-BXXXXXXXXX or
                    raw BXXXXXXXXX ASINs, one per line). -->
+              <!-- Inline onclick as ultimate fallback — the module JS
+                   also delegates from the container, but if a cache /
+                   race leaves that unbound, the inline call still fires
+                   via the global window.adbrainSwitchUploadMode setter. -->
               <div class="upload-mode-toggle" role="tablist">
-                <button class="upload-mode-btn active" data-mode="file" role="tab" aria-selected="true">📊 Excel / CSV (with URLs)</button>
-                <button class="upload-mode-btn" data-mode="sku" role="tab" aria-selected="false">📝 SKU list — <code>Dropy-BXXX…</code> or .txt file</button>
+                <button type="button" class="upload-mode-btn active" data-mode="file" role="tab" aria-selected="true" onclick="window.adbrainSwitchUploadMode &amp;&amp; window.adbrainSwitchUploadMode('file')">📊 Excel / CSV (with URLs)</button>
+                <button type="button" class="upload-mode-btn" data-mode="sku" role="tab" aria-selected="false" onclick="window.adbrainSwitchUploadMode &amp;&amp; window.adbrainSwitchUploadMode('sku')">📝 SKU list — <code>Dropy-BXXX…</code> or .txt file</button>
               </div>
 
               <label class="field" style="margin-top: var(--space-3);">
