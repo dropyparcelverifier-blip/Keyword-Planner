@@ -198,9 +198,9 @@ function cmdkRender() {
     action: () => document.querySelector(`.tab[data-tab="${t.tab}"]`).click(),
   });
   const actions = [
-    { icon: '📢', label: 'Wake all workers',     meta: 'broadcast', action: async () => { try { await api.commandsSend(null, 'wake'); toast('Wake sent to all workers', 'ok'); } catch (e) { toast(e.message, 'err'); } } },
-    { icon: '▶',  label: 'Resume all workers',    meta: 'broadcast', action: async () => { try { await api.commandsSend(null, 'resume'); toast('Resume sent', 'ok'); } catch (e) { toast(e.message, 'err'); } } },
-    { icon: '⏸', label: 'Pause all workers',    meta: 'broadcast', action: async () => { try { await api.commandsSend(null, 'pause'); toast('Pause sent', 'ok'); } catch (e) { toast(e.message, 'err'); } } },
+    { icon: '📢', label: 'Wake all workers',     meta: 'broadcast', action: async () => { try { await api.commandsSend(null, 'wake');   toast('Wake queued — workers act within 30s (poll cadence)', 'ok', { title: 'Wake all' }); } catch (e) { toast(e.message, 'err'); } } },
+    { icon: '▶',  label: 'Resume all workers',    meta: 'broadcast', action: async () => { try { await api.commandsSend(null, 'resume'); toast('Resume queued — workers act within 30s (poll cadence)', 'ok', { title: 'Resume all' }); } catch (e) { toast(e.message, 'err'); } } },
+    { icon: '⏸', label: 'Pause all workers',    meta: 'broadcast', action: async () => { try { await api.commandsSend(null, 'pause');  toast('Pause queued — workers finish current SKU then halt (≤30s poll + rest of SKU)', 'ok', { title: 'Pause all' }); } catch (e) { toast(e.message, 'err'); } } },
     { icon: '↻',  label: 'Re-queue all failed jobs', meta: 'action', action: async () => { if (!confirm('Re-queue every failed job across all batches?')) return; try { const r = await api.requeueAllFailed(''); toast(`${r.updated} job(s) back to pending`, 'ok'); } catch (e) { toast(e.message, 'err'); } } },
     { icon: '🧹', label: 'Cleanup old activity + commands', meta: 'action', action: () => { document.querySelector('.tab[data-tab="config"]').click(); setTimeout(() => $('cleanupBtn')?.scrollIntoView({behavior:'smooth', block:'center'}), 60); } },
     { icon: '🗑', label: 'Delete a batch',    meta: 'danger', action: () => { document.querySelector('.tab[data-tab="config"]').click(); setTimeout(() => $('deleteBatchSelect')?.scrollIntoView({behavior:'smooth', block:'center'}), 60); } },

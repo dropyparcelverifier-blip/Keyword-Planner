@@ -1645,6 +1645,14 @@ async function run() {
   assert(srvFull.includes('entry.brands  = p.vendor'),                  'ENRICH.3 brands from Shopify vendor');
   assert(srvFull.includes('r.handles, r.brands'),                       'ENRICH.4 insertJob passes enriched handles + brands');
   assert(appFull.includes('<th>Title</th>') && appFull.includes('<th>Handles</th>') && appFull.includes('<th>Brand</th>'), 'ENRICH.5 preview table shows Title/Handles/Brand');
+  // Reliability fixes for fleet control (user reported):
+  //  · Popup Clear-log button now RPCs background so in-memory buffer clears too
+  //  · Manager Resume command calls _doAutoConnectWorker directly (no fragile SW→SW sendMessage)
+  const popupJsSrc = readFileSync(resolve(REPO, 'popup.js'), 'utf-8');
+  const bgSrcCtrl = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
+  assert(popupJsSrc.includes("await rpc('clearLog')"),                 'CTRL.1 popup Clear-log uses RPC (not direct storage write)');
+  assert(bgSrcCtrl.includes('_doAutoConnectWorker({ workerId: wId, chunkSize: cs })'), 'CTRL.2 resume calls _doAutoConnectWorker directly');
+  assert(bgSrcCtrl.includes("Resume command received — force-armed"), 'CTRL.3 resume force-arms (clears userStoppedArm)');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
   assert(htmlFull.includes('id="anShopifyBtn"'),                       'SHOP.14 Analytics per-SKU Shopify button');
   assert(htmlFull.includes('id="cfgShopifyDomain"'),                   'SHOP.15 Shopify config domain field');
