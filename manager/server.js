@@ -938,12 +938,27 @@ const server = http.createServer(async (req, res) => {
                 const pr = await shopifyRequest({
                   shopDomain: shop.shopDomain, adminToken: shop.adminToken,
                   method: 'GET',
-                  apiPath: `/admin/api/${apiVer}/products/${productId}.json?fields=handle,title`,
+                  // Pull all columns the Excel/CSV flow would have carried:
+                  // title, handle, tags, vendor, product_type. Same fields
+                  // the engine uses for context, seed derivation, and
+                  // brand-domain confirmation.
+                  apiPath: `/admin/api/${apiVer}/products/${productId}.json?fields=handle,title,tags,vendor,product_type`,
                 });
                 if (pr.ok && pr.data?.product?.handle) {
-                  url = `https://${shopifyDomain}/products/${pr.data.product.handle}`;
+                  const p = pr.data.product;
+                  url = `https://${shopifyDomain}/products/${p.handle}`;
                   source = 'shopify';
-                  entry.product_name = pr.data.product.title || null;
+                  entry.product_name = p.title || null;
+                  // handles = product handle + tags + product_type combined
+                  // with | separator (same format the engine expects for
+                  // handlesToSeeds() + product context derivation).
+                  const handleParts = [
+                    p.handle,
+                    ...(String(p.tags || '').split(',').map(t => t.trim()).filter(Boolean)),
+                    p.product_type,
+                  ].filter(Boolean);
+                  entry.handles = handleParts.length ? handleParts.join('|') : null;
+                  entry.brands  = p.vendor || null;
                   break;
                 }
               }
@@ -954,7 +969,12 @@ const server = http.createServer(async (req, res) => {
           url = `https://www.amazon.in/dp/${entry.asin}`;
           source = 'amazon';
         }
-        resolved.push({ sku: entry.sku, asin: entry.asin, url, source, note, product_name: entry.product_name || null });
+        resolved.push({
+          sku: entry.sku, asin: entry.asin, url, source, note,
+          product_name: entry.product_name || null,
+          handles: entry.handles || null,
+          brands: entry.brands || null,
+        });
       }
       const withUrl = resolved.filter(r => r.url);
       const withoutUrl = resolved.filter(r => !r.url);
@@ -976,7 +996,12 @@ const server = http.createServer(async (req, res) => {
       try {
         for (const r of withUrl) {
           if (Q.existsActiveUrl.get(r.url, batchId)) { skippedActive++; skippedSkus.push(r.sku); continue; }
-          Q.insertJob.run(batchId, r.sku, r.url, r.product_name, 100, null, null);
+          // Pass enriched Shopify metadata into the same columns Excel/CSV
+          // uploads fill: product_name (from title), handles (handle +
+          // tags + product_type), brands (vendor). Engine uses these
+          // for seed derivation, product context, and brand-domain
+          // confirmation.
+          Q.insertJob.run(batchId, r.sku, r.url, r.product_name, 100, r.handles, r.brands);
           inserted++;
         }
         db.exec('COMMIT');

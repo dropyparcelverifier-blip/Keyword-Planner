@@ -933,11 +933,17 @@ $('skuPreviewBtn')?.addEventListener('click', async () => {
   try {
     const r = await api.jobsUploadBySku(batchId, skus, resolve, true);
     const rows = (r.preview || []).slice(0, 40);
+    // Preview table now shows the enriched Shopify metadata (title,
+    // handles, brand) so users can see what the engine will use for
+    // seed derivation + brand-domain confirmation — same info an
+    // Excel/CSV upload would carry.
     const rowsHtml = rows.map(x => `
       <tr>
         <td class="mono" style="font-size:11px;">${esc(x.sku)}</td>
-        <td class="mono" style="font-size:11px; color:var(--text-3);">${esc(x.asin)}</td>
-        <td style="max-width:340px; overflow:hidden; text-overflow:ellipsis;">${x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener" style="font-size:11px;">${esc(x.url.replace(/^https?:\/\//, ''))}</a>` : '<span style="color:var(--danger);">unresolved</span>'}</td>
+        <td style="max-width:260px; overflow:hidden; text-overflow:ellipsis;" title="${esc(x.product_name || '')}">${x.product_name ? esc(x.product_name) : '<span style="color:var(--text-3);">—</span>'}</td>
+        <td class="mono" style="font-size:10px; color:var(--text-3); max-width:220px; overflow:hidden; text-overflow:ellipsis;" title="${esc(x.handles || '')}">${x.handles ? esc(x.handles.split('|').slice(0, 3).join(' · ')) + (x.handles.split('|').length > 3 ? '…' : '') : '<span>—</span>'}</td>
+        <td class="mono" style="font-size:11px;">${x.brands ? esc(x.brands) : '<span style="color:var(--text-3);">—</span>'}</td>
+        <td style="max-width:280px; overflow:hidden; text-overflow:ellipsis;">${x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener" style="font-size:11px;">${esc(x.url.replace(/^https?:\/\//, ''))}</a>` : '<span style="color:var(--danger);">unresolved</span>'}</td>
         <td class="mono" style="font-size:10px; color:${x.source === 'shopify' ? 'var(--success)' : x.source === 'amazon' ? 'var(--warn)' : 'var(--danger)'};">${esc(x.source || '—')}</td>
       </tr>`).join('');
     const shopifyMissing = resolve !== 'amazon' && !r.shopifyConfigured;
@@ -946,11 +952,12 @@ $('skuPreviewBtn')?.addEventListener('click', async () => {
         <strong>${r.resolved}</strong> resolved · <strong>${r.unresolved || 0}</strong> unresolved · <strong>${r.badFormat || 0}</strong> bad format
         ${r.badFormat > 0 ? ` · samples: ${(r.badFormatSamples || []).slice(0, 3).map(s => `<code>${esc(s)}</code>`).join(' ')}` : ''}
         ${shopifyMissing ? ' · <strong>Shopify not configured</strong> — configure in Config → Shopify integration, or switch to Amazon.in resolve.' : ''}
+        <div class="hint" style="margin-top: 6px;">When resolved via Shopify: <strong>title</strong>, <strong>handles</strong> (URL slug + tags + product type), and <strong>brand</strong> (vendor) auto-fill from your dropy.in listing — same columns Excel/CSV uploads carry.</div>
       </div>
-      <div class="tbl-wrap" style="max-height: 320px; overflow-y: auto;">
+      <div class="tbl-wrap" style="max-height: 340px; overflow-y: auto;">
         <table class="tbl compact">
-          <thead><tr><th>SKU</th><th>ASIN</th><th>Resolved URL</th><th>Source</th></tr></thead>
-          <tbody>${rowsHtml || '<tr><td colspan="4" style="text-align:center; padding:20px; color:var(--text-3);">nothing to preview</td></tr>'}</tbody>
+          <thead><tr><th>SKU</th><th>Title</th><th>Handles</th><th>Brand</th><th>Resolved URL</th><th>Source</th></tr></thead>
+          <tbody>${rowsHtml || '<tr><td colspan="6" style="text-align:center; padding:20px; color:var(--text-3);">nothing to preview</td></tr>'}</tbody>
         </table>
         ${(r.preview?.length || 0) > 40 ? `<div class="hint" style="padding: 6px 0;">…and ${r.preview.length - 40} more.</div>` : ''}
       </div>`;
@@ -1681,11 +1688,16 @@ function renderQmBulkImportPane(batchId) {
     box.innerHTML = '<div class="hint">Resolving…</div>';
     try {
       const r = await api.jobsUploadBySku(batchId, skus, resolve, true);
+      // Preview shows the enriched Shopify metadata (title, handles,
+      // brand) — same fields the engine uses for seed derivation +
+      // brand-domain confirmation, matching what Excel/CSV uploads carry.
       const rowsHtml = (r.preview || []).slice(0, 50).map(x => `
         <tr>
           <td class="mono" style="font-size:11px;">${esc(x.sku)}</td>
-          <td class="mono" style="font-size:11px; color:var(--text-3);">${esc(x.asin)}</td>
-          <td style="max-width:340px; overflow:hidden; text-overflow:ellipsis;">${x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener" style="font-size:11px;">${esc(x.url.replace(/^https?:\/\//, ''))}</a>` : '<span style="color:var(--danger);">unresolved</span>'}</td>
+          <td style="max-width:220px; overflow:hidden; text-overflow:ellipsis;" title="${esc(x.product_name || '')}">${x.product_name ? esc(x.product_name) : '<span style="color:var(--text-3);">—</span>'}</td>
+          <td class="mono" style="font-size:10px; color:var(--text-3); max-width:180px; overflow:hidden; text-overflow:ellipsis;" title="${esc(x.handles || '')}">${x.handles ? esc(x.handles.split('|').slice(0, 2).join(' · ')) + (x.handles.split('|').length > 2 ? '…' : '') : '<span>—</span>'}</td>
+          <td class="mono" style="font-size:11px;">${x.brands ? esc(x.brands) : '<span style="color:var(--text-3);">—</span>'}</td>
+          <td style="max-width:220px; overflow:hidden; text-overflow:ellipsis;">${x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener" style="font-size:11px;">${esc(x.url.replace(/^https?:\/\//, ''))}</a>` : '<span style="color:var(--danger);">unresolved</span>'}</td>
           <td class="mono" style="font-size:10px; color:${x.source === 'shopify' ? 'var(--success)' : x.source === 'amazon' ? 'var(--warn)' : 'var(--danger)'};">${esc(x.source || '—')}</td>
         </tr>`).join('');
       box.innerHTML = `
@@ -1694,10 +1706,10 @@ function renderQmBulkImportPane(batchId) {
           ${r.badFormat > 0 ? ` · samples: ${(r.badFormatSamples || []).slice(0, 3).map(s => `<code>${esc(s)}</code>`).join(' ')}` : ''}
           ${resolve !== 'amazon' && !r.shopifyConfigured ? ' · <strong>Shopify not configured</strong> — configure in Config → Shopify integration, or use resolve=amazon.' : ''}
         </div>
-        <div class="tbl-wrap" style="max-height: 240px; overflow-y: auto;">
+        <div class="tbl-wrap" style="max-height: 260px; overflow-y: auto;">
           <table class="tbl compact">
-            <thead><tr><th>SKU</th><th>ASIN</th><th>Resolved URL</th><th>Source</th></tr></thead>
-            <tbody>${rowsHtml || '<tr><td colspan="4" style="text-align:center; padding:20px; color:var(--text-3);">nothing to preview</td></tr>'}</tbody>
+            <thead><tr><th>SKU</th><th>Title</th><th>Handles</th><th>Brand</th><th>URL</th><th>Source</th></tr></thead>
+            <tbody>${rowsHtml || '<tr><td colspan="6" style="text-align:center; padding:20px; color:var(--text-3);">nothing to preview</td></tr>'}</tbody>
           </table>
           ${(r.preview?.length || 0) > 50 ? `<div class="hint" style="padding: 6px 0;">…and ${r.preview.length - 50} more.</div>` : ''}
         </div>`;
