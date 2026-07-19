@@ -2300,6 +2300,8 @@ async function run() {
   assert(appJs.body.includes('adbrainAnalyticsSkuByBatch'),    'ANF.5 per-batch SKU localStorage key');
   assert(appJs.body.includes('saveAnalyticsSkuForBatch'),      'ANF.6 SKU save helper');
   assert(appJs.body.includes('loadAnalyticsSkuByBatch'),       'ANF.7 SKU load helper');
+  // Column sort persistence
+  assert(appJs.body.includes('adbrainAnalyticsSort'),          'ANF.8 sort state localStorage key');
   // Client wrapper + UI wiring.
   assert(apiJsSrc.body.includes('fetchWorkerBundleHash') === false, 'VER.11 client wrapper is in modules/discovery-jobs.js not api.js (worker-side)');
   assert(appJs.body.includes('data-copy-install-cmd'),         'VER.12 UI renders copy-install-cmd button on outdated rows');
