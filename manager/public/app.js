@@ -1893,6 +1893,10 @@ function renderQmBulkImportPane(batchId) {
 // that hits /api/activity?workerId=X + /api/workers/list — much
 // cheaper than a full dashboard refresh).
 let _workerMonitorTimer = null;
+// Expose globally so the fleet row's <button onclick> fallback (inline
+// attribute) can always call it, even if the delegated listener at
+// document-level failed to attach for any reason (script order, error
+// during boot, whatever). Belt to the delegation suspenders.
 async function openWorkerMonitor(workerId) {
   const modal = $('workerMonitorModal');
   const title = $('workerMonitorTitle');
@@ -2158,7 +2162,7 @@ function renderWorkerFleet() {
     </div>` : '';
 
   el.innerHTML = frozenBanner + stuckBanner + `<table class="tbl">
-    <thead><tr><th>Worker</th><th>Current step</th><th>Last hb</th><th class="num">In-flight</th><th class="num">Done</th><th class="num">Failed</th><th style="width: 1%;">Actions</th></tr></thead>
+    <thead><tr><th>Worker</th><th>Current step</th><th>Last hb</th><th class="num">In-flight</th><th class="num">Done</th><th class="num">Failed</th><th style="min-width: 300px; white-space: nowrap;">Actions</th></tr></thead>
     <tbody>${state.workers.map(w => {
       const stage = stageFor(w._lastActivity, w);
       const isStuck = stuck.includes(w);
@@ -2181,22 +2185,19 @@ function renderWorkerFleet() {
         ${inFlightCell}
         <td class="num" style="color:var(--success);">${w.done || 0}</td>
         <td class="num" style="color:${(w.failed||0) > 0 ? 'var(--danger)' : 'var(--text-3)'};">${w.failed || 0}</td>
-        <td>
+        <td style="white-space: nowrap; text-align: right;">
           <div class="worker-actions">
-            <!-- Group 1: primary control -->
-            <button data-worker="${esc(w.worker_id)}" data-monitor="1" class="wa wa-primary" title="Open worker monitor — full status, all controls, filtered activity log.">🖥 Monitor</button>
-            <button data-worker="${esc(w.worker_id)}" data-cmd="wake"   class="wa wa-ok"      title="Wake — start claiming (respects manual Stop). Use Force reconnect if Wake gets 'ignored'.">▶ Wake</button>
-            <button data-worker="${esc(w.worker_id)}" data-cmd="reconnect" class="wa wa-warn"  title="Force reconnect — overrides Stop. Use when Wake was ignored.">⟳ Force</button>
-            <button data-worker="${esc(w.worker_id)}" data-cmd="pause"  class="wa"            title="Pause after current SKU">⏸ Pause</button>
+            <button data-worker="${esc(w.worker_id)}" data-monitor="1" class="wa wa-primary" title="Monitor — full status, controls, filtered log" onclick="window.openWorkerMonitor && window.openWorkerMonitor('${esc(w.worker_id)}')">🖥</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="wake"   class="wa wa-ok"      title="Wake — start claiming (respects Stop)">▶</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="reconnect" class="wa wa-warn"  title="Force reconnect — overrides Stop">⟳</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="pause"  class="wa"            title="Pause after current SKU">⏸</button>
             <span class="wa-sep"></span>
-            <!-- Group 2: destructive -->
-            <button data-worker="${esc(w.worker_id)}" data-release-worker="${esc(w.worker_id)}" class="wa wa-danger" title="Release this worker's claims back to queue (manager-side — works even if worker is offline).">↻ Release</button>
-            <button data-worker="${esc(w.worker_id)}" data-cmd="stop"   class="wa wa-danger" title="Stop and disarm — worker requires an explicit Connect to resume.">■ Stop</button>
+            <button data-worker="${esc(w.worker_id)}" data-release-worker="${esc(w.worker_id)}" class="wa wa-danger" title="Release claims back to queue">↻</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="stop"   class="wa wa-danger" title="Stop and disarm">■</button>
             <span class="wa-sep"></span>
-            <!-- Group 3: recovery / admin -->
-            <button data-worker="${esc(w.worker_id)}" data-wol="1"       class="wa wa-primary" title="Wake-on-LAN — send magic packet (works only on same LAN as target).">🔌 WoL</button>
-            <button data-worker="${esc(w.worker_id)}" data-recover="1"   class="wa wa-mute"    title="Recovery guide — step-by-step for offline workers.">? Guide</button>
-            <button data-worker="${esc(w.worker_id)}" data-remove-worker="1" class="wa wa-mute" title="Remove from roster (ghost / decommissioned). Doesn't touch claims — use ↻ Release first.">🗑 Remove</button>
+            <button data-worker="${esc(w.worker_id)}" data-wol="1"       class="wa wa-primary" title="Wake-on-LAN — magic packet (same LAN only)">🔌</button>
+            <button data-worker="${esc(w.worker_id)}" data-recover="1"   class="wa wa-mute"    title="Recovery guide">?</button>
+            <button data-worker="${esc(w.worker_id)}" data-remove-worker="1" class="wa wa-mute" title="Remove from roster (ghost / decommissioned)">🗑</button>
           </div>
         </td>
       </tr>`;
@@ -5951,6 +5952,15 @@ document.addEventListener('keydown', (e) => {
 // already shows real numbers, not em-dashes.
 refreshStatsBar();
 refreshUploadSidebar();
+// Wire fleet + monitor delegation EAGERLY at boot instead of lazily on
+// first fleet render. Older lazy path had a race: user could click a
+// button between initial render (before wire) and the moment wireFleetDelegation
+// finally ran. Eager attach = zero race.
+wireFleetDelegation(null);
+// Expose openWorkerMonitor globally so any inline onclick fallback in
+// the fleet row can always dispatch, even if the delegation somehow
+// failed to attach.
+window.openWorkerMonitor = openWorkerMonitor;
 
 // Restore last-viewed tab + selected batch + refresh interval from
 // localStorage so a browser reload doesn't lose the user's context.
