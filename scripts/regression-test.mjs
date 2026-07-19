@@ -1689,6 +1689,12 @@ async function run() {
   assert(appFull.includes('currentProduct.reviews?.hasReviews'), 'SHOP-EXT.13 prompt consumes reviews.hasReviews');
   assert(appFull.includes('currentProduct.product_category'),   'SHOP-EXT.14 prompt consumes product_category');
   assert(appFull.includes('SKIP \\`AggregateRating\\` schema entirely'),   'SHOP-EXT.15 prompt tells Claude to skip AggregateRating when no reviews');
+  // UI hook-up for the preflight — inline red/yellow/green report + Force override + button gate.
+  assert(appFull.includes('renderShopifyPreflightReport'),      'SHOP-EXT.16 preflight report renderer wired in Shopify modal');
+  assert(appFull.includes("id=\"shopifyPreflightBox\""),        'SHOP-EXT.17 preflight box element rendered');
+  assert(appFull.includes("id=\"shopifyForceOverride\""),       'SHOP-EXT.18 Force-override checkbox present');
+  assert(appFull.includes('applyPreflightGate'),                'SHOP-EXT.19 Push button gated by preflightCriticalCount + force override');
+  assert(appFull.includes('api.shopifyValidatePatch'),          'SHOP-EXT.20 modal calls dry-run validator on paste');
 
   // Selective wipe + Shopify integration.
   assert(srvFull.includes("'/api/wipe-selective'"),                    'WIPE.1 selective wipe endpoint');

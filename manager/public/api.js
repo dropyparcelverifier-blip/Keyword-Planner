@@ -90,7 +90,7 @@ export const api = {
   wipeSelective:     (flags, batchId)  => _fetch('/api/wipe-selective', { method: 'POST', body: { confirm: 'WIPE', flags, batchId: batchId || null } }),
   shopifyFieldImpact:  ()              => _fetch('/api/shopify/field-impact'),
   shopifyGetProduct:   (productUrl)    => _fetch(`/api/shopify/get-product?url=${encodeURIComponent(productUrl)}`),
-  shopifyUpdateProduct:(productId, patch) => _fetch('/api/shopify/update-product', { method: 'POST', body: { confirm: 'PUSH', productId, patch } }),
+  shopifyUpdateProduct:(productId, patch, opts = {}) => _fetch('/api/shopify/update-product', { method: 'POST', body: { confirm: 'PUSH', productId, patch, force: !!opts.force, validationContext: opts.validationContext || undefined } }),
   jobsUploadBySku:     (batchId, skus, resolve, dryRun) => _fetch('/api/jobs/upload-by-sku', { method: 'POST', body: { batchId, skus, resolve, dryRun } }),
   jobsBulkUpdate:      (jobIds, patch, force) => _fetch('/api/jobs/bulk-update', { method: 'POST', body: { jobIds, patch, force: !!force } }),
   jobsBulkDelete:      (jobIds, force) => _fetch('/api/jobs/bulk-delete', { method: 'POST', body: { jobIds, force: !!force } }),

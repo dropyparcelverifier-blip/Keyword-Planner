@@ -3946,7 +3946,39 @@ async function openShopifyModal() {
       impactRows,
       allowlist,
     });
-    wireShopifyModalHandlers(cur.id, allowlist);
+    // Build validationContext for the preflight checker. Same signals the
+    // prompt builder used, extracted from the SKU's research rows:
+    //   · primaryKeyword — highest opportunity_score keyword (if computed)
+    //     or highest kp_monthly_searches if not
+    //   · competitorBrands — domains that appeared most often in
+    //     sellers_on_serp across rows, mapped to brand names
+    //   · hasReviewData    — whether Shopify metafields carried a real rating
+    const sortedByScore = [...rows].sort((a, b) => (b.opportunity_score || 0) - (a.opportunity_score || 0));
+    const primaryKeyword = (sortedByScore[0]?.keyword || rows[0]?.keyword || '').trim();
+    const competitorDomains = new Map();
+    for (const r of rows) {
+      const line = String(r.sellers_on_serp || '');
+      if (!line) continue;
+      for (const part of line.split('|')) {
+        const dom = (part.trim().match(/^([a-z0-9.-]+\.[a-z]{2,})/i) || [])[1];
+        if (!dom || dom === 'dropy.in') continue;
+        competitorDomains.set(dom, (competitorDomains.get(dom) || 0) + 1);
+      }
+    }
+    // Extract just the brand token from each domain (amazon.in → Amazon,
+    // nykaa.com → Nykaa). The validator does a case-insensitive word-
+    // boundary regex, so first-token is enough for common cases.
+    const competitorBrands = [...competitorDomains.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([d]) => d.split('.')[0].replace(/^www$/, ''))
+      .filter(b => b && b.length >= 3);
+    const validationContext = {
+      primaryKeyword,
+      competitorBrands,
+      hasReviewData: !!(cur.reviews?.hasReviews),
+    };
+    wireShopifyModalHandlers(cur.id, allowlist, validationContext);
   } catch (e) {
     body.innerHTML = `<div class="hint" style="color: var(--danger); padding: 20px 0;">
       Failed to load: ${e.message}<br><br>
@@ -4309,7 +4341,7 @@ function renderShopifyModalBody({ currentProduct, productUrl, prompt, impactRows
     <div id="shopifyPreviewBox" style="margin-top: 12px;"></div>
   `;
 }
-function wireShopifyModalHandlers(productId, allowlist) {
+function wireShopifyModalHandlers(productId, allowlist, validationContext = {}) {
   $('shopifyCopyPromptBtn')?.addEventListener('click', async () => {
     const t = $('shopifyPromptText').value;
     if (await copyToClipboard(t)) toast('Prompt copied — paste into Claude.', 'ok', { title: 'Copied' });
@@ -4360,25 +4392,105 @@ function wireShopifyModalHandlers(productId, allowlist) {
         </div>
         <div style="margin-top: 8px;">${keptEntries.map(renderKeptField).join('') || '<div class="hint">nothing to send</div>'}</div>
         ${stripEntries.length > 0 ? `<div class="hint" style="margin-top: 8px; color: var(--danger);"><strong>Stripped:</strong> ${stripEntries.map(([k]) => `<code>${k}</code>`).join(', ')}</div>` : ''}
-        <div class="row" style="margin-top: 12px;">
+        <div id="shopifyPreflightBox" style="margin-top: 10px;">
+          <div class="hint">Running preflight rubric check…</div>
+        </div>
+        <div class="row" style="margin-top: 12px; align-items: center; gap: 12px;">
           <button class="danger" id="shopifyPushBtn" ${keptEntries.length === 0 ? 'disabled' : ''}>Push to Shopify now</button>
+          <label style="display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--text-3);">
+            <input type="checkbox" id="shopifyForceOverride" />
+            Force override (bypass preflight critical failures)
+          </label>
         </div>
         <div id="shopifyPushResult" style="margin-top: 8px;"></div>
       </div>
     `;
+    // Preflight — call the dry-run endpoint, render report, gate the button.
+    let preflightCriticalCount = 0;
+    if (keptEntries.length > 0) {
+      (async () => {
+        try {
+          const pf = await api.shopifyValidatePatch(kept, validationContext);
+          preflightCriticalCount = pf.preflight?.critical?.length || 0;
+          renderShopifyPreflightReport(pf.preflight, validationContext);
+        } catch (e) {
+          $('shopifyPreflightBox').innerHTML = `<div class="hint" style="color: var(--text-3);">(preflight endpoint unavailable — server may be older: ${e.message})</div>`;
+        }
+        applyPreflightGate();
+      })();
+    }
+    // Gate: disable Push when critical > 0 unless Force override is checked.
+    const applyPreflightGate = () => {
+      const btn = $('shopifyPushBtn');
+      const force = $('shopifyForceOverride')?.checked;
+      if (!btn) return;
+      const blocked = preflightCriticalCount > 0 && !force;
+      btn.disabled = keptEntries.length === 0 || blocked;
+      btn.title = blocked
+        ? `Preflight failed with ${preflightCriticalCount} critical issue(s). Fix Claude's output or check "Force override".`
+        : '';
+    };
+    $('shopifyForceOverride')?.addEventListener('change', applyPreflightGate);
     $('shopifyPushBtn')?.addEventListener('click', async () => {
       const btn = $('shopifyPushBtn');
+      const force = $('shopifyForceOverride')?.checked;
       btn.disabled = true; btn.textContent = 'Pushing…';
       try {
-        const r = await api.shopifyUpdateProduct(productId, kept);
+        const r = await api.shopifyUpdateProduct(productId, kept, { force, validationContext });
         $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${Object.keys(r.sent || {}).map(k => `<code>${k}</code>`).join(', ') || '(none)'}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}</div>`;
         toast('Shopify listing updated.', 'ok', { title: 'Pushed' });
       } catch (e) {
-        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--danger);">Push failed: ${e.message}</div>`;
+        // If the server rejected on preflight AND we didn't force, surface the preflight report inline.
+        const detail = e.data?.preflight
+          ? `<br><small>${(e.data.preflight.critical || []).map(c => `<code>${c.id}</code>: ${c.msg}`).join('<br>')}</small>`
+          : '';
+        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--danger);">Push failed: ${e.message}${detail}</div>`;
         toast(e.message, 'err', { title: 'Push failed' });
       } finally { btn.disabled = false; btn.textContent = 'Push to Shopify now'; }
     });
   });
+}
+// Render the preflight rubric report inline in the Shopify modal. Called
+// after the JSON is parsed + validated against /api/shopify/validate-patch.
+// Three-tier visual: green (ok, no warnings), yellow (ok, warnings only),
+// red (critical failures). Each critical + warning is listed with its
+// stable id + human message.
+function renderShopifyPreflightReport(preflight, ctx) {
+  const box = $('shopifyPreflightBox');
+  if (!box || !preflight) return;
+  const critCount = preflight.critical?.length || 0;
+  const warnCount = preflight.warn?.length || 0;
+  const stats = preflight.stats || {};
+  const isGreen = critCount === 0 && warnCount === 0;
+  const isYellow = critCount === 0 && warnCount > 0;
+  const bg     = critCount > 0 ? 'var(--danger-soft)' : isYellow ? 'var(--warn-soft)' : 'var(--success-soft)';
+  const border = critCount > 0 ? 'var(--danger)'      : isYellow ? 'var(--warn)'      : 'var(--success)';
+  const label  = critCount > 0 ? `⛔ PREFLIGHT FAILED — ${critCount} critical issue(s)` : isYellow ? `⚠ Preflight OK — ${warnCount} warning(s)` : `✓ Preflight OK — no issues`;
+  const color  = critCount > 0 ? 'var(--danger)'      : isYellow ? 'var(--warn)'      : 'var(--success)';
+  const contextLine = (ctx.primaryKeyword || ctx.competitorBrands?.length || ctx.hasReviewData !== undefined)
+    ? `<div class="hint" style="margin-top:6px; font-size:11px;">Context: primary=${esc(ctx.primaryKeyword || '—')} · competitors=[${(ctx.competitorBrands || []).map(esc).join(', ')}] · reviews=${ctx.hasReviewData ? 'real' : 'none'}</div>`
+    : '';
+  const statsLine = Object.keys(stats).length > 0
+    ? `<div class="hint" style="margin-top:6px; font-size:11px;">${Object.entries(stats).map(([k, v]) => `${esc(k)}=${v}`).join(' · ')}</div>`
+    : '';
+  const critList = critCount > 0
+    ? `<div style="margin-top:8px;"><strong style="color: var(--danger);">Critical (block push):</strong><ul style="margin: 4px 0 0 16px; padding: 0; font-size: 12px;">${preflight.critical.map(c => `<li><code>${esc(c.id)}</code> — ${esc(c.msg)}</li>`).join('')}</ul></div>`
+    : '';
+  const warnList = warnCount > 0
+    ? `<div style="margin-top:8px;"><strong style="color: var(--warn);">Warnings (don't block):</strong><ul style="margin: 4px 0 0 16px; padding: 0; font-size: 12px; color: var(--text-2);">${preflight.warn.map(w => `<li><code>${esc(w.id)}</code> — ${esc(w.msg)}</li>`).join('')}</ul></div>`
+    : '';
+  box.innerHTML = `
+    <div style="padding: 10px; background: ${bg}; border: 1px solid ${border}; border-radius: 6px;">
+      <div style="display:flex; align-items:baseline; gap:12px;">
+        <strong style="color: ${color};">${label}</strong>
+      </div>
+      ${contextLine}
+      ${statsLine}
+      ${critList}
+      ${warnList}
+      ${isGreen ? '<div class="hint" style="margin-top:6px;">Every rubric check passed. Push away.</div>' : ''}
+    </div>
+  `;
 }
 // Extract a JSON object from either a bare JSON string OR a markdown
 // response containing one or more ```json fenced blocks. If a fenced
