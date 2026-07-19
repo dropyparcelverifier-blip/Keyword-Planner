@@ -451,6 +451,11 @@ INSERT OR IGNORE INTO worker_config (id, config, active_batch_id) VALUES (1, '{}
 // Additive migration for older DBs (workers table exists without the new cols).
 try { db.exec(`ALTER TABLE workers ADD COLUMN mac_address TEXT`); } catch {}
 try { db.exec(`ALTER TABLE workers ADD COLUMN hostname TEXT`); } catch {}
+// Worker-side extension version hash — reported on heartbeat. Manager
+// compares against its current WORKER_FILES hash to flag out-of-date
+// installs on the Fleet UI. Extension re-install picks up updates.
+try { db.exec(`ALTER TABLE workers ADD COLUMN version_hash TEXT`); } catch {}
+try { db.exec(`ALTER TABLE workers ADD COLUMN version_reported_at INTEGER`); } catch {}
 
 const now = () => Date.now();
 
@@ -677,7 +682,8 @@ const Q = {
     ON CONFLICT(worker_id) DO UPDATE SET last_seen=excluded.last_seen,
       mac_address=COALESCE(NULLIF(excluded.mac_address, ''), workers.mac_address),
       hostname=COALESCE(NULLIF(excluded.hostname, ''), workers.hostname)`),
-  listWorkers: db.prepare(`SELECT worker_id, first_seen, last_seen, mac_address, hostname FROM workers ORDER BY last_seen DESC`),
+  listWorkers: db.prepare(`SELECT worker_id, first_seen, last_seen, mac_address, hostname, version_hash, version_reported_at FROM workers ORDER BY last_seen DESC`),
+  setWorkerVersion: db.prepare(`UPDATE workers SET version_hash=?, version_reported_at=? WHERE worker_id=?`),
   deleteWorker: db.prepare(`DELETE FROM workers WHERE worker_id=?`),
   deleteStaleWorkers: db.prepare(`DELETE FROM workers WHERE last_seen < ?`),
   getWorker:   db.prepare(`SELECT * FROM workers WHERE worker_id = ?`),
@@ -817,6 +823,28 @@ const WORKER_FILES = [
   'config/discovery-config.js',
   'lib/xlsx.mjs', 'lib/transformers.min.js',
 ];
+
+// Cheap version-hash covering the current WORKER_FILES bundle. Cached for
+// 5s so the workers-list endpoint (polled every 3-10s) doesn't stat every
+// file on every dashboard tick. Recomputes when any file's mtime changes.
+// Used to flag out-of-date extensions on the Fleet UI — workers report
+// their own loaded hash on heartbeat; when they diverge, the operator
+// gets a badge saying 'update available'.
+let _workerBundleHashCache = { at: 0, hash: '0000000000000000' };
+function currentWorkerBundleHash() {
+  const now = Date.now();
+  if (now - _workerBundleHashCache.at < 5000) return _workerBundleHashCache.hash;
+  const parts = [];
+  for (const rel of WORKER_FILES) {
+    try {
+      const st = fs.statSync(path.join(__dirname, '..', rel));
+      parts.push(`${rel}:${Math.floor(st.mtimeMs)}:${st.size}`);
+    } catch { parts.push(`${rel}:MISSING`); }
+  }
+  const hash = crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 16);
+  _workerBundleHashCache = { at: now, hash };
+  return hash;
+}
 
 // PowerShell one-liner installer. Bootstraps the extension on a worker PC:
 // downloads every file in WORKER_FILES, creates a dedicated Chrome
@@ -1158,6 +1186,16 @@ const server = http.createServer(async (req, res) => {
   if (m === 'GET' && p === '/install-worker.ps1') return serveWorkerInstaller(req, res, url);
   if (m === 'GET' && p === '/uninstall-worker.ps1') return serveWorkerUninstaller(req, res, url);
   if (m === 'GET' && p === '/worker-files.json') return send(res, 200, { ok: true, files: WORKER_FILES });
+  // Worker-side version detection. Returns a hash covering the current
+  // WORKER_FILES bundle. When a worker's cached hash != this hash, it
+  // means the manager has newer extension files than what's loaded in
+  // Chrome and the operator needs to re-run install-worker.ps1 on that
+  // PC. Cheap: reads all mtimes (already cached for assetVersion) and
+  // hashes them. Recomputed on every request but the mtime lookups are
+  // fast + cached by the OS.
+  if (m === 'GET' && p === '/api/worker/version-hash') {
+    return send(res, 200, { ok: true, hash: currentWorkerBundleHash(), file_count: WORKER_FILES.length });
+  }
   if (m === 'GET' && p.startsWith('/worker/')) {
     const rel = p.replace(/^\/worker\//, '');
     // Special: watchdog script isn't part of the extension bundle but
@@ -1934,7 +1972,16 @@ const server = http.createServer(async (req, res) => {
       const host = String(b.hostname || '').trim();
       if (mac || host) Q.upsertWorkerFull.run(wid, t, t, mac, host);
       else             Q.upsertWorker.run(wid, t, t);
-      return send(res, 200, { ok: true });
+      // Extension version reporting — worker sends the hash it computed
+      // at cold-start from /api/worker/version-hash. We persist it so the
+      // Fleet UI can flag out-of-date installs when the manager's current
+      // hash diverges (means new WORKER_FILES were deployed after this
+      // worker last did a fresh install).
+      const vhash = String(b.versionHash || '').trim();
+      if (vhash) Q.setWorkerVersion.run(vhash, t, wid);
+      // Response echoes the CURRENT bundle hash so the worker can proactively
+      // notify itself when out-of-date (compare in a follow-up commit).
+      return send(res, 200, { ok: true, current_bundle_hash: currentWorkerBundleHash() });
     }
     // Wake-on-LAN — send a magic packet to the worker's stored MAC.
     // Requires the worker + manager be on the same physical LAN (WOL
@@ -1971,7 +2018,15 @@ const server = http.createServer(async (req, res) => {
       Q.upsertWorkerFull.run(wid, cur?.first_seen || now(), cur?.last_seen || now(), cleaned, cur?.hostname || '');
       return send(res, 200, { ok: true, mac: cleaned });
     }
-    if (m === 'GET' && p === '/api/workers/list') return send(res, 200, { ok: true, workers: Q.listWorkers.all() });
+    if (m === 'GET' && p === '/api/workers/list') {
+      const currentHash = currentWorkerBundleHash();
+      const workers = Q.listWorkers.all().map(w => ({
+        ...w,
+        current_bundle_hash: currentHash,
+        outdated: w.version_hash != null && w.version_hash !== currentHash,
+      }));
+      return send(res, 200, { ok: true, workers, current_bundle_hash: currentHash });
+    }
     // Ghost-worker cleanup — remove worker rows that haven't checked
     // in for `olderThanMinutes`. Used when a Chrome reload spawns a new
     // workerId and the OLD id is stuck in the fleet display.

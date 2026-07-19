@@ -499,6 +499,25 @@ a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visib
 .ship-badge.ship-stuck      { background: var(--danger-soft);color: var(--danger);  border-color: var(--danger); }
 .ship-badge.ship-unknown    { background: var(--bg-3);       color: var(--text-3);  border-color: var(--line-2); }
 
+/* Update-available pill next to worker id in the fleet table. Amber
+   tone matches the SHIP-badge REVIEW color so 'needs attention' reads
+   consistently across the UI. Clicking copies the install one-liner. */
+.update-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+  cursor: pointer;
+  vertical-align: middle;
+  transition: background 100ms ease;
+}
+.update-badge:hover { background: rgba(245, 158, 11, 0.22); }
+
 /* Counter tiles */
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 12px; }
 .tile { background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 8px; padding: 10px 12px; }

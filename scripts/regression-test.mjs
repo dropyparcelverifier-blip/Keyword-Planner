@@ -2237,6 +2237,37 @@ async function run() {
     assertEq(compiledOk, workerFiles.length, `V8.2 all ${workerFiles.length} worker files pass V8 strict parse`);
   }
 
+  // ===== Extension version-hash tracking =====
+  // Manager exposes /api/worker/version-hash — a 16-char digest of the
+  // current WORKER_FILES bundle (mtime + size per file). Extensions report
+  // theirs on workers/heartbeat; manager flags mismatches so the Fleet UI
+  // can show 'update available' on out-of-date PCs.
+  const vh = await req('GET', '/api/worker/version-hash');
+  assertEq(vh.status, 200,                                     'VER.1 version-hash endpoint 200');
+  assert(typeof vh.data.hash === 'string' && vh.data.hash.length === 16, 'VER.2 hash is a 16-char string');
+  assert(typeof vh.data.file_count === 'number' && vh.data.file_count > 10, 'VER.3 file_count reported');
+  // Heartbeat with a version hash → persisted + echoed back in response.
+  const hbVer = await req('POST', '/api/workers/heartbeat', { workerId: 'ver-test-worker', versionHash: 'stale1234567890AB' });
+  assertEq(hbVer.status, 200,                                  'VER.4 heartbeat with versionHash 200');
+  assert(typeof hbVer.data.current_bundle_hash === 'string',   'VER.5 heartbeat response echoes current bundle hash');
+  // /api/workers/list now includes outdated flag.
+  const verList1 = await req('GET', '/api/workers/list');
+  assertEq(verList1.status, 200,                               'VER.6 workers/list 200');
+  const verW1 = (verList1.data.workers || []).find(w => w.worker_id === 'ver-test-worker');
+  assert(verW1,                                                'VER.7 test worker present in list');
+  assertEq(verW1.outdated, true,                               'VER.8 stale hash flagged outdated');
+  assertEq(verList1.data.current_bundle_hash, vh.data.hash,    'VER.9 list echoes current bundle hash');
+  // Reporting the current hash → not outdated.
+  await req('POST', '/api/workers/heartbeat', { workerId: 'ver-test-worker', versionHash: vh.data.hash });
+  const verList2 = await req('GET', '/api/workers/list');
+  const verW2 = (verList2.data.workers || []).find(w => w.worker_id === 'ver-test-worker');
+  assertEq(verW2.outdated, false,                              'VER.10 matching hash → not outdated');
+  // Client wrapper + UI wiring.
+  assert(apiJsSrc.body.includes('fetchWorkerBundleHash') === false, 'VER.11 client wrapper is in modules/discovery-jobs.js not api.js (worker-side)');
+  assert(appJs.body.includes('data-copy-install-cmd'),         'VER.12 UI renders copy-install-cmd button on outdated rows');
+  assert(appJs.body.includes('update-badge'),                  'VER.13 update-badge class present');
+  assert(appJs.body.includes('currentBundleHash'),             'VER.14 client tracks current bundle hash');
+
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
   const [s1, w1, a1] = await Promise.all([
