@@ -680,6 +680,36 @@ const Q = {
   deleteBatchName: db.prepare(`DELETE FROM batch_names WHERE batch_id = ?`),
   listBatchNames:  db.prepare(`SELECT batch_id, display_name, updated_at FROM batch_names`),
   newestPendingBatch: db.prepare(`SELECT batch_id FROM jobs WHERE status='pending' GROUP BY batch_id ORDER BY MAX(created_at) DESC LIMIT 1`),
+  // Per-batch readiness aggregate — feeds the ship-ready badge in the UI.
+  // Joins jobs + keywords to compute low-yield SKUs (< READY_MIN_ROWS
+  // keywords) and total row count. last_activity comes from activity_log.
+  batchReadiness: db.prepare(`
+    SELECT j.batch_id,
+      COUNT(*)                                                    AS total,
+      SUM(j.status='pending')                                     AS pending,
+      SUM(j.status='claimed')                                     AS claimed,
+      SUM(j.status='done')                                        AS done,
+      SUM(j.status='failed')                                      AS failed,
+      SUM(CASE WHEN j.status='done' AND NOT EXISTS
+        (SELECT 1 FROM keywords k WHERE k.batch_id=j.batch_id AND k.product_url=j.product_url)
+        THEN 1 ELSE 0 END)                                         AS done_empty,
+      (SELECT COUNT(*) FROM keywords k WHERE k.batch_id=j.batch_id) AS total_rows,
+      MAX(j.done_at)                                              AS last_done_at,
+      MAX(j.heartbeat_at)                                         AS last_heartbeat,
+      (SELECT MAX(ts) FROM activity_log al WHERE al.batch_id=j.batch_id) AS last_activity_iso
+    FROM jobs j WHERE j.batch_id=? GROUP BY j.batch_id
+  `),
+  // Low-yield SKU list — done jobs whose keyword row count is below a
+  // configurable READY_MIN_ROWS (default 30). We flag these separately so
+  // the UI can list which specific SKUs need re-running / manual review.
+  lowYieldDoneJobs: db.prepare(`
+    SELECT j.id, j.sku, j.product_name, j.product_url,
+      (SELECT COUNT(*) FROM keywords k WHERE k.batch_id=j.batch_id AND k.product_url=j.product_url) AS row_count
+    FROM jobs j WHERE j.batch_id=? AND j.status='done'
+    GROUP BY j.id
+    HAVING row_count < ?
+    ORDER BY row_count ASC
+  `),
   batchHasPending: db.prepare(`SELECT 1 FROM jobs WHERE batch_id=? AND status='pending' LIMIT 1`),
   batchExists:     db.prepare(`SELECT 1 FROM jobs WHERE batch_id=? LIMIT 1`),
   existsActiveUrl: db.prepare(`SELECT 1 FROM jobs WHERE product_url=? AND batch_id<>? AND status IN ('pending','claimed','done') LIMIT 1`),
@@ -1656,6 +1686,78 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (m === 'GET' && p === '/api/jobs/summary')      return send(res, 200, { ok: true, batches: Q.summary.all() });
+    // Per-batch readiness — one clear status per batch so the UI can show
+    // a ship-ready badge without users piecing 6 counters together. Query
+    // params: batchId (required), minRows (default 30) = threshold below
+    // which a done SKU is 'low yield'. Returns:
+    //   status: 'READY' | 'REVIEW' | 'IN_PROGRESS' | 'STUCK' | 'EMPTY'
+    //   reason: short human string explaining the status
+    //   metrics: {total, pending, claimed, done, failed, done_empty,
+    //             total_rows, low_yield, avg_rows_per_done, stall_minutes}
+    //   low_yield_skus: [{id, sku, product_name, row_count}]
+    if (m === 'GET' && p === '/api/batches/readiness') {
+      const batchId = url.searchParams.get('batchId') || '';
+      if (!batchId) return send(res, 400, { ok: false, error: 'batchId required' });
+      const minRows = Math.max(0, Number(url.searchParams.get('minRows') || 30));
+      const stuckMinutes = Math.max(1, Number(url.searchParams.get('stuckMinutes') || 30));
+      const r = Q.batchReadiness.get(batchId);
+      if (!r) return send(res, 200, { ok: true, batchId, status: 'EMPTY', reason: 'no jobs found for this batch', metrics: { total: 0 }, low_yield_skus: [] });
+      const total       = Number(r.total || 0);
+      const pending     = Number(r.pending || 0);
+      const claimed     = Number(r.claimed || 0);
+      const done        = Number(r.done || 0);
+      const failed      = Number(r.failed || 0);
+      const done_empty  = Number(r.done_empty || 0);
+      const total_rows  = Number(r.total_rows || 0);
+      // Low-yield SKUs — done jobs with row count below minRows.
+      const lowYieldRows = Q.lowYieldDoneJobs.all(batchId, minRows);
+      const low_yield = lowYieldRows.length;
+      const avg_rows_per_done = done > 0 ? Math.round(total_rows / done) : 0;
+      // Stall detection: how many minutes since the last activity event.
+      // Uses activity_log.ts which is ISO-8601 UTC. If never seen, Infinity.
+      const lastActivityMs = r.last_activity_iso ? Date.parse(r.last_activity_iso) : 0;
+      const stall_minutes = lastActivityMs > 0
+        ? Math.round((Date.now() - lastActivityMs) / 60000)
+        : Infinity;
+      // Classify.
+      let status, reason;
+      if (total === 0) {
+        status = 'EMPTY'; reason = 'no jobs in this batch';
+      } else if (pending > 0 || claimed > 0) {
+        // Still working. Check for stall.
+        if (stall_minutes > stuckMinutes && Number.isFinite(stall_minutes)) {
+          status = 'STUCK';
+          reason = `${claimed + pending} SKU(s) not done; no activity for ${stall_minutes} min. Workers may have died or KP session expired.`;
+        } else {
+          status = 'IN_PROGRESS';
+          reason = `${claimed} in-flight, ${pending} pending${done > 0 ? `, ${done} done so far` : ''}`;
+        }
+      } else if (failed > 0 || done_empty > 0 || low_yield > 0) {
+        // All settled but not clean.
+        const issues = [];
+        if (failed > 0)     issues.push(`${failed} failed`);
+        if (done_empty > 0) issues.push(`${done_empty} done-empty (0 rows)`);
+        if (low_yield > 0)  issues.push(`${low_yield} low-yield (< ${minRows} rows)`);
+        status = 'REVIEW';
+        reason = `all SKUs settled but needs eyes: ${issues.join(', ')}. Requeue or accept as-is.`;
+      } else {
+        // All done, no failures, no low-yield.
+        status = 'READY';
+        reason = `${done}/${total} SKUs done · ${total_rows.toLocaleString()} rows (avg ${avg_rows_per_done}/SKU) · no failed / no low-yield · ready to ship`;
+      }
+      return send(res, 200, {
+        ok: true,
+        batchId,
+        status,
+        reason,
+        metrics: {
+          total, pending, claimed, done, failed, done_empty,
+          total_rows, low_yield, avg_rows_per_done,
+          stall_minutes: Number.isFinite(stall_minutes) ? stall_minutes : null,
+        },
+        low_yield_skus: lowYieldRows,
+      });
+    }
     if (m === 'GET' && p === '/api/jobs/worker-stats') {
       // Passive stale-claim reaper: any claim whose heartbeat is > 5 minutes
       // old is released before we count. Fixes the "10 in-flight for one
