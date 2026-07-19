@@ -39,7 +39,16 @@
     ],
     // Tab/nav item that switches the forecasts tool to the historical-metrics
     // table (the view that carries the same columns as the ideas grid).
-    historicalMetricsTabTexts: ['Historical metrics', 'Historical plan metrics'],
+    // Text variants covering Google KP's evolving 'Historical metrics' tab.
+    // Late 2024 refresh moved this into a segmented control and periodically
+    // A/B-tests shorter labels — cover known variants so the metrics-backfill
+    // flow finds the right tab instead of scraping the Forecast panel by
+    // mistake (which gives wildly different numbers).
+    historicalMetricsTabTexts: [
+      'Historical metrics', 'Historical plan metrics', 'Historical planning',
+      'Historical', 'Past metrics', 'Past 12 months', 'Metrics history',
+      'Search volume history', 'Volume history',
+    ],
     // Placeholder / aria-label hints for the multi-keyword paste box.
     metricsPasteHints: [
       'enter keywords', 'one keyword per line', 'copy and paste',
@@ -1343,19 +1352,63 @@
   async function switchToHistoricalMetrics() {
     // The forecasts tool opens on the Forecast view; the avg-monthly-searches
     // / competition / bid columns live under the "Historical metrics" tab.
-    const tab = findByText(
-      '[role="tab"], a, button, div[tabindex], span[tabindex], span, div',
-      SELECTORS.historicalMetricsTabTexts
-    );
-    if (tab) {
-      kpLog('switching to "Historical metrics" tab');
-      await aggressiveClick(findRealClickTarget(tab) || tab);
+    // Google's late-2024 KP refresh moved this tab into a segmented control
+    // that hydrates ~200-1500ms after page load — one-shot findByText was
+    // failing on fast machines because the tab wasn't in the DOM yet.
+    //
+    // Now we (1) poll for up to 3 seconds, (2) try MULTIPLE selector paths
+    // including aria-label + jsname, (3) log diagnostic detail on final
+    // failure so future DOM shifts are debuggable instead of silent.
+    const tryFind = () => {
+      // Path A: text match on interactive tab-shaped elements.
+      let el = findByText(
+        '[role="tab"], [role="menuitem"], a, button, div[tabindex], span[tabindex], span, div',
+        SELECTORS.historicalMetricsTabTexts
+      );
+      if (el) return { el, via: 'text' };
+      // Path B: aria-label match — Google sometimes uses aria-label for
+      // accessibility while the visible text is icon-only.
+      for (const label of SELECTORS.historicalMetricsTabTexts) {
+        const q = document.querySelector(`[aria-label*="${label}" i], [aria-labelledby*="${label.replace(/\s+/g, '-').toLowerCase()}"]`);
+        if (q && visible(q)) return { el: q, via: 'aria-label' };
+      }
+      // Path C: 'View' / 'Sort by' dropdown that hides Historical as an
+      // option. If we see such a dropdown, click it, wait, retry text.
+      const viewToggle = findByText('[role="button"], button', ['View', 'Show', 'Sort by']);
+      if (viewToggle) return { el: viewToggle, via: 'view-dropdown' };
+      return null;
+    };
+    let found = null;
+    const start = Date.now();
+    while (Date.now() - start < 3000) {
+      found = tryFind();
+      if (found) break;
+      await sleep(200);
+    }
+    if (found) {
+      kpLog(`switching to "Historical metrics" tab (via ${found.via})`);
+      await aggressiveClick(findRealClickTarget(found.el) || found.el);
       await humanPause(1800, 0.3);
+      // If we clicked a View dropdown, look for Historical option in the
+      // now-open menu and click it.
+      if (found.via === 'view-dropdown') {
+        await humanPause(400);
+        const option = findByText('[role="menuitem"], [role="option"], li, span, div', SELECTORS.historicalMetricsTabTexts);
+        if (option) {
+          kpLog('selecting Historical option from opened dropdown menu');
+          await aggressiveClick(findRealClickTarget(option) || option);
+          await humanPause(1200, 0.3);
+        }
+      }
     } else {
-      // Not an error — this is the graceful fallback path. Downgraded from
-      // 'err' to 'warn' so the manager's Errors card doesn't fill with
-      // these (they don't cause data loss, the current view is scraped).
-      kpLog('"Historical metrics" tab not found — scraping current view (may already be historical)', 'warn');
+      // Diagnostic dump: what tab-like elements ARE visible on the page?
+      // Helps whoever sees this figure out Google's new DOM shape.
+      const visibleTabs = Array.from(document.querySelectorAll('[role="tab"], [role="menuitem"], button, a'))
+        .filter(el => visible(el))
+        .map(el => (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 30))
+        .filter(t => t && t.length > 0 && t.length < 40)
+        .slice(0, 12);
+      kpLog(`"Historical metrics" tab not found after 3s poll — scraping current view. Visible tab-like elements: [${visibleTabs.join(' | ')}]`, 'warn');
     }
   }
 })();
