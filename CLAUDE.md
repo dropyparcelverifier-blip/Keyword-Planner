@@ -71,3 +71,13 @@ the `KP_GET_METRICS` KP flow, SERP `link` capture, matched-link verification.
 - Reload the extension at chrome://extensions after changes.
 - Manager PC must run `node manager/server.js` (Node 24+ for `node:sqlite`).
 - Keep commits authored as `sagar21-creator`.
+
+## Tests
+- `npm test` runs the string-match + HTTP-integration regression suite
+  (`scripts/regression-test.mjs`). Zero deps, ~2s. This is the smoke net.
+- `npm run test:e2e` runs Playwright behavior tests against a real
+  Chromium (spec-per-manager, isolated temp DB per spec) — see `e2e/`.
+  First-time setup: `npm install && npm run test:e2e:install`.
+- Two layers by intent: regression tests are cheap and cover surface
+  area; e2e tests cover behavior that string matching can't verify
+  (real clicks, real clipboard, real scroll semantics).

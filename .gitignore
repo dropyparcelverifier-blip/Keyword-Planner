@@ -10,3 +10,10 @@ manager/adbrain.db-wal
 manager/adbrain.db-shm
 manager/backups/
 manager/autostart.log
+
+# Test dependencies + artifacts
+node_modules/
+package-lock.json
+test-results/
+playwright-report/
+.playwright/

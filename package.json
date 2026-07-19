@@ -1,0 +1,13 @@
+{
+  "name": "adbrain-discovery",
+  "private": true,
+  "description": "AdBrain Discovery Chrome MV3 extension + self-hosted SQLite manager.",
+  "scripts": {
+    "test": "node scripts/regression-test.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:install": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
+  }
+}
