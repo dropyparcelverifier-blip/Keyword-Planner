@@ -62,7 +62,7 @@ export const api = {
   jobReset:            (jobId, force)  => _fetch('/api/jobs/reset',     { method: 'POST', body: { jobId, force: !!force } }),
   jobDelete:           (jobId, force)  => _fetch('/api/jobs/delete-one',{ method: 'POST', body: { jobId, force: !!force } }),
   jobAddOne:           (batchId, product) => _fetch('/api/jobs/add-one', { method: 'POST', body: { batchId, ...product } }),
-  keywordsGet:       (batchId)         => _fetch(`/api/keywords?batchId=${encodeURIComponent(batchId)}`),
+  keywordsGet:       (batchId, sinceId) => _fetch(`/api/keywords?batchId=${encodeURIComponent(batchId)}${sinceId != null ? `&sinceId=${encodeURIComponent(sinceId)}` : ''}`),
   activityGet:       (batchId, limit, workerId) => _fetch(`/api/activity?batchId=${encodeURIComponent(batchId || '')}&limit=${limit || 120}${workerId ? `&workerId=${encodeURIComponent(workerId)}` : ''}`),
   activityErrors:    (batchId, limit) => _fetch(`/api/activity?batchId=${encodeURIComponent(batchId || '')}&limit=${limit || 60}&level=err`),
   commandsSend:      (workerId, command, payload) => _fetch('/api/commands', { method: 'POST', body: { workerId, command, payload, createdBy: 'web-manager' } }),

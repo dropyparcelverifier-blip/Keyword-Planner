@@ -3239,6 +3239,16 @@ const analytics = {
   // Fingerprint of the last-rendered dataset — used to skip the re-render
   // when nothing changed, so filters/scroll/sort don't reset every 4s.
   lastFingerprint: '',
+  // Incremental fetch cursor — highest keyword row.id seen so far. Each
+  // live-poll tick sends ?sinceId=<lastMaxId>, server returns only NEW
+  // rows. Slashes bandwidth 20-100x on batches that have grown past a
+  // few hundred rows. Reset to 0 on batch switch.
+  lastMaxId: 0,
+  // Tick counter for the periodic full-refresh safety net. Every N ticks
+  // we do a from-scratch fetch instead of incremental, so rare edits /
+  // deletes / server-side dedupe merges eventually reconcile client-side.
+  tickCount: 0,
+  fullRefreshEvery: 5, // every 5th tick = 20s at the 4s cadence
   // Rows for the currently selected batch (fetched once, filtered client-side).
   allRows: [],
   // Rows for the currently selected SKU.
@@ -4473,22 +4483,48 @@ async function tickAnalyticsLive() {
   if (analytics.liveInFlight || !analytics.batchId) return;
   analytics.liveInFlight = true;
   try {
+    analytics.tickCount++;
+    // Every N ticks OR when we haven't seen any rows yet, do a full fetch
+    // as a safety net for server-side row edits / deletes / dedupes that
+    // incremental-fetch would miss (id-based delta only sees NEW rows).
+    const doFullRefresh = analytics.tickCount % analytics.fullRefreshEvery === 0
+                          || analytics.allRows.length === 0
+                          || analytics.lastMaxId === 0;
+    const sinceId = doFullRefresh ? null : analytics.lastMaxId;
     const [r, jr] = await Promise.all([
-      api.keywordsGet(analytics.batchId),
+      api.keywordsGet(analytics.batchId, sinceId),
       api.jobsPerProduct(analytics.batchId).catch(() => ({ rows: [] })),
     ]);
-    const rows = r.rows || [];
-    // Fingerprint: row count + max keyword id + jobs-done count. If none
-    // changed, skip render (avoids resetting scroll / filters every tick).
+    const newRows = r.rows || [];
+    // Server always returns maxId; use it as our next cursor. Falling back
+    // to computing from returned rows lets us handle old-server responses.
+    const serverMaxId = Number.isFinite(r.maxId) ? r.maxId
+      : newRows.reduce((m, x) => Math.max(m, Number(x._id) || 0), analytics.lastMaxId);
+    // If incremental, MERGE new rows into the existing set (append). If
+    // full refresh, REPLACE — this reconciles any edits/deletes.
+    let rows;
+    if (r.incremental) {
+      // Fast path: append newRows to analytics.allRows without re-fingerprinting the whole set.
+      if (newRows.length === 0) {
+        rows = analytics.allRows;
+        // If nothing new landed AND jobs-done count hasn't moved, skip
+        // full re-render — just update the tree hint + pulse.
+      } else {
+        rows = analytics.allRows.concat(newRows);
+      }
+    } else {
+      rows = newRows;
+    }
+    // Fingerprint: row count + max id + jobs-done count.
     const jobs = jr.rows || [];
     const doneN = jobs.filter(j => j.status === 'done').length;
-    const maxId = rows.reduce((m, x) => Math.max(m, Number(x.id) || 0), 0);
-    const fp = `${rows.length}|${maxId}|${doneN}`;
+    const fp = `${rows.length}|${serverMaxId}|${doneN}`;
     if (fp === analytics.lastFingerprint) {
       pulseAnalyticsLiveDot();
       return;
     }
     analytics.lastFingerprint = fp;
+    analytics.lastMaxId = serverMaxId;
     _treeJobCache.set(analytics.batchId, jobs);
     analytics.allRows = rows;
     analytics.columnSet = new Set();
@@ -4605,9 +4641,13 @@ async function loadAnalyticsBatch(batchId) {
     return;
   }
   filterAndRenderAnalytics();
-  // Reset fingerprint so the first live tick doesn't skip render, then
+  // Reset fingerprint + incremental cursor + tick counter so the first
+  // live tick doesn't skip render (fingerprint) and doesn't try to fetch
+  // incrementally against a stale cursor (batch just changed). Then
   // start the 4s live loop for this batch. Tab-switch stops it.
   analytics.lastFingerprint = '';
+  analytics.lastMaxId = 0;
+  analytics.tickCount = 0;
   startAnalyticsPolling();
 }
 

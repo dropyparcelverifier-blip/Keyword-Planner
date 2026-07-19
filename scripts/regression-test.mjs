@@ -1149,6 +1149,40 @@ async function run() {
   assert(appJs.body.includes('refreshOrphanCount'),   '20n.13 refreshOrphanCount() defined');
   assert(appJs.body.includes('WORK IN PROGRESS DETECTED'), '20n.14 reset-all preflight warns on active workers');
 
+  // ===== Incremental keyword fetch (Analytics live-poll bandwidth) =====
+  // /api/keywords now supports ?sinceId=<max_id> for delta reads. Client
+  // keeps a running cursor and appends new rows instead of re-parsing the
+  // whole batch every 4s. Verify:
+  //   1. Full fetch still works (no sinceId).
+  //   2. Server returns maxId on every response so the client can advance.
+  //   3. sinceId=<current max> returns 0 rows + same maxId.
+  //   4. Pushing a fresh keyword bumps maxId + returns via incremental.
+  const incBatch = 'inc-fetch-test-batch';
+  await req('POST', '/api/jobs/upload', { batchId: incBatch, products: [{ product_url: 'https://inc.example/p', product_name: 'Inc' }] });
+  await req('POST', '/api/keywords', { rows: [{ batch_id: incBatch, keyword: 'seed-1', product_url: 'https://inc.example/p' }] });
+  await req('POST', '/api/keywords', { rows: [{ batch_id: incBatch, keyword: 'seed-2', product_url: 'https://inc.example/p' }] });
+  const fullKw = await req('GET', `/api/keywords?batchId=${encodeURIComponent(incBatch)}`);
+  assertEq(fullKw.status, 200,                                  'INC.1 full keyword fetch = 200');
+  assert(Array.isArray(fullKw.data.rows) && fullKw.data.rows.length === 2, 'INC.2 full fetch returns both seeds');
+  assert(Number.isFinite(fullKw.data.maxId) && fullKw.data.maxId > 0, 'INC.3 full fetch response includes maxId');
+  assertEq(fullKw.data.incremental, false,                      'INC.4 full fetch flagged incremental=false');
+  const anchorId = fullKw.data.maxId;
+  const emptyDelta = await req('GET', `/api/keywords?batchId=${encodeURIComponent(incBatch)}&sinceId=${anchorId}`);
+  assertEq(emptyDelta.status, 200,                              'INC.5 incremental fetch with current maxId = 200');
+  assertEq(emptyDelta.data.rows.length, 0,                      'INC.6 incremental fetch returns 0 rows when no delta');
+  assertEq(emptyDelta.data.incremental, true,                   'INC.7 incremental fetch flagged incremental=true');
+  assertEq(emptyDelta.data.maxId, anchorId,                     'INC.8 incremental response echoes current maxId');
+  await req('POST', '/api/keywords', { rows: [{ batch_id: incBatch, keyword: 'seed-3-fresh', product_url: 'https://inc.example/p' }] });
+  const freshDelta = await req('GET', `/api/keywords?batchId=${encodeURIComponent(incBatch)}&sinceId=${anchorId}`);
+  assertEq(freshDelta.data.rows.length, 1,                      'INC.9 incremental fetch returns only the new row');
+  assert(freshDelta.data.maxId > anchorId,                      'INC.10 maxId advanced after new insert');
+  assertEq(freshDelta.data.rows[0].keyword, 'seed-3-fresh',     'INC.11 incremental row payload correct');
+  // Client wrapper + live-poll consumer.
+  const apiJsSrc = await fetchStatic('/public/api.js');
+  assert(apiJsSrc.body.includes('sinceId'),                     'INC.12 client keywordsGet accepts sinceId');
+  assert(appJs.body.includes('fullRefreshEvery'),               'INC.13 analytics live-poll has periodic full-refresh safety net');
+  assert(appJs.body.includes('analytics.lastMaxId'),            'INC.14 analytics tracks lastMaxId incremental cursor');
+
   // ===== 20o. BACKUPS + QUIESCE =====
   // Backup endpoints
   const bList = await req('GET', '/api/backups/list');
