@@ -597,7 +597,12 @@ const Q = {
   activeWorkers: db.prepare(`SELECT DISTINCT claimed_by worker_id, MAX(heartbeat_at) last_heartbeat FROM jobs WHERE batch_id=? AND claimed_by IS NOT NULL GROUP BY claimed_by`),
   insertKeyword: db.prepare(`INSERT INTO keywords (batch_id, sku, keyword, product_url, data) VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(batch_id, product_url, keyword) DO UPDATE SET data=excluded.data, sku=excluded.sku`),
-  keywordsByBatch: db.prepare(`SELECT data FROM keywords WHERE batch_id=? ORDER BY id ASC`),
+  keywordsByBatch: db.prepare(`SELECT id, data FROM keywords WHERE batch_id=? ORDER BY id ASC`),
+  // Incremental keyword fetch — only rows whose id > sinceId. Analytics
+  // live-poll uses this to avoid re-sending the whole batch every 4s;
+  // client keeps a running `lastMaxId` and requests only what's new.
+  keywordsByBatchSince: db.prepare(`SELECT id, data FROM keywords WHERE batch_id=? AND id>? ORDER BY id ASC`),
+  keywordsMaxIdByBatch: db.prepare(`SELECT MAX(id) mx FROM keywords WHERE batch_id=?`),
   insertActivity: db.prepare(`INSERT INTO activity_log (batch_id, worker_id, level, source, message, product_url, sku) VALUES (?, ?, ?, ?, ?, ?, ?)`),
   recentActivity: db.prepare(`SELECT * FROM activity_log WHERE (?1 IS NULL OR batch_id=?1) ORDER BY ts DESC LIMIT ?2`),
   recentActivityWorker: db.prepare(`SELECT * FROM activity_log WHERE (?1 IS NULL OR batch_id=?1) AND worker_id=?2 ORDER BY ts DESC LIMIT ?3`),
@@ -1861,8 +1866,29 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, inserted: n, rejected: rejected.length, active_batch_id: activeKw });
     }
     if (m === 'GET' && p === '/api/keywords') {
-      const rows = Q.keywordsByBatch.all(url.searchParams.get('batchId') || '').map(r => { try { return JSON.parse(r.data); } catch { return null; } }).filter(Boolean);
-      return send(res, 200, { ok: true, total: rows.length, rows });
+      const batchId = url.searchParams.get('batchId') || '';
+      const sinceIdRaw = url.searchParams.get('sinceId');
+      const sinceId = sinceIdRaw != null && sinceIdRaw !== '' ? Number(sinceIdRaw) : null;
+      const raw = Number.isFinite(sinceId)
+        ? Q.keywordsByBatchSince.all(batchId, sinceId)
+        : Q.keywordsByBatch.all(batchId);
+      const rows = raw.map(r => {
+        try { const d = JSON.parse(r.data); if (d && typeof d === 'object') d._id = r.id; return d; }
+        catch { return null; }
+      }).filter(Boolean);
+      // Always return the CURRENT max id for this batch — even when sinceId
+      // was set. Lets the client update its cursor even on an empty tick
+      // (no new rows since last check but max id has advanced elsewhere).
+      const maxRow = Q.keywordsMaxIdByBatch.get(batchId);
+      const maxId = Number.isFinite(maxRow?.mx) ? maxRow.mx : (rows.length > 0 ? rows[rows.length - 1]._id : 0);
+      return send(res, 200, {
+        ok: true,
+        total: rows.length,
+        rows,
+        maxId,
+        incremental: Number.isFinite(sinceId),
+        sinceId: Number.isFinite(sinceId) ? sinceId : null,
+      });
     }
 
     // ----- Activity log -----
