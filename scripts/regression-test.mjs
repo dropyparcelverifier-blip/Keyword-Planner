@@ -1719,7 +1719,18 @@ async function run() {
   assert(appFull.includes('range ${batchMin.toFixed(1)}'),           'DS.49 Top-10 chart shows actual score range in subtitle');
   assert(appFull.includes('score - batchMin) / span'),               'DS.50 Top-10 bars normalize against actual data span');
   // Stuck-worker auto-detection + manager-side release-by-worker endpoint.
-  const srvFull = readFileSync(resolve(REPO, 'manager/server.js'), 'utf-8');
+  // server.js + all extracted route modules — concatenated so string-match
+  // 'endpoint defined' assertions survive router.js refactor migrations.
+  const srvFull = [
+    'manager/server.js',
+    'manager/router.js',
+    'manager/routes/health.js',
+    'manager/routes/activity.js',
+    'manager/routes/commands.js',
+    'manager/routes/config.js',
+    'manager/routes/backups.js',
+    'manager/routes/destructive.js',
+  ].map(p => readFileSync(resolve(REPO, p), 'utf-8')).join('\n// ---- module boundary ----\n');
   assert(srvFull.includes('/api/jobs/release-by-worker'),             'DS.51 release-by-worker endpoint defined');
   assert(srvFull.includes('releaseByWorker'),                          'DS.52 releaseByWorker prepared statement defined');
   const apiFull = readFileSync(resolve(REPO, 'manager/public/api.js'), 'utf-8');
@@ -2317,6 +2328,21 @@ async function run() {
   assert(appJs.body.includes('data-copy-install-cmd'),         'VER.12 UI renders copy-install-cmd button on outdated rows');
   assert(appJs.body.includes('update-badge'),                  'VER.13 update-badge class present');
   assert(appJs.body.includes('currentBundleHash'),             'VER.14 client tracks current bundle hash');
+  // Router refactor: primitive + section modules must be wired into server.
+  const routerJs = { body: readFileSync(resolve(REPO, 'manager/router.js'), 'utf-8') };
+  const serverJsRaw = readFileSync(resolve(REPO, 'manager/server.js'), 'utf-8');
+  assert(routerJs.body.includes('createRouter'),               'ROUTER.1 router primitive exported');
+  assert(routerJs.body.includes('dispatch('),                  'ROUTER.2 router.dispatch method exists');
+  assert(routerJs.body.includes('duplicate'),                  'ROUTER.3 router refuses duplicate registration');
+  assert(serverJsRaw.includes("require('./router.js')"),       'ROUTER.4 server.js requires router primitive');
+  assert(serverJsRaw.includes('router.dispatch(req, res, url, routerCtx)'), 'ROUTER.5 server dispatches via router');
+  for (const mod of ['health', 'activity', 'commands', 'config', 'backups', 'destructive']) {
+    assert(serverJsRaw.includes(`require('./routes/${mod}.js')`), `ROUTER.6.${mod} server requires routes/${mod}.js`);
+  }
+  // Old if-ladder branches must be gone (not just extracted alongside).
+  assert(!serverJsRaw.includes("m === 'GET' && p === '/api/health'"), 'ROUTER.7 legacy /api/health if-branch removed');
+  assert(!serverJsRaw.includes("m === 'POST' && p === '/api/reset-all'"), 'ROUTER.8 legacy /api/reset-all if-branch removed');
+  assert(!serverJsRaw.includes("m === 'GET' && p === '/api/config'"), 'ROUTER.9 legacy /api/config if-branch removed');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.

@@ -26,6 +26,19 @@ const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 const dgram = require('dgram');
 
+// Route registry + section modules. Router runs first in the request
+// handler; if it matches, the response is already sent. Un-migrated
+// sections (Jobs, Shopify, Batches, Workers, Keywords) still live in
+// the if-ladder below — moved out one section at a time to keep diffs
+// reviewable. See router.js for the primitive.
+const { createRouter } = require('./router.js');
+const healthRoutes      = require('./routes/health.js');
+const activityRoutes    = require('./routes/activity.js');
+const commandsRoutes    = require('./routes/commands.js');
+const configRoutes      = require('./routes/config.js');
+const backupsRoutes     = require('./routes/backups.js');
+const destructiveRoutes = require('./routes/destructive.js');
+
 // ---------- Shopify Admin API helpers ----------
 // STRICT ALLOWLIST for Shopify product updates. Everything NOT in this list
 // is stripped server-side before we PUT to Shopify — even if the client
@@ -1184,6 +1197,25 @@ Write-Host '==================================================================='
 }
 
 // ---------------- Router ----------------
+// Ctx bag passed into every handler under the route table. Individual
+// modules destructure only what they need; nothing here is hot-path
+// enough to matter. Kept in one place so route modules never need to
+// reach for closures declared far above.
+const routerCtx = {
+  db, Q,
+  send, readJson, now,
+  currentManagerVersion,
+  runBackup, listBackups,
+  BACKUP_KEEP_N, BACKUP_DIR,
+};
+const router = createRouter();
+healthRoutes.register(router);
+activityRoutes.register(router);
+commandsRoutes.register(router);
+configRoutes.register(router);
+backupsRoutes.register(router);
+destructiveRoutes.register(router);
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const p = url.pathname;
@@ -1251,17 +1283,10 @@ const server = http.createServer(async (req, res) => {
   if (p.startsWith('/api/') && !tokenOk(req, url)) return send(res, 401, { ok: false, error: 'bad or missing token' });
 
   try {
-    // ----- Health -----
-    // Cheap connectivity + token check. GET only; returns quickly so the
-    // extension's health-ping alarm can flag a red pill within one round-trip.
-    if (m === 'GET' && p === '/api/health') return send(res, 200, { ok: true, ts: now() });
-    // Manager code version — git HEAD + subject line + commit time.
-    // Cached for 30s so the topbar poll doesn't spawn a child_process
-    // per request. Falls back to '(no git)' if not a git repo (rare;
-    // downloaded release / zip install).
-    if (m === 'GET' && p === '/api/manager/version') {
-      return send(res, 200, currentManagerVersion());
-    }
+    // Route table first — small handler modules under routes/. If a
+    // route matches, the module already sent the response; fall through
+    // to the legacy if-ladder below for un-migrated sections.
+    if (await router.dispatch(req, res, url, routerCtx)) return;
 
     // ----- Jobs / queue -----
     // Bulk-import SKUs from a plaintext list (one SKU per line). Handles
@@ -2079,14 +2104,6 @@ const server = http.createServer(async (req, res) => {
       const active = workers.filter(w => (nowT - Number(w.last_seen)) < 3 * 60 * 1000).length;
       return send(res, 200, { ok: true, activeWorkers: active, claimedNow: claimed?.n || 0 });
     }
-    if (m === 'GET' && p === '/api/backups/list') {
-      return send(res, 200, { ok: true, backups: listBackups(), keepN: BACKUP_KEEP_N, dir: BACKUP_DIR });
-    }
-    if (m === 'POST' && p === '/api/backups/create') {
-      const r = runBackup();
-      if (!r.ok) return send(res, 500, r);
-      return send(res, 200, r);
-    }
     if (m === 'GET' && p === '/api/jobs/failed') {
       const bId = url.searchParams.get('batchId') || '';
       const rows = bId ? Q.failedJobsByBatch.all(bId) : Q.failedJobsAll.all();
@@ -2297,80 +2314,8 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // ----- Activity log -----
-    if (m === 'POST' && p === '/api/activity') {
-      const b = await readJson(req);
-      for (const e of (Array.isArray(b.events) ? b.events : [b])) {
-        if (!e || !e.message) continue;
-        Q.insertActivity.run(e.batch_id || b.batchId || null, e.worker_id || b.workerId || null, e.level || 'info', e.source || null, String(e.message), e.product_url || null, e.sku || null);
-      }
-      return send(res, 200, { ok: true });
-    }
-    if (m === 'GET' && p === '/api/activity') {
-      const batchId  = url.searchParams.get('batchId') || null;
-      const workerId = (url.searchParams.get('workerId') || '').trim();
-      const level    = (url.searchParams.get('level') || '').trim();
-      const limit = Math.min(500, parseInt(url.searchParams.get('limit') || '120', 10));
-      const rows = workerId
-        ? Q.recentActivityWorker.all(batchId, workerId, limit)
-        : level
-        ? Q.recentActivityLevel.all(batchId, level, limit)
-        : Q.recentActivity.all(batchId, limit);
-      return send(res, 200, { ok: true, events: rows });
-    }
+    // Activity, Commands, Config, delete-batch — see routes/*.js (registered above).
 
-    // ----- Command bus -----
-    if (m === 'POST' && p === '/api/commands') {
-      const b = await readJson(req);
-      Q.insertCommand.run(b.workerId || null, String(b.command || ''), b.payload ? JSON.stringify(b.payload) : null, b.createdBy || null);
-      return send(res, 200, { ok: true });
-    }
-    if (m === 'GET' && p === '/api/commands') {
-      const rows = Q.pendingCommands.all(url.searchParams.get('workerId') || '').map(c => ({ ...c, payload: c.payload ? JSON.parse(c.payload) : null }));
-      return send(res, 200, { ok: true, commands: rows });
-    }
-    if (m === 'POST' && p === '/api/commands/ack') {
-      const b = await readJson(req);
-      for (const id of (Array.isArray(b.ids) ? b.ids : [])) Q.ackCommand.run(now(), b.workerId || null, id);
-      return send(res, 200, { ok: true });
-    }
-
-    // ----- Worker config (push-to-workers + active batch) -----
-    if (m === 'GET' && p === '/api/config') {
-      const row = Q.getConfig.get();
-      return send(res, 200, { ok: true, config: row?.config ? JSON.parse(row.config) : {}, active_batch_id: row?.active_batch_id || null });
-    }
-    if (m === 'POST' && p === '/api/config') {
-      const b = await readJson(req);
-      if (b.config !== undefined) Q.setConfig.run(JSON.stringify(b.config || {}));
-      if (b.configPatch && typeof b.configPatch === 'object') {
-        const cur = Q.getConfig.get();
-        const merged = { ...(cur?.config ? JSON.parse(cur.config) : {}) };
-        for (const [k, v] of Object.entries(b.configPatch)) { if (v === null) delete merged[k]; else merged[k] = v; }
-        Q.setConfig.run(JSON.stringify(merged));
-      }
-      if ('activeBatchId' in b) Q.setActiveBatch.run(b.activeBatchId || null);
-      return send(res, 200, { ok: true });
-    }
-
-    // ----- Destructive: delete a batch (jobs + keywords + activity) -----
-    if (m === 'POST' && p === '/api/jobs/delete-batch') {
-      const b = await readJson(req);
-      const batchId = String(b.batchId || '').trim();
-      if (!batchId) return send(res, 400, { ok: false, error: 'batchId required' });
-      let j = 0, k = 0, a = 0;
-      db.exec('BEGIN');
-      try {
-        j = Q.deleteBatchJobs.run(batchId).changes;
-        k = Q.deleteBatchKeywords.run(batchId).changes;
-        a = Q.deleteBatchActivity.run(batchId).changes;
-        // If the deleted batch was pinned, unpin so workers stop trying to claim it.
-        const cfgRow = Q.getConfig.get();
-        if (cfgRow?.active_batch_id === batchId) Q.setActiveBatch.run(null);
-        db.exec('COMMIT');
-      } catch (e) { db.exec('ROLLBACK'); throw e; }
-      return send(res, 200, { ok: true, batchId, deletedJobs: j, deletedKeywords: k, deletedActivity: a });
-    }
     // ---------- Shopify integration ----------
     // Returns the field-impact hierarchy (what carries most SEO/CTR weight).
     // UI uses this to render a priority list; the Claude prompt inlines it too.
@@ -2685,103 +2630,7 @@ const server = http.createServer(async (req, res) => {
       const okCount = results.filter(x => x.ok).length;
       return send(res, 200, { ok: okCount > 0, productId, updated: okCount, total: results.length, results });
     }
-    // Selective wipe — user picks which categories to nuke, optionally
-    // scoped to one batch. Client sends {confirm:'WIPE', flags:{...}, batchId?}.
-    // Flags: jobs, keywords, activity, commands, workers, failedJobsOnly,
-    // orphansOnly. batchId scopes {jobs, keywords, activity, failedJobsOnly}
-    // to that batch; global-only flags (commands/workers/orphansOnly) ignore
-    // batchId. Returns per-category delete counts.
-    if (m === 'POST' && p === '/api/wipe-selective') {
-      const b = await readJson(req);
-      if (b.confirm !== 'WIPE') return send(res, 400, { ok: false, error: "safety: send {confirm:'WIPE'} to proceed" });
-      const flags = b.flags || {};
-      const batchId = (b.batchId && String(b.batchId).trim()) || null;
-      let dJobs=0, dKw=0, dAct=0, dCmd=0, dWrk=0, dFail=0, dOrph=0;
-      db.exec('BEGIN');
-      try {
-        // failedJobsOnly wins over the 'jobs' flag (it's a narrower delete).
-        if (flags.failedJobsOnly) {
-          const stmt = batchId
-            ? db.prepare(`DELETE FROM jobs WHERE status='failed' AND batch_id=?`)
-            : db.prepare(`DELETE FROM jobs WHERE status='failed'`);
-          dFail = (batchId ? stmt.run(batchId) : stmt.run()).changes;
-        } else if (flags.jobs) {
-          dJobs = batchId ? Q.deleteBatchJobs.run(batchId).changes : Q.wipeJobs.run().changes;
-        }
-        if (flags.keywords) dKw  = batchId ? Q.deleteBatchKeywords.run(batchId).changes : Q.wipeKeywords.run().changes;
-        if (flags.activity) dAct = batchId ? Q.deleteBatchActivity.run(batchId).changes : Q.wipeActivity.run().changes;
-        // Global-only flags — batchId doesn't apply.
-        if (flags.commands)     dCmd  = Q.wipeCommands.run().changes;
-        if (flags.workers)      dWrk  = Q.wipeWorkersRoster.run().changes;
-        if (flags.orphansOnly)  dOrph = Q.deleteOrphanKeywords.run().changes;
-        // Unpin active batch ONLY if we actually deleted the pinned batch's
-        // full job set. failedJobsOnly=true short-circuits above and leaves
-        // pending/claimed/done intact — we must NOT unpin in that case
-        // (workers would abandon the batch on next poll). Guard on dJobs.
-        if (flags.jobs && !flags.failedJobsOnly && dJobs > 0) {
-          const cfgRow = Q.getConfig.get();
-          if (batchId && cfgRow?.active_batch_id === batchId) Q.setActiveBatch.run(null);
-          if (!batchId) Q.setActiveBatch.run(null);
-        }
-        db.exec('COMMIT');
-      } catch (e) { db.exec('ROLLBACK'); throw e; }
-      return send(res, 200, {
-        ok: true, batchId,
-        deletedJobs: dJobs, deletedKeywords: dKw, deletedActivity: dAct,
-        deletedCommands: dCmd, deletedWorkers: dWrk,
-        deletedFailedJobs: dFail, deletedOrphans: dOrph,
-      });
-    }
-    // ----- Destructive: nuke everything except worker_config -----
-    if (m === 'POST' && p === '/api/reset-all') {
-      const b = await readJson(req);
-      // Belt-and-suspenders confirm: clients must send {confirm:'RESET'}.
-      if (b.confirm !== 'RESET') return send(res, 400, { ok: false, error: "safety: send {confirm:'RESET'} to proceed" });
-      let j = 0, k = 0, a = 0, c = 0, w = 0;
-      db.exec('BEGIN');
-      try {
-        j = Q.wipeJobs.run().changes;
-        k = Q.wipeKeywords.run().changes;
-        a = Q.wipeActivity.run().changes;
-        c = Q.wipeCommands.run().changes;
-        w = Q.wipeWorkersRoster.run().changes;
-        // Unpin any pinned batch — it no longer exists.
-        Q.setActiveBatch.run(null);
-        // Broadcast a reset_local command so every worker clears its
-        // chrome.storage (stale batch IDs, claimed job IDs, done-products
-        // list, in-memory report). Without this, workers keep trying to
-        // heartbeat non-existent jobs after a reset. Broadcast = worker_id
-        // NULL; every worker sees it on its next 30s command poll.
-        Q.insertCommand.run(null, 'reset_local', null, 'manager-reset-all');
-        db.exec('COMMIT');
-      } catch (e) { db.exec('ROLLBACK'); throw e; }
-      return send(res, 200, { ok: true, deletedJobs: j, deletedKeywords: k, deletedActivity: a, deletedCommands: c, deletedWorkers: w });
-    }
-    if (m === 'POST' && p === '/api/cleanup') {
-      const b = await readJson(req);
-      const a = Q.cleanupActivity.run(now() - (b.logDays ?? 7) * 86400000);
-      const c = Q.cleanupCommands.run(now() - (b.commandsDays ?? 1) * 86400000);
-      return send(res, 200, { ok: true, activityLog: a.changes, ackedCommands: c.changes });
-    }
-    // Clear activity log immediately with optional filters — used by the
-    // "clear" buttons on the dashboard's Errors + Activity cards.
-    // Supports: {level:'err'|'warn'|'info'} to scope by level,
-    //           {workerId:'PC-XXX'} to scope by worker,
-    //           {batchId:'...'} to scope by batch,
-    //           {olderThanMs:N} to keep only recent.
-    // Any combination ANDs together. Empty body = nuke every activity row.
-    if (m === 'POST' && p === '/api/activity/clear') {
-      const b = await readJson(req).catch(() => ({}));
-      const conds = [], args = [];
-      if (b.level)       { conds.push('level = ?');       args.push(String(b.level)); }
-      if (b.workerId)    { conds.push('worker_id = ?');   args.push(String(b.workerId)); }
-      if (b.batchId)     { conds.push('batch_id = ?');    args.push(String(b.batchId)); }
-      if (Number.isFinite(b.olderThanMs)) { conds.push('ts < ?'); args.push(now() - Number(b.olderThanMs)); }
-      const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
-      const stmt = db.prepare(`DELETE FROM activity_log ${where}`);
-      const info = stmt.run(...args);
-      return send(res, 200, { ok: true, deleted: info.changes });
-    }
+    // wipe-selective, reset-all, cleanup, activity/clear — see routes/destructive.js.
 
     return send(res, 404, { ok: false, error: 'no such route' });
   } catch (e) {
