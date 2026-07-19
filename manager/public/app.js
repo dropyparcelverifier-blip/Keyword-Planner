@@ -382,6 +382,39 @@ document.addEventListener('keydown', (e) => {
 // ─────────── Global stats bar ───────────
 // Refreshed every 15s, and immediately after any state-changing action
 // (upload / delete / reset). Provides at-a-glance context on every tab.
+// Topbar 'commit • Xm ago' pill — one-glance answer to 'am I on the
+// latest code?'. Falls back gracefully when the endpoint is missing
+// (older manager) OR when the server isn't a git repo.
+async function refreshManagerVersion() {
+  const el = document.getElementById('managerVersionPill');
+  if (!el) return;
+  try {
+    const r = await api.managerVersion();
+    if (!r?.commit) { el.textContent = ''; return; }
+    const ageMs = r.committed_at ? Date.now() - r.committed_at : null;
+    const ago = ageMs != null
+      ? ageMs < 60000     ? '<1m ago'
+      : ageMs < 3600000   ? `${Math.floor(ageMs / 60000)}m ago`
+      : ageMs < 86400000  ? `${Math.floor(ageMs / 3600000)}h ago`
+      : `${Math.floor(ageMs / 86400000)}d ago`
+      : '';
+    const dirtyTag = r.dirty ? ' •dirty' : '';
+    el.textContent = `${r.commit}${dirtyTag} · ${ago}`;
+    el.title = [
+      `Branch: ${r.branch || '(unknown)'}`,
+      `Commit: ${r.commit}${r.dirty ? ' (working tree dirty)' : ''}`,
+      r.subject ? `Message: ${r.subject}` : null,
+      r.committed_at ? `Committed: ${new Date(r.committed_at).toLocaleString()}` : null,
+      '',
+      'After today, this pill answers the "am I on the latest?" question at a glance.',
+    ].filter(v => v != null).join('\n');
+    el.classList.toggle('version-pill-dirty', !!r.dirty);
+  } catch (e) {
+    el.textContent = '';
+    el.title = `Version endpoint unavailable (server may be older): ${e.message}`;
+  }
+}
+
 async function refreshStatsBar() {
   try {
     const [sum, workers, act] = await Promise.all([
@@ -6323,6 +6356,10 @@ document.addEventListener('keydown', (e) => {
 // already shows real numbers, not em-dashes.
 refreshStatsBar();
 refreshUploadSidebar();
+refreshManagerVersion();
+// Refresh every 60s so a running `node manager/server.js` reflects new
+// commits when the file is git-pulled. Cheap: server-side cache is 30s.
+setInterval(refreshManagerVersion, 60000);
 // Wire fleet + monitor delegation EAGERLY at boot instead of lazily on
 // first fleet render. Older lazy path had a race: user could click a
 // button between initial render (before wire) and the moment wireFleetDelegation

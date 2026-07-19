@@ -2279,6 +2279,16 @@ async function run() {
   assert(kdFull.includes('isAmazonRelevant'),                  'AMZ-REL.1 relevance helper declared');
   assert(kdFull.includes('amazonSkippedIrrelevant'),           'AMZ-REL.2 skipped-query counter tracked');
   assert(kdFull.includes('no brand/anchor overlap'),           'AMZ-REL.3 completion log shows skip reason');
+
+  // Manager version endpoint — used by topbar pill for 'am I on latest?' check.
+  const ver = await req('GET', '/api/manager/version');
+  assertEq(ver.status, 200,                                    'MGRV.1 version endpoint 200');
+  assert(typeof ver.data.commit === 'string' && ver.data.commit.length > 0, 'MGRV.2 commit returned');
+  assert('subject' in ver.data,                                'MGRV.3 subject field present');
+  assert('branch' in ver.data,                                 'MGRV.4 branch field present');
+  assert('dirty' in ver.data,                                  'MGRV.5 dirty flag present');
+  assert(appJs.body.includes('refreshManagerVersion'),         'MGRV.6 client refresher present');
+  assert(appJs.body.includes('managerVersionPill'),            'MGRV.7 pill element referenced');
   // Client wrapper + UI wiring.
   assert(apiJsSrc.body.includes('fetchWorkerBundleHash') === false, 'VER.11 client wrapper is in modules/discovery-jobs.js not api.js (worker-side)');
   assert(appJs.body.includes('data-copy-install-cmd'),         'VER.12 UI renders copy-install-cmd button on outdated rows');

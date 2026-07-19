@@ -830,6 +830,24 @@ const WORKER_FILES = [
 // Used to flag out-of-date extensions on the Fleet UI — workers report
 // their own loaded hash on heartbeat; when they diverge, the operator
 // gets a badge saying 'update available'.
+let _managerVersionCache = { at: 0, data: null };
+function currentManagerVersion() {
+  const now = Date.now();
+  if (now - _managerVersionCache.at < 30000 && _managerVersionCache.data) return _managerVersionCache.data;
+  const { execSync } = require('child_process');
+  const repoRoot = path.join(__dirname, '..');
+  let data = { ok: true, commit: '(no git)', subject: '', committed_at: null, branch: '', dirty: false };
+  try {
+    const gitOpts = { cwd: repoRoot, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] };
+    data.commit    = execSync('git rev-parse --short HEAD',              gitOpts).trim();
+    data.subject   = execSync('git log -1 --format=%s',                  gitOpts).trim();
+    data.committed_at = Number(execSync('git log -1 --format=%ct',       gitOpts).trim()) * 1000;
+    data.branch    = execSync('git rev-parse --abbrev-ref HEAD',         gitOpts).trim();
+    data.dirty     = execSync('git status --porcelain',                  gitOpts).trim().length > 0;
+  } catch { /* leave defaults */ }
+  _managerVersionCache = { at: now, data };
+  return data;
+}
 let _workerBundleHashCache = { at: 0, hash: '0000000000000000' };
 function currentWorkerBundleHash() {
   const now = Date.now();
@@ -1237,6 +1255,13 @@ const server = http.createServer(async (req, res) => {
     // Cheap connectivity + token check. GET only; returns quickly so the
     // extension's health-ping alarm can flag a red pill within one round-trip.
     if (m === 'GET' && p === '/api/health') return send(res, 200, { ok: true, ts: now() });
+    // Manager code version — git HEAD + subject line + commit time.
+    // Cached for 30s so the topbar poll doesn't spawn a child_process
+    // per request. Falls back to '(no git)' if not a git repo (rare;
+    // downloaded release / zip install).
+    if (m === 'GET' && p === '/api/manager/version') {
+      return send(res, 200, currentManagerVersion());
+    }
 
     // ----- Jobs / queue -----
     // Bulk-import SKUs from a plaintext list (one SKU per line). Handles
