@@ -1492,7 +1492,27 @@ async function _handleStartInner(msg) {
               } else {
                 try {
                   const r = await pushToAdBrain(productRows);
-                  if (r.failed > 0) {
+                  // Detect orphan-batch rejections FIRST — the response
+                  // shape is {success:0, failed:0, rejectedOrphan:N} which
+                  // the naive "success > 0 = ok" branch used to treat as
+                  // a successful zero-row push, silently marking the SKU
+                  // done with 0 rows and advancing the cursor. This is the
+                  // 'SKU done with empty rows' bug the user has been hitting
+                  // all session. Trigger a drift-resync + retry via the
+                  // pending-push queue with the CURRENT (manager-authoritative)
+                  // batch id so the rows can land instead of being lost.
+                  if (r.rejectedOrphan > 0) {
+                    const newBatch = r.managerActiveBatchId || '';
+                    emitProgress({
+                      currentAction: `⛔ ORPHAN-BATCH REJECTION: ${r.rejectedOrphan}/${productRows.length} row(s) rejected because our cached batch id is stale. Manager's active batch is "${newBatch || 'unknown'}"; ours is "${state.queueBatchId}". Resyncing + queueing for retry.`,
+                      logKind: 'err',
+                    });
+                    if (newBatch && newBatch !== state.queueBatchId) {
+                      state.queueBatchId = newBatch;
+                      try { await chrome.storage.local.set({ [STORAGE_KEY_QUEUE_BATCH_ID]: newBatch }); } catch {}
+                    }
+                    enqueuePendingPush(cleanUrl, productRows, newBatch || state.queueBatchId);
+                  } else if (r.failed > 0) {
                     // Don't advance lastPushedCount and DO queue the
                     // failed product for retry. Previously the success
                     // count was used to advance the cursor, silently
@@ -1500,6 +1520,16 @@ async function _handleStartInner(msg) {
                     emitProgress({
                       currentAction: `Auto-push partial for ${cleanUrl}: ${r.success}/${productRows.length} landed, ${r.failed} queued for retry`,
                       logKind: 'warn',
+                    });
+                    enqueuePendingPush(cleanUrl, productRows, state.queueBatchId);
+                  } else if (r.success === 0) {
+                    // Guard against 'silently pushed 0 of N rows' — this
+                    // should never legitimately happen (productRows.length > 0
+                    // by construction here), but if a future bug makes it
+                    // possible, don't advance the cursor and log loudly.
+                    emitProgress({
+                      currentAction: `⛔ AUTO-PUSH ZERO-SUCCESS: had ${productRows.length} row(s) to push but manager reported 0 inserted. Queueing for retry. Errors: ${(r.errors || []).slice(0, 2).join(' | ') || 'none reported'}`,
+                      logKind: 'err',
                     });
                     enqueuePendingPush(cleanUrl, productRows, state.queueBatchId);
                   } else {
