@@ -1452,7 +1452,12 @@ input.qm-select { cursor: pointer; }
 .tab.active kbd { border-color: var(--accent); color: var(--accent); }
 
 /* Per-worker action buttons on worker cards */
-.worker-actions { display: flex; gap: 4px; margin-top: 4px; }
+.worker-actions {
+  display: flex; gap: 4px; margin-top: 4px; align-items: center;
+  flex-wrap: wrap;
+}
+/* Base button + legacy danger-btn kept for backwards compat with any
+   consumer we missed; new redesign uses .wa + variant classes below. */
 .worker-actions button {
   padding: 2px 8px; font-size: 10px; font-weight: 600;
   background: var(--bg-3); border: 1px solid var(--line-2); color: var(--text-2);
@@ -1461,6 +1466,65 @@ input.qm-select { cursor: pointer; }
 .worker-actions button:hover { background: var(--line-2); color: var(--text-1); }
 .worker-actions button.danger-btn { color: var(--danger); border-color: var(--danger); }
 .worker-actions button.danger-btn:hover { background: var(--danger-soft); }
+/* Grouped, labeled buttons — new design that fixes the "10 orange
+   rectangles look identical" complaint. Each variant has its own hover
+   tone so scanning the row surfaces intent without reading tooltips. */
+.worker-actions .wa {
+  padding: 3px 9px;
+  font-size: 11px;
+  font-family: var(--mono);
+  border-radius: 4px;
+  border: 1px solid var(--line-2);
+  background: var(--bg-3);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease, border-color 100ms ease;
+  white-space: nowrap;
+  line-height: 1.35;
+}
+.worker-actions .wa:hover { background: var(--line-2); color: var(--text-0); }
+.worker-actions .wa-primary { color: var(--info); border-color: var(--info); }
+.worker-actions .wa-primary:hover { background: rgba(59, 130, 246, 0.12); }
+.worker-actions .wa-ok { color: var(--success); border-color: var(--success); }
+.worker-actions .wa-ok:hover { background: var(--success-soft); }
+.worker-actions .wa-warn { color: var(--warn); border-color: var(--warn); }
+.worker-actions .wa-warn:hover { background: rgba(245, 158, 11, 0.12); }
+.worker-actions .wa-danger { color: var(--danger); border-color: var(--danger); }
+.worker-actions .wa-danger:hover { background: var(--danger-soft); }
+.worker-actions .wa-mute { color: var(--text-3); }
+.worker-actions .wa-mute:hover { color: var(--text-1); }
+/* Vertical separator between button groups — reads as "these two
+   groups do different things" at a glance. */
+.worker-actions .wa-sep {
+  display: inline-block;
+  width: 1px; height: 18px;
+  background: var(--line-2);
+  margin: 0 2px;
+}
+/* Fleet-actions legend — the "? What do these buttons do?" popover in
+   the Worker fleet card head. Keeps the row itself compact while giving
+   users a one-click reference for every button. */
+.wa-legend { position: relative; font-size: 11px; }
+.wa-legend > summary {
+  cursor: pointer; list-style: none;
+  color: var(--info); padding: 3px 8px;
+  border: 1px dashed var(--line-2); border-radius: 4px;
+  user-select: none;
+}
+.wa-legend > summary::-webkit-details-marker { display: none; }
+.wa-legend > summary:hover { background: rgba(59, 130, 246, 0.08); }
+.wa-legend[open] > summary { background: rgba(59, 130, 246, 0.12); border-color: var(--info); color: var(--info); }
+.wa-legend-body {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 20;
+  min-width: 380px; max-width: 480px;
+  background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 6px;
+  padding: 10px 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  color: var(--text-1); line-height: 1.55;
+}
+.wa-legend-body > div { padding: 3px 0; }
+.wa-legend-body > div + div { border-top: 1px dashed var(--line-1); }
+.wa-legend-body code { font-family: var(--mono); font-size: 10px; background: var(--bg-3); padding: 1px 4px; border-radius: 3px; color: var(--text-2); }
+.wa-legend-body em { color: var(--text-3); font-style: normal; }
 
 /* Setup code */
 .setup-code {

@@ -314,6 +314,20 @@
               <span class="card-icon">🖥️</span>
               <span class="card-title">Worker fleet</span>
               <span class="card-sub" id="workerCountLabel">—</span>
+              <details class="wa-legend" style="margin-left:auto;">
+                <summary title="What each button does">? What do these buttons do?</summary>
+                <div class="wa-legend-body">
+                  <div><b>🖥 Monitor</b> — open the per-worker deep view (full status + this worker's activity log + all controls).</div>
+                  <div><b>▶ Wake</b> — start claiming SKUs. Respected by the worker unless the user pressed <em>Stop</em> on the PC.</div>
+                  <div><b>⟳ Force</b> — force reconnect. Overrides a manual Stop. Use when Wake gets ignored.</div>
+                  <div><b>⏸ Pause</b> — finish the current SKU then stop claiming. Reversible with Wake.</div>
+                  <div><b>↻ Release</b> — dump this worker's claimed SKUs back to <code>pending</code>. Manager-side; works even if worker is offline.</div>
+                  <div><b>■ Stop</b> — stop and disarm. Worker won't claim again without an explicit Wake / Force.</div>
+                  <div><b>🔌 WoL</b> — send a Wake-on-LAN magic packet. Needs same physical LAN + BIOS WoL enabled.</div>
+                  <div><b>? Guide</b> — pop up a recovery checklist for OFFLINE workers.</div>
+                  <div><b>🗑 Remove</b> — remove the worker row from the roster (for ghost / decommissioned IDs). Doesn't touch its claims.</div>
+                </div>
+              </details>
             </div>
             <div class="card-body" style="max-height: 240px; overflow: auto;">
               <div id="workerGrid"><div class="empty">No workers seen yet.</div></div>
