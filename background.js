@@ -1396,7 +1396,19 @@ async function _handleStartInner(msg) {
           shouldStop: () => state.stopRequested,
           report: reportMap,
           excludeUrls,
-          batchId: state.batchId,
+          // Row-level batch_id: use the MANAGER's queueBatchId when in
+          // distributed mode (workers claiming from the manager) so the
+          // pushed rows match the manager's jobs table and pass the
+          // batchExists orphan guard. Fall back to state.batchId (local
+          // Date.now() id) only when queueBatchId is empty (local-file mode).
+          //
+          // This was the #1 root cause of the 'SKU done with 0 rows' pattern
+          // this whole session: engine tagged every row with the local
+          // runtime id (1734567890123-style), pushed to manager, orphan
+          // guard rejected all rows because that id doesn't match any
+          // batch in jobs. Fixed now — every row lands in the correct
+          // manager-side batch.
+          batchId: state.queueBatchId || state.batchId,
           shouldKeepKeyword,
           categorizeKeyword,
           computeAdRating,
