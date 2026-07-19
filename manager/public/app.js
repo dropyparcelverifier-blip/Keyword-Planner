@@ -1243,8 +1243,15 @@ async function refreshDashboard() {
     const rosterByWid = new Map((roster.workers || []).map(w => [w.worker_id, w]));
     for (const w of (workers.workers || [])) {
       const r = rosterByWid.get(w.worker_id);
-      if (r) { w.mac_address = r.mac_address; w.hostname = r.hostname; }
+      if (r) {
+        w.mac_address = r.mac_address;
+        w.hostname = r.hostname;
+        w.version_hash = r.version_hash;
+        w.outdated = r.outdated;
+      }
     }
+    // Remember the current bundle hash so tooltips can show it.
+    state.currentBundleHash = roster.current_bundle_hash || '';
     const idleFromRoster = (roster.workers || []).filter(w => !jobsWorkerIds.has(w.worker_id))
       .map(w => ({
         worker_id: w.worker_id,
@@ -1253,6 +1260,7 @@ async function refreshDashboard() {
         done: 0, failed: 0,
         last_heartbeat: w.last_seen,
         mac_address: w.mac_address, hostname: w.hostname,
+        version_hash: w.version_hash, outdated: w.outdated,
       }));
     workers.workers = [...(workers.workers || []), ...idleFromRoster];
     state.batches = summary.batches || [];
@@ -2309,7 +2317,7 @@ function renderWorkerFleet() {
       return `
       <tr${rowBg ? ` style="${rowBg}"` : ''}>
         <td><span class="chip ${workerDotClass(w.last_heartbeat)}">●</span>
-            <a href="#" class="mono" data-filter-worker="${esc(w.worker_id)}" style="color: var(--info); text-decoration: none;" title="Filter activity log to this worker">${esc(w.worker_id)}</a></td>
+            <a href="#" class="mono" data-filter-worker="${esc(w.worker_id)}" style="color: var(--info); text-decoration: none;" title="Filter activity log to this worker">${esc(w.worker_id)}</a>${w.outdated ? `<button class="update-badge" data-copy-install-cmd="1" title="This worker's extension bundle (${esc(w.version_hash || 'unknown')}) doesn't match the manager's current bundle (${esc(state.currentBundleHash || 'unknown')}). Click to copy the install one-liner — then paste it in PowerShell on this worker's PC.">⟳ update</button>` : ''}</td>
         <td><span style="color: ${stage.color}; font-size: 11px;" title="${esc(w._lastActivity?.message || '')}">${esc(stage.label)}</span>
             ${w._lastActivity ? `<div style="font-size: 10px; color: var(--text-3);">${fmtAgo(w._lastActivity.ts)}</div>` : ''}</td>
         <td>${fmtAgo(w.last_heartbeat)}</td>
@@ -2384,6 +2392,16 @@ function wireFleetDelegation(_ignoredRoot) {
     // Only handle clicks INSIDE the fleet card. Cheap guard prevents any
     // interference with the rest of the page.
     if (!e.target.closest?.('#workerGrid')) return;
+    // Update-available badge — copies the install one-liner to clipboard
+    // so the operator can immediately paste it into the target worker's PC.
+    const updBtn = e.target.closest?.('button[data-copy-install-cmd]');
+    if (updBtn) {
+      const cmd = `irm ${location.origin}/install-worker.ps1 | iex`;
+      copyToClipboard(cmd).then(ok => {
+        toast(ok ? `Copied: ${cmd}` : 'Copy failed — command shown in title', ok ? 'ok' : 'warn', { title: '⟳ Install command copied' });
+      });
+      return;
+    }
     // Worker-id filter link (clicking the worker id under the fleet).
     const filterA = e.target.closest?.('a[data-filter-worker]');
     if (filterA) {

@@ -31,6 +31,7 @@ import {
   cleanupOldData,
   fetchBatchKeywordStats,
   sendWorkerHeartbeat,
+  fetchWorkerBundleHash,
 } from './modules/discovery-jobs.js';
 import {
   STORAGE_KEY_KP_URL,
@@ -695,8 +696,22 @@ async function workerAutoPollTick() {
     // the manager can Wake-on-LAN this PC later.
     (async () => {
       try {
-        const d = await chrome.storage.local.get(['adbrainWorkerMac', 'adbrainWorkerHostname']);
-        sendWorkerHeartbeat(state.workerId, { mac: d.adbrainWorkerMac || '', hostname: d.adbrainWorkerHostname || '' }).catch(() => {});
+        const d = await chrome.storage.local.get(['adbrainWorkerMac', 'adbrainWorkerHostname', 'adbrainWorkerBundleHash']);
+        // Version hash — cache in memory + storage so we don't re-fetch on
+        // every heartbeat. Fetched once on cold-start and echoed forever.
+        // If we don't have it yet, kick a fetch now and use whatever we
+        // have (may be empty) — subsequent heartbeats will have it.
+        let vhash = d.adbrainWorkerBundleHash || '';
+        if (!vhash) {
+          fetchWorkerBundleHash().then(h => {
+            if (h) chrome.storage.local.set({ adbrainWorkerBundleHash: h }).catch(() => {});
+          }).catch(() => {});
+        }
+        sendWorkerHeartbeat(state.workerId, {
+          mac: d.adbrainWorkerMac || '',
+          hostname: d.adbrainWorkerHostname || '',
+          versionHash: vhash,
+        }).catch(() => {});
       } catch { sendWorkerHeartbeat(state.workerId).catch(() => {}); }
     })();
     if (state.running) return;

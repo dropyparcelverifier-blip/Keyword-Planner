@@ -279,10 +279,27 @@ export async function sendWorkerHeartbeat(workerId, extras = {}) {
   if (!workerId) return { ok: false };
   try {
     const body = { workerId };
-    if (extras.mac)      body.mac = extras.mac;
-    if (extras.hostname) body.hostname = extras.hostname;
+    if (extras.mac)         body.mac         = extras.mac;
+    if (extras.hostname)    body.hostname    = extras.hostname;
+    // Report the extension bundle hash this worker was installed with —
+    // manager persists it so the Fleet UI can flag out-of-date workers
+    // when the manager's current WORKER_FILES hash diverges from this
+    // one (indicates the operator needs to re-run install-worker.ps1
+    // on that PC to pick up server-side fixes).
+    if (extras.versionHash) body.versionHash = extras.versionHash;
     return await _post('/api/workers/heartbeat', body);
   } catch { return { ok: false }; }
+}
+
+// Fetch the manager's current WORKER_FILES bundle hash. Called once on
+// worker cold-start; the returned hash is what we then echo on every
+// subsequent heartbeat so the manager can compare it against its live
+// hash and flag mismatches.
+export async function fetchWorkerBundleHash() {
+  try {
+    const r = await _get('/api/worker/version-hash');
+    return r?.hash || '';
+  } catch { return ''; }
 }
 
 export async function fetchBatchKeywordStats(batchId, limit = 50) {
