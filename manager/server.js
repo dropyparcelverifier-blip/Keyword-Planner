@@ -890,21 +890,23 @@ foreach ($f in $list) {
   $out = Join-Path $extDir ($f -replace '/', '\\')
   New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null
   try {
-    # Two-step download: fetch raw bytes, write them with WriteAllBytes.
-    # This avoids Windows PowerShell 5.1's IWR -OutFile misbehaving on
-    # .js content (adding a UTF-8 BOM or performing LF→CRLF conversion),
-    # which causes Chrome MV3 to fail SW registration with 'Status
-    # code: 15' after a fresh install.
+    # Two-step download to sidestep Windows PowerShell 5.1's IWR -OutFile
+    # misbehaving on .js content (adding a UTF-8 BOM or performing LF→CRLF
+    # conversion) which caused Chrome MV3 to fail SW registration with
+    # 'Status code: 15' after a fresh install.
+    #
+    # Use RawContentStream.ToArray() to get the raw byte payload — NOT
+    # $resp.Content, which PS decodes to a string for text/* responses
+    # (and WriteAllBytes then rejects the string arg, silently caught
+    # here, leaving the extension dir empty except for worker-config.json).
     $resp = Invoke-WebRequest -UseBasicParsing -Uri "$mgr/worker/$f" -ErrorAction Stop
-    [System.IO.File]::WriteAllBytes($out, $resp.Content)
+    $bytes = $resp.RawContentStream.ToArray()
+    [System.IO.File]::WriteAllBytes($out, $bytes)
     # Sanity-check: reject empty writes and known-bad first bytes (BOM).
-    $fi = Get-Item $out
-    if ($fi.Length -eq 0) { throw "empty file downloaded" }
+    if ((Get-Item $out).Length -eq 0) { throw "empty file downloaded" }
     if ($f -like '*.js' -or $f -like '*.mjs' -or $f -like '*.json') {
-      $head = [System.IO.File]::ReadAllBytes($out) | Select-Object -First 3
-      if ($head.Count -ge 3 -and $head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF) {
+      if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
         # Strip BOM in place — Chrome MV3 rejects BOM in ES modules.
-        $bytes = [System.IO.File]::ReadAllBytes($out)
         [System.IO.File]::WriteAllBytes($out, $bytes[3..($bytes.Length - 1)])
       }
     }
