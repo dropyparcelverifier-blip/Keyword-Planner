@@ -4071,6 +4071,30 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push(`- **Product type**: ${currentProduct.product_type || '(blank)'}`);
   L.push(`- **Tags** (current): ${currentProduct.tags || '(none)'}`);
   L.push(`- **Status**: ${currentProduct.status || '(unknown)'}`);
+  // Modern SEO fields, populated by the server via GraphQL productQuery. If
+  // empty, that IS the gap Claude fills. If populated, Claude can decide
+  // whether to overwrite (usually yes — the research is fresh).
+  L.push(`- **Current SEO title** (\`seo.title\`): ${currentProduct.seo_title || '(unset — Claude fills this)'}`);
+  L.push(`- **Current SEO description** (\`seo.description\`): ${currentProduct.seo_description || '(unset — Claude fills this)'}`);
+  // Standard Product Taxonomy — the Shopify Admin "Product category" field
+  // (distinct from Product type). Feeds Google Merchant Center / Meta Shop
+  // categorization. If unset, Claude picks the best-fit node from Shopify's
+  // taxonomy and outputs the gid://shopify/ProductTaxonomyNode/N id.
+  if (currentProduct.product_category?.id) {
+    L.push(`- **Current Product category** (Standard Taxonomy): \`${currentProduct.product_category.id}\` — ${currentProduct.product_category.fullName || currentProduct.product_category.name || ''}`);
+  } else {
+    L.push(`- **Current Product category** (Standard Taxonomy): (unset — **REAL SEO GAP**. Pick the best-fit node from Shopify's Standard Product Taxonomy and emit its \`gid://shopify/ProductTaxonomyNode/N\` id in \`product_category\`. E.g. skincare = \`gid://shopify/ProductTaxonomyNode/1085\` (Health & Beauty > Personal Care > Cosmetics > Skin Care). Guess conservatively — a wrong node ID is worse than none, so if unsure, omit the field.)`);
+  }
+  // Review data — feeds the conditional AggregateRating schema. If we have
+  // real numbers, Claude MUST emit AggregateRating using them (nothing else).
+  // If empty, Claude MUST skip AggregateRating entirely.
+  if (currentProduct.reviews?.hasReviews) {
+    L.push(`- **Reviews** (source: \`${currentProduct.reviews.source}\`): ${currentProduct.reviews.rating}★ · ${currentProduct.reviews.count} reviews — **USE THESE NUMBERS VERBATIM** in \`AggregateRating\` schema. Do NOT round, adjust, or invent additional metadata.`);
+  } else if (currentProduct.metafield_namespaces?.length) {
+    L.push(`- **Reviews**: no rating found in metafields (namespaces present: ${currentProduct.metafield_namespaces.join(', ')}). **SKIP \`AggregateRating\` schema entirely** — do not invent a rating.`);
+  } else {
+    L.push(`- **Reviews**: no review app detected on this product. **SKIP \`AggregateRating\` schema entirely** — do not invent a rating.`);
+  }
   L.push('');
   L.push('**Current body_html** (may be blank / poor — this is what we\'re replacing):');
   L.push('```html');
@@ -4125,17 +4149,24 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('  "product_type": "…",');
   L.push('  "vendor": "…",');
   L.push('  "handle": "kebab-case-slug-with-primary-keyword",');
-  L.push('  "metafields_global_title_tag": "SEO <title> (55-60 chars) | dropy.in",');
-  L.push('  "metafields_global_description_tag": "SEO <meta description> (150-160 chars, with CTA)"');
+  L.push('  "seo_title": "SEO <title> (55-60 chars) | dropy.in",');
+  L.push('  "seo_description": "SEO <meta description> (150-160 chars, with CTA)",');
+  L.push('  "metafields_global_title_tag": "same as seo_title — legacy metafield for REST compatibility",');
+  L.push('  "metafields_global_description_tag": "same as seo_description — legacy metafield for REST compatibility",');
+  L.push('  "product_category": "gid://shopify/ProductTaxonomyNode/N — Standard Product Taxonomy node id, only if you can pick with high confidence; omit if unsure"');
   L.push('}');
   L.push('```');
+  L.push('');
+  L.push('**Field routing note**: the server writes REST fields via `products.json` PUT and GraphQL-only fields (`seo_title`, `seo_description`, `product_category`) via `productUpdate`. You always emit them as flat keys — the server routes correctly. Emit BOTH the modern `seo_*` AND the legacy `metafields_global_*_tag` with the SAME string values for maximum coverage across Shopify API versions.');
   L.push('');
   L.push('### Sanity checklist BEFORE returning — Tier 1-4 rubric self-check');
   L.push('**Tier 1**');
   L.push('- [ ] `title` contains the primary keyword in the first 3 words (Tier 1 · CTR + relevance).');
   L.push('- [ ] `handle` contains the primary keyword.');
-  L.push('- [ ] `metafields_global_title_tag` is 55-60 chars (count them). Includes a benefit + `| dropy.in`.');
-  L.push('- [ ] `metafields_global_description_tag` is 150-160 chars (count them), primary keyword in first 60 chars, includes a CTA verb + a trust signal.');
+  L.push('- [ ] `seo_title` AND `metafields_global_title_tag` are BOTH set to the same 55-60 char string (modern + legacy). Includes a benefit + `| dropy.in`.');
+  L.push('- [ ] `seo_description` AND `metafields_global_description_tag` are BOTH set to the same 150-160 char string; primary keyword in first 60 chars, includes a CTA verb + a trust signal.');
+  L.push('- [ ] `product_category` is set to a `gid://shopify/ProductTaxonomyNode/N` id IF you can pick a category with high confidence; omit the key entirely otherwise (a wrong id is worse than none — Shopify Google Merchant sync will fail).');
+  L.push('- [ ] `AggregateRating` in Product JSON-LD: present ONLY if real review data was provided above; if none was provided, the key is absent from Product schema (never fabricate).');
   L.push('- [ ] `body_html` ≥ 1200 words. Zero copy-pasted sentences from research context; every sentence rewritten (Tier 1 · unique content).');
   L.push('- [ ] `body_html` payload ≤ 40 KB (Tier 1 · page speed).');
   L.push('- [ ] Product JSON-LD includes: name, description, sku, brand, image, offers {price, priceCurrency:INR, availability, url, priceValidUntil}, dateModified. GTIN if research data has one. AggregateRating ONLY if real review data provided.');

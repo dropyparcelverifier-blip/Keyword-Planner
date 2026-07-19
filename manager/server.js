@@ -39,18 +39,34 @@ const SHOPIFY_ALLOWED_FIELDS = new Set([
   'product_type',
   'vendor',
   'handle',
+  // Legacy SEO metafields — REST-compatible, still work on 2024-10.
   'metafields_global_title_tag',
   'metafields_global_description_tag',
+  // Modern SEO object — GraphQL productUpdate path. If both legacy + modern
+  // are present in a patch, both get written for belt-and-braces coverage.
+  'seo_title',
+  'seo_description',
+  // Standard Product Taxonomy — GraphQL-only. Feeds Google Merchant Center /
+  // Meta Shop categorization + Shopify's category-based filters. Value is a
+  // taxonomy node ID like "gid://shopify/ProductTaxonomyNode/2914".
+  'product_category',
 ]);
+// Fields we route through GraphQL productUpdate instead of REST products.json.
+// REST doesn't accept these; GraphQL does. Order: REST first (title/body/tags/
+// etc), then supplementary GraphQL mutation for anything in this set.
+const SHOPIFY_GRAPHQL_ONLY_FIELDS = new Set(['seo_title', 'seo_description', 'product_category']);
 // Field-impact hierarchy (surfaces to the UI + prompt). Ordered by ranking/
 // visibility impact — Claude is told to spend the most effort on the top
 // items, and the manager UI shows the same order in previews.
 const SHOPIFY_FIELD_IMPACT = [
   { field: 'title',                              impact: 'critical', why: 'primary rank signal + SERP snippet + cart title' },
   { field: 'handle',                             impact: 'critical', why: 'URL slug; changing an existing product\'s handle breaks SEO — only regenerate when intentional' },
-  { field: 'metafields_global_title_tag',        impact: 'critical', why: '<title> tag Google shows; 55-60 chars, keyword + benefit + brand' },
-  { field: 'metafields_global_description_tag',  impact: 'high',     why: '<meta description>; drives SERP CTR; 150-160 chars, hook + benefit + CTA' },
+  { field: 'seo_title',                          impact: 'critical', why: 'modern <title> (Shopify Admin > Search engine listing). 55-60 chars, keyword + benefit + brand. Prefer this over the legacy metafield.' },
+  { field: 'metafields_global_title_tag',        impact: 'critical', why: 'legacy <title> metafield; kept for REST compatibility. Duplicate seo_title here for belt-and-braces coverage.' },
+  { field: 'seo_description',                    impact: 'high',     why: 'modern <meta description>; drives SERP CTR. 150-160 chars, hook + benefit + CTA. Prefer this over the legacy metafield.' },
+  { field: 'metafields_global_description_tag',  impact: 'high',     why: 'legacy <meta description> metafield; kept for REST compatibility.' },
   { field: 'body_html',                          impact: 'high',     why: 'first 100 words = ranking anchor; include secondary keywords + FAQ + buying-intent phrases' },
+  { field: 'product_category',                   impact: 'high',     why: 'Standard Product Taxonomy node id (gid://shopify/ProductTaxonomyNode/N). Feeds Google Merchant / Meta Shop categorization + Shopify category filters. HIGH SEO signal.' },
   { field: 'tags',                               impact: 'medium',   why: 'on-site search + auto-collections; use themes here' },
   { field: 'product_type',                       impact: 'medium',   why: 'categorization; filters + auto-collections' },
   { field: 'vendor',                             impact: 'low',      why: 'brand filter; rarely changes' },
@@ -70,6 +86,84 @@ function extractShopifyHandle(url) {
   if (!url) return null;
   const m = String(url).match(/\/products\/([^/?#]+)/i);
   return m ? decodeURIComponent(m[1]) : null;
+}
+// Detect product-review signals from Shopify metafields. The India-popular
+// review apps store data in these namespaces:
+//   Judge.me: judgeme.badge  (HTML with data-average-rating) OR judgeme.review_count
+//   Loox:     loox.avg_rating + loox.num_reviews
+//   Yotpo:    yotpo.reviews_average / yotpo.reviews_count
+//   Stamped:  stamped.io.badge (contains rating attrs)
+//   Native:   reviews.rating_count + reviews.rating (Shopify Product Reviews app)
+// Returns { hasReviews, rating, count, source } — Claude uses this to decide
+// whether to emit an AggregateRating schema (never fabricated).
+function extractReviewSignals(metafields) {
+  const out = { hasReviews: false, rating: null, count: null, source: null };
+  if (!Array.isArray(metafields) || metafields.length === 0) return out;
+  const findMf = (ns, key) => metafields.find(mf => mf.namespace === ns && mf.key === key);
+  const num = (v) => {
+    const n = Number(String(v ?? '').trim());
+    return Number.isFinite(n) ? n : null;
+  };
+  // Loox — most explicit, check first
+  const looxR = findMf('loox', 'avg_rating') || findMf('loox', 'aggregate_rating');
+  const looxC = findMf('loox', 'num_reviews') || findMf('loox', 'reviews_count');
+  if (looxR && num(looxR.value) != null) {
+    out.rating = num(looxR.value);
+    out.count = looxC ? num(looxC.value) : null;
+    out.source = 'loox';
+  }
+  // Yotpo
+  if (!out.rating) {
+    const yR = findMf('yotpo', 'reviews_average') || findMf('yotpo', 'reviews_avg') || findMf('yotpo', 'rating');
+    const yC = findMf('yotpo', 'reviews_count') || findMf('yotpo', 'review_count');
+    if (yR && num(yR.value) != null) {
+      out.rating = num(yR.value);
+      out.count = yC ? num(yC.value) : null;
+      out.source = 'yotpo';
+    }
+  }
+  // Native Product Reviews app
+  if (!out.rating) {
+    const nR = findMf('reviews', 'rating');
+    const nC = findMf('reviews', 'rating_count');
+    if (nR && num(nR.value) != null) {
+      out.rating = num(nR.value);
+      out.count = nC ? num(nC.value) : null;
+      out.source = 'shopify_reviews';
+    }
+  }
+  // Judge.me — badge is HTML, parse data-average-rating + data-number-of-reviews
+  if (!out.rating) {
+    const jB = findMf('judgeme', 'badge') || findMf('judge.me', 'badge');
+    if (jB && typeof jB.value === 'string') {
+      const rMatch = jB.value.match(/data-average-rating="([\d.]+)"/i);
+      const cMatch = jB.value.match(/data-number-of-reviews="(\d+)"/i);
+      if (rMatch) {
+        out.rating = num(rMatch[1]);
+        out.count = cMatch ? num(cMatch[1]) : null;
+        out.source = 'judgeme';
+      }
+    }
+  }
+  // Stamped.io badge
+  if (!out.rating) {
+    const sB = findMf('stamped.io', 'badge') || findMf('stamped', 'badge');
+    if (sB && typeof sB.value === 'string') {
+      const rMatch = sB.value.match(/data-rating="([\d.]+)"/i) || sB.value.match(/rating="([\d.]+)"/i);
+      const cMatch = sB.value.match(/data-reviews="(\d+)"/i) || sB.value.match(/reviews-count="(\d+)"/i);
+      if (rMatch) {
+        out.rating = num(rMatch[1]);
+        out.count = cMatch ? num(cMatch[1]) : null;
+        out.source = 'stamped';
+      }
+    }
+  }
+  // Valid rating = number in [0, 5]. Reject anything else (bad metafield data).
+  if (out.rating != null && (out.rating < 0 || out.rating > 5)) {
+    out.rating = null; out.count = null; out.source = null;
+  }
+  out.hasReviews = out.rating != null && out.count != null && out.count > 0;
+  return out;
 }
 function shopifyRequest({ shopDomain, adminToken, method, apiPath, body }) {
   return new Promise((resolve, reject) => {
@@ -1835,6 +1929,30 @@ const server = http.createServer(async (req, res) => {
       if (!r.ok) return send(res, r.status || 502, { ok: false, error: `Shopify API: ${JSON.stringify(r.error)}` });
       const prod = (r.data?.products || [])[0];
       if (!prod) return send(res, 404, { ok: false, error: `no Shopify product with handle "${handle}"` });
+      // Parallel fetch: metafields (for reviews, seo, category) + product_category via GraphQL.
+      // Metafields carry the review-app data (Judge.me / Loox / Yotpo / native).
+      // Failing either request is soft — we still return the base product so the
+      // prompt can render; the reviews block just stays empty.
+      const [mfRes, gqlRes] = await Promise.all([
+        shopifyRequest({
+          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+          method: 'GET', apiPath: `/admin/api/${apiVer}/products/${prod.id}/metafields.json`,
+        }).catch(() => ({ ok: false })),
+        shopifyRequest({
+          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+          method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`,
+          body: { query: `{ product(id: "gid://shopify/Product/${prod.id}") { productCategory { productTaxonomyNode { id fullName name } } seo { title description } } }` },
+        }).catch(() => ({ ok: false })),
+      ]);
+      const metafields = mfRes.ok ? (mfRes.data?.metafields || []) : [];
+      // Extract review signals from common namespaces used by the top India-
+      // supported review apps. Never fabricate — only emit numbers we found.
+      const reviews = extractReviewSignals(metafields);
+      // GraphQL SEO + productCategory (modern fields; not in REST payload).
+      const gqlProd = gqlRes.ok ? (gqlRes.data?.data?.product || {}) : {};
+      const seoTitle = gqlProd.seo?.title || '';
+      const seoDescription = gqlProd.seo?.description || '';
+      const productCategory = gqlProd.productCategory?.productTaxonomyNode || null;
       return send(res, 200, {
         ok: true, handle,
         product: {
@@ -1848,11 +1966,21 @@ const server = http.createServer(async (req, res) => {
           status: prod.status || '',
           created_at: prod.created_at || null,
           updated_at: prod.updated_at || null,
-          // SEO metafields don't come in the base product payload; fetch
-          // separately if needed via /admin/api/.../products/<id>/metafields.json.
-          // For now show empty and let Claude generate fresh.
-          seo_title: '',
-          seo_description: '',
+          // SEO now populated from modern `seo` object on GraphQL Product.
+          // Falls back to '' when GraphQL fetch failed (soft-fail above).
+          seo_title: seoTitle,
+          seo_description: seoDescription,
+          // Standard Product Taxonomy — the Shopify Admin "Product category"
+          // dropdown, which feeds Google Merchant / Meta Shop categorization.
+          // null when unset in Shopify (that's the gap we want Claude to fill).
+          product_category: productCategory,
+          // Review-app data (Judge.me / Loox / Yotpo / native). Feeds the
+          // conditional AggregateRating schema in the Claude prompt so we
+          // never emit a fabricated rating.
+          reviews,
+          // Metafield namespaces detected — useful for the UI to show which
+          // review app is wired up.
+          metafield_namespaces: [...new Set(metafields.map(mf => mf.namespace))].filter(Boolean),
           // Images/variants included READ-ONLY for prompt context. Never
           // round-tripped to update — the allowlist has no room for them.
           images: (prod.images || []).map(im => ({ id: im.id, src: im.src, alt: im.alt || '' })),
@@ -1882,13 +2010,85 @@ const server = http.createServer(async (req, res) => {
       const cfg = cfgRow?.config ? JSON.parse(cfgRow.config) : {};
       const shop = cfg.shopify || {};
       const apiVer = shop.apiVersion || '2024-10';
-      const r = await shopifyRequest({
-        shopDomain: shop.shopDomain, adminToken: shop.adminToken,
-        method: 'PUT', apiPath: `/admin/api/${apiVer}/products/${productId}.json`,
-        body: { product: { id: productId, ...safe } },
-      });
-      if (!r.ok) return send(res, r.status || 502, { ok: false, error: `Shopify API: ${JSON.stringify(r.error)}`, stripped, sent: safe });
-      return send(res, 200, { ok: true, productId, sent: safe, stripped, product: r.data?.product || null });
+      // Split the payload: REST for legacy fields, GraphQL productUpdate for
+      // modern fields (seo object, productCategory). Both run — never one
+      // instead of the other — so the caller gets full coverage regardless
+      // of which path a given field lives on.
+      const restPayload = {};
+      const gqlPayload = {};
+      for (const [k, v] of Object.entries(safe)) {
+        if (SHOPIFY_GRAPHQL_ONLY_FIELDS.has(k)) gqlPayload[k] = v;
+        else restPayload[k] = v;
+      }
+      const results = { rest: null, graphql: null };
+      // REST update (title, body_html, tags, product_type, vendor, handle,
+      // legacy SEO metafields). Skipped if only GraphQL-only fields were sent.
+      if (Object.keys(restPayload).length > 0) {
+        const r = await shopifyRequest({
+          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+          method: 'PUT', apiPath: `/admin/api/${apiVer}/products/${productId}.json`,
+          body: { product: { id: productId, ...restPayload } },
+        });
+        results.rest = { ok: r.ok, status: r.status, error: r.ok ? null : r.error, product: r.data?.product || null };
+        if (!r.ok) return send(res, r.status || 502, { ok: false, error: `Shopify REST: ${JSON.stringify(r.error)}`, stripped, sent: safe, results });
+      }
+      // GraphQL supplementary — SEO + productCategory. Uses productUpdate;
+      // productCategory takes a taxonomy node ID. seo.title / seo.description
+      // are the modern replacement for metafields_global_*_tag.
+      if (Object.keys(gqlPayload).length > 0) {
+        const inputParts = [`id: "gid://shopify/Product/${productId}"`];
+        const seoFields = [];
+        if (gqlPayload.seo_title != null)       seoFields.push(`title: ${JSON.stringify(String(gqlPayload.seo_title))}`);
+        if (gqlPayload.seo_description != null) seoFields.push(`description: ${JSON.stringify(String(gqlPayload.seo_description))}`);
+        if (seoFields.length > 0) inputParts.push(`seo: { ${seoFields.join(', ')} }`);
+        if (gqlPayload.product_category) inputParts.push(`productCategory: { productTaxonomyNodeId: "${String(gqlPayload.product_category).replace(/"/g, '')}" }`);
+        const mutation = `mutation { productUpdate(input: { ${inputParts.join(', ')} }) { product { id seo { title description } productCategory { productTaxonomyNode { id fullName } } } userErrors { field message } } }`;
+        const g = await shopifyRequest({
+          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+          method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`,
+          body: { query: mutation },
+        });
+        const userErrs = g.data?.data?.productUpdate?.userErrors || [];
+        results.graphql = { ok: g.ok && userErrs.length === 0, status: g.status, error: userErrs.length > 0 ? userErrs : (g.ok ? null : g.error), product: g.data?.data?.productUpdate?.product || null };
+        if (!results.graphql.ok) {
+          // REST already succeeded; return partial-success so the caller can
+          // decide (retry the GraphQL half, or accept the REST-only write).
+          return send(res, 502, { ok: false, error: `Shopify GraphQL: ${JSON.stringify(results.graphql.error)}`, stripped, sent: safe, results, note: 'REST fields written successfully; only modern SEO/category failed' });
+        }
+      }
+      return send(res, 200, { ok: true, productId, sent: safe, stripped, results, product: results.rest?.product || null });
+    }
+    // Bulk-update image alt-text on a product. Deterministic template — does
+    // NOT need Claude. Takes the current product images + a keyword-rich
+    // template built from the research (e.g. `${primaryKeyword} — ${benefit}`)
+    // and PUTs each image's alt via /products/{pid}/images/{iid}.json.
+    // Missed SEO signal previously: alt text drives Google Image Search + the
+    // main-image alt is a documented ranking signal on the product page.
+    if (m === 'POST' && p === '/api/shopify/update-image-alts') {
+      const b = await readJson(req);
+      const productId = Number(b.productId);
+      if (!productId) return send(res, 400, { ok: false, error: 'productId required' });
+      if (b.confirm !== 'PUSH') return send(res, 400, { ok: false, error: "safety: send {confirm:'PUSH'} to proceed" });
+      const alts = Array.isArray(b.alts) ? b.alts : null;
+      if (!alts || alts.length === 0) return send(res, 400, { ok: false, error: 'alts array required — each entry: {imageId, alt}' });
+      const cfgRow = Q.getConfig.get();
+      const cfg = cfgRow?.config ? JSON.parse(cfgRow.config) : {};
+      const shop = cfg.shopify || {};
+      const apiVer = shop.apiVersion || '2024-10';
+      const results = [];
+      for (const entry of alts) {
+        const imageId = Number(entry.imageId || entry.id);
+        const alt = String(entry.alt || '').slice(0, 512); // Shopify soft-cap
+        if (!imageId || !alt) { results.push({ imageId, ok: false, error: 'missing imageId or alt' }); continue; }
+        const r = await shopifyRequest({
+          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+          method: 'PUT', apiPath: `/admin/api/${apiVer}/products/${productId}/images/${imageId}.json`,
+          body: { image: { id: imageId, alt } },
+        }).catch(e => ({ ok: false, error: e.message }));
+        results.push({ imageId, ok: r.ok, status: r.status, alt: r.ok ? alt : null, error: r.ok ? null : r.error });
+      }
+      const okCount = results.filter(x => x.ok).length;
+      return send(res, 200, { ok: okCount > 0, productId, updated: okCount, total: results.length, results });
     }
     // Selective wipe — user picks which categories to nuke, optionally
     // scoped to one batch. Client sends {confirm:'WIPE', flags:{...}, batchId?}.
