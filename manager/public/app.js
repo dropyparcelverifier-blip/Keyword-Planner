@@ -1471,7 +1471,7 @@ function renderBatchOverview() {
     return;
   }
   el.innerHTML = `<table class="tbl">
-    <thead><tr><th>Batch</th><th style="width: 30%;">Progress</th><th class="num">Total</th><th class="num">Done</th><th class="num">Failed</th><th style="width:1%;">Manage</th></tr></thead>
+    <thead><tr><th>Batch</th><th style="width:1%;">Ship</th><th style="width: 30%;">Progress</th><th class="num">Total</th><th class="num">Done</th><th class="num">Failed</th><th style="width:1%;">Manage</th></tr></thead>
     <tbody>${state.batches.map(b => {
       const done = b.done || 0, failed = b.failed || 0, claimed = b.claimed || 0, total = b.total || 0;
       const donePct = total ? (done / total) * 100 : 0;
@@ -1480,6 +1480,7 @@ function renderBatchOverview() {
       return `
         <tr>
           <td class="mono" style="cursor:pointer;" onclick="document.getElementById('dashBatchSelect').value='${esc(b.batch_id)}'; document.getElementById('dashBatchSelect').dispatchEvent(new Event('change'));">${esc(b.batch_id)}</td>
+          <td><span class="ship-badge ship-loading" data-ship-badge="${esc(b.batch_id)}" title="Ship-readiness — loading…">…</span></td>
           <td>
             <div class="progress">
               <div class="progress-fill ${fillClass}" style="width: ${donePct.toFixed(1)}%;"></div>
@@ -1516,6 +1517,46 @@ function renderBatchOverview() {
       refreshDashboard();
     } catch (e) { toast(e.message, 'err', { title: 'Requeue failed' }); }
   }));
+  // Populate the ship-readiness badges in parallel — one HTTP call per
+  // batch, but they're cheap (single SQL aggregate). Renders in place as
+  // each responds; failures show a grey '?' rather than blocking the row.
+  el.querySelectorAll('[data-ship-badge]').forEach(badge => {
+    const bId = badge.dataset.shipBadge;
+    api.batchReadiness(bId).then(r => renderShipBadge(badge, r)).catch(() => {
+      badge.className = 'ship-badge ship-unknown';
+      badge.textContent = '?';
+      badge.title = 'Ship-readiness endpoint failed (server may need a restart to pick up /api/batches/readiness)';
+    });
+  });
+}
+// Compact ship-readiness badge renderer. Maps the server's status enum to
+// color + label + hover tooltip. Clicking a REVIEW badge opens the queue
+// manager filtered to the problem SKUs; other statuses just switch to the
+// batch on the dashboard.
+function renderShipBadge(badge, r) {
+  const statusStyles = {
+    READY:       { color: 'success', label: 'READY',   icon: '✓' },
+    REVIEW:      { color: 'warn',    label: 'REVIEW',  icon: '⚠' },
+    IN_PROGRESS: { color: 'info',    label: 'RUNNING', icon: '◐' },
+    STUCK:       { color: 'danger',  label: 'STUCK',   icon: '⛔' },
+    EMPTY:       { color: 'text-3',  label: 'EMPTY',   icon: '·' },
+  };
+  const s = statusStyles[r.status] || statusStyles.EMPTY;
+  badge.className = `ship-badge ship-${r.status.toLowerCase()}`;
+  badge.textContent = `${s.icon} ${s.label}`;
+  // Tooltip: reason + a compact metrics line so hovering surfaces the
+  // full story (avg rows, low-yield count, stall minutes if applicable).
+  const m = r.metrics || {};
+  const metricsLine = [
+    `${m.done ?? 0}/${m.total ?? 0} done`,
+    m.failed > 0 ? `${m.failed} failed` : null,
+    m.low_yield > 0 ? `${m.low_yield} low-yield` : null,
+    m.done_empty > 0 ? `${m.done_empty} done-empty` : null,
+    (m.total_rows != null) ? `${m.total_rows.toLocaleString()} rows` : null,
+    (m.avg_rows_per_done != null && m.avg_rows_per_done > 0) ? `avg ${m.avg_rows_per_done}/SKU` : null,
+    (m.stall_minutes != null && m.stall_minutes > 5) ? `${m.stall_minutes}m since last activity` : null,
+  ].filter(Boolean).join(' · ');
+  badge.title = `${r.reason || r.status}\n${metricsLine}`;
 }
 
 // ─────────── Queue manager modal ───────────

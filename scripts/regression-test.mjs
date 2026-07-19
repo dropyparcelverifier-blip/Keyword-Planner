@@ -1205,6 +1205,59 @@ async function run() {
   assert(appJs.body.includes('lastPerProductChangedAt'),        'TREE.8 analytics tracks lastPerProductChangedAt cursor');
   assert(appJs.body.includes('perProductById'),                 'TREE.9 client keeps by-id cache for incremental merge');
 
+  // ===== Batch READY-TO-SHIP indicator =====
+  // /api/batches/readiness aggregates all signals into ONE clear status
+  // per batch: READY / REVIEW / IN_PROGRESS / STUCK / EMPTY.
+  const readyNoBatch = await req('GET', '/api/batches/readiness');
+  assertEq(readyNoBatch.status, 400,                            'SHIP.1 readiness requires batchId');
+  // Empty batch — no jobs → EMPTY.
+  const readyEmpty = await req('GET', '/api/batches/readiness?batchId=nonexistent-batch');
+  assertEq(readyEmpty.status, 200,                              'SHIP.2 readiness for unknown batch = 200');
+  assertEq(readyEmpty.data.status, 'EMPTY',                     'SHIP.3 unknown batch → EMPTY status');
+  // In-progress batch — has pending jobs → IN_PROGRESS.
+  const shipBatch = 'ship-ready-test';
+  await req('POST', '/api/jobs/upload', { batchId: shipBatch, products: [
+    { product_url: 'https://s.example/1', product_name: 'Ship1', sku: 'S1' },
+    { product_url: 'https://s.example/2', product_name: 'Ship2', sku: 'S2' },
+  ] });
+  const readyInProgress = await req('GET', `/api/batches/readiness?batchId=${encodeURIComponent(shipBatch)}`);
+  assertEq(readyInProgress.data.status, 'IN_PROGRESS',          'SHIP.4 batch with pending jobs → IN_PROGRESS');
+  assert(readyInProgress.data.metrics.total === 2,              'SHIP.5 readiness reports total SKU count');
+  // Push 50+ keywords for one job then mark done → the other still pending → IN_PROGRESS.
+  const kwPayload = [];
+  for (let i = 0; i < 50; i++) kwPayload.push({ batch_id: shipBatch, keyword: `s1-kw-${i}`, product_url: 'https://s.example/1' });
+  await req('POST', '/api/keywords', { rows: kwPayload });
+  await req('POST', '/api/jobs/done', { batchId: shipBatch, productUrl: 'https://s.example/1' });
+  // Fail the second job → all settled but 1 failed → REVIEW.
+  await req('POST', '/api/jobs/failed', { batchId: shipBatch, productUrl: 'https://s.example/2', reason: 'test' });
+  const readyReview = await req('GET', `/api/batches/readiness?batchId=${encodeURIComponent(shipBatch)}`);
+  assertEq(readyReview.data.status, 'REVIEW',                   'SHIP.6 done+failed with no in-flight → REVIEW');
+  assert(readyReview.data.reason.includes('failed'),            'SHIP.7 REVIEW reason cites failure');
+  // Requeue the failed, mark it done with 50 rows → READY.
+  await req('POST', '/api/jobs/requeue-all-failed', { batchId: shipBatch });
+  const kwPayload2 = [];
+  for (let i = 0; i < 50; i++) kwPayload2.push({ batch_id: shipBatch, keyword: `s2-kw-${i}`, product_url: 'https://s.example/2' });
+  await req('POST', '/api/keywords', { rows: kwPayload2 });
+  await req('POST', '/api/jobs/done', { batchId: shipBatch, productUrl: 'https://s.example/2' });
+  const readyReady = await req('GET', `/api/batches/readiness?batchId=${encodeURIComponent(shipBatch)}`);
+  assertEq(readyReady.data.status, 'READY',                     'SHIP.8 all done, no failed, no low-yield → READY');
+  assert(readyReady.data.reason.includes('ready to ship'),      'SHIP.9 READY reason marks ship-ready');
+  assert(readyReady.data.metrics.avg_rows_per_done > 0,         'SHIP.10 avg_rows_per_done computed');
+  // Low-yield SKU: mark a done job that has < minRows keywords → REVIEW.
+  await req('POST', '/api/jobs/upload', { batchId: shipBatch, products: [
+    { product_url: 'https://s.example/3', product_name: 'Ship3', sku: 'S3' },
+  ] });
+  await req('POST', '/api/keywords', { rows: [{ batch_id: shipBatch, keyword: 's3-only-1', product_url: 'https://s.example/3' }] });
+  await req('POST', '/api/jobs/done', { batchId: shipBatch, productUrl: 'https://s.example/3' });
+  const readyReviewLowYield = await req('GET', `/api/batches/readiness?batchId=${encodeURIComponent(shipBatch)}&minRows=30`);
+  assertEq(readyReviewLowYield.data.status, 'REVIEW',           'SHIP.11 done SKU with < minRows → REVIEW');
+  assert(readyReviewLowYield.data.metrics.low_yield >= 1,       'SHIP.12 low_yield count surfaces');
+  assert(readyReviewLowYield.data.low_yield_skus.length >= 1,   'SHIP.13 low_yield_skus list included');
+  // Client wrapper + UI wiring.
+  assert(apiJsSrc.body.includes('batchReadiness'),              'SHIP.14 client wrapper api.batchReadiness');
+  assert(appJs.body.includes('ship-badge'),                     'SHIP.15 ship-badge rendered in Batches table');
+  assert(appJs.body.includes('renderShipBadge'),                'SHIP.16 renderShipBadge helper present');
+
   // ===== 20o. BACKUPS + QUIESCE =====
   // Backup endpoints
   const bList = await req('GET', '/api/backups/list');
