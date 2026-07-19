@@ -3246,6 +3246,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // ----- Build keyword list (autosuggest-only expansion below) -----
       // Seeds: KP keywords + PAA questions. Each becomes a row, then we
       // expand each via /complete/search (free) until we hit the cap.
+      const productStartTs = Date.now();
       const productRows = [];
       const productKeywordSet = new Set();
       // Word-order dedup: "now foods super enzymes" and "super enzymes now
@@ -5157,6 +5158,43 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       const productHealth = productRows.length < 20
         ? ` ⚠ LOW YIELD (${productRows.length} kw) — likely KP failed or all filtered. Check earlier KP log line for this product.`
         : '';
+      // Per-SKU post-mortem: single compact line summarising WHERE the rows
+      // came from + how long the run took. Turns "why did this SKU produce
+      // only 7 keywords?" from an activity-log archaeology dig into a single
+      // grep. Emit BEFORE the human-readable completion line so the two
+      // stay adjacent in the log.
+      const sourceCounts = new Map();
+      for (const row of productRows) {
+        // Row.source may be comma-separated for multi-source keywords
+        // (dedup'd across rounds) — count each source token once.
+        const tokens = String(row.source || '').split(/\s*,\s*/).filter(Boolean);
+        if (tokens.length === 0) tokens.push('unknown');
+        for (const t of tokens) sourceCounts.set(t, (sourceCounts.get(t) || 0) + 1);
+      }
+      const durationMs = Date.now() - productStartTs;
+      const durMin = Math.floor(durationMs / 60000);
+      const durSec = Math.round((durationMs % 60000) / 1000);
+      const durationStr = durMin > 0 ? `${durMin}m ${durSec}s` : `${durSec}s`;
+      // Map lowercase source enum → short label for the post-mortem. Sorted
+      // by descending count so the biggest contributor is first — makes it
+      // obvious at a glance whether KP or autosuggest/related-search drove
+      // the yield.
+      const sourceLabels = {
+        kp_idea: 'KP1', kp_reexpand: 'KP2', autosuggest: 'autosug',
+        related_search: 'relsrch', paa: 'PAA', product_name: 'name',
+        amazon_suggest: 'amzn', commercial_modifier: 'commod',
+        image_match: 'imgm',
+      };
+      const breakdown = [...sourceCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${sourceLabels[k] || k}=${v}`)
+        .join(' ');
+      onProgress?.({
+        currentProduct: productName,
+        currentSource: 'postmortem',
+        currentAction: `▸ POST-MORTEM ${productName}: ${breakdown} · landed=${productRows.length} · imgmatch=${kwWithMatches} · in ${durationStr}${r2DegradedNote ? ` · R2 degraded (${r2DegradedSeeds})` : ''}${productRows.length < 20 ? ' · ⚠ LOW YIELD' : ''}`,
+        logKind: productRows.length < 20 ? 'warn' : 'ok',
+      });
       onProgress?.({
         currentProduct: productName,
         currentSource: 'done',
