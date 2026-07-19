@@ -1183,6 +1183,28 @@ async function run() {
   assert(appJs.body.includes('fullRefreshEvery'),               'INC.13 analytics live-poll has periodic full-refresh safety net');
   assert(appJs.body.includes('analytics.lastMaxId'),            'INC.14 analytics tracks lastMaxId incremental cursor');
 
+  // Incremental per-product tree — same sinceChangedAt pattern, applied to
+  // the jobs tree which polls at 4s. Full fetch still works; delta returns
+  // only jobs whose changed_at (MAX of done/heartbeat/claimed) moved.
+  const treeBatch = 'tree-inc-test';
+  await req('POST', '/api/jobs/upload', { batchId: treeBatch, products: [
+    { product_url: 'https://t.example/1', product_name: 'A', sku: 'A' },
+    { product_url: 'https://t.example/2', product_name: 'B', sku: 'B' },
+  ] });
+  const treeFull = await req('GET', `/api/jobs/per-product?batchId=${encodeURIComponent(treeBatch)}`);
+  assertEq(treeFull.status, 200,                                'TREE.1 full jobs/per-product = 200');
+  assertEq(treeFull.data.rows.length, 2,                        'TREE.2 full fetch returns all jobs');
+  assertEq(treeFull.data.incremental, false,                    'TREE.3 full fetch flagged incremental=false');
+  assert(Number.isFinite(treeFull.data.maxChangedAt),           'TREE.4 response includes maxChangedAt');
+  // Query jobs directly by their claim workflow — release-stale is safe.
+  const treeFuture = await req('GET', `/api/jobs/per-product?batchId=${encodeURIComponent(treeBatch)}&sinceChangedAt=${Date.now() + 60000}`);
+  assertEq(treeFuture.data.rows.length, 0,                      'TREE.5 sinceChangedAt in the future returns 0 rows');
+  assertEq(treeFuture.data.incremental, true,                   'TREE.6 flagged incremental=true when sinceChangedAt is set');
+  // Client wrapper + consumer.
+  assert(apiJsSrc.body.includes('sinceChangedAt'),              'TREE.7 client jobsPerProduct accepts sinceChangedAt');
+  assert(appJs.body.includes('lastPerProductChangedAt'),        'TREE.8 analytics tracks lastPerProductChangedAt cursor');
+  assert(appJs.body.includes('perProductById'),                 'TREE.9 client keeps by-id cache for incremental merge');
+
   // ===== 20o. BACKUPS + QUIESCE =====
   // Backup endpoints
   const bList = await req('GET', '/api/backups/list');

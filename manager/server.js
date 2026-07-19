@@ -593,7 +593,15 @@ const Q = {
       COUNT(*) total_touched, SUM(status='done') done_count, SUM(status='failed') failed_count,
       SUM(status='claimed') in_flight, MAX(heartbeat_at) last_heartbeat
     FROM jobs WHERE claimed_by IS NOT NULL GROUP BY claimed_by, batch_id`),
-  perProduct: db.prepare(`SELECT id, batch_id, sku, product_url, product_name, status, claimed_by, claimed_at, heartbeat_at, done_at, failed_reason, attempts, handles, brands FROM jobs WHERE batch_id=? ORDER BY priority DESC, id ASC`),
+  perProduct: db.prepare(`SELECT id, batch_id, sku, product_url, product_name, status, claimed_by, claimed_at, heartbeat_at, done_at, failed_reason, attempts, handles, brands,
+    MAX(COALESCE(done_at, 0), COALESCE(heartbeat_at, 0), COALESCE(claimed_at, 0)) AS changed_at
+    FROM jobs WHERE batch_id=? ORDER BY priority DESC, id ASC`),
+  // Incremental variant — same shape, only rows whose changed_at > ? plus
+  // the current tick timestamp echoed back for the client to advance cursor.
+  perProductSince: db.prepare(`SELECT id, batch_id, sku, product_url, product_name, status, claimed_by, claimed_at, heartbeat_at, done_at, failed_reason, attempts, handles, brands,
+    MAX(COALESCE(done_at, 0), COALESCE(heartbeat_at, 0), COALESCE(claimed_at, 0)) AS changed_at
+    FROM jobs WHERE batch_id=? AND MAX(COALESCE(done_at, 0), COALESCE(heartbeat_at, 0), COALESCE(claimed_at, 0)) > ? ORDER BY priority DESC, id ASC`),
+  perProductMaxChanged: db.prepare(`SELECT MAX(MAX(COALESCE(done_at, 0), COALESCE(heartbeat_at, 0), COALESCE(claimed_at, 0))) AS mx FROM jobs WHERE batch_id=?`),
   activeWorkers: db.prepare(`SELECT DISTINCT claimed_by worker_id, MAX(heartbeat_at) last_heartbeat FROM jobs WHERE batch_id=? AND claimed_by IS NOT NULL GROUP BY claimed_by`),
   insertKeyword: db.prepare(`INSERT INTO keywords (batch_id, sku, keyword, product_url, data) VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(batch_id, product_url, keyword) DO UPDATE SET data=excluded.data, sku=excluded.sku`),
@@ -1658,7 +1666,18 @@ const server = http.createServer(async (req, res) => {
       Q.releaseStale.run(now() - 5 * 60000);
       return send(res, 200, { ok: true, workers: Q.workerStats.all() });
     }
-    if (m === 'GET' && p === '/api/jobs/per-product')  return send(res, 200, { ok: true, rows: Q.perProduct.all(url.searchParams.get('batchId') || '') });
+    if (m === 'GET' && p === '/api/jobs/per-product') {
+      const batchId = url.searchParams.get('batchId') || '';
+      const sinceRaw = url.searchParams.get('sinceChangedAt');
+      const sinceChangedAt = sinceRaw != null && sinceRaw !== '' ? Number(sinceRaw) : null;
+      const incremental = Number.isFinite(sinceChangedAt);
+      const rows = incremental
+        ? Q.perProductSince.all(batchId, sinceChangedAt)
+        : Q.perProduct.all(batchId);
+      const maxRow = Q.perProductMaxChanged.get(batchId);
+      const maxChangedAt = Number.isFinite(maxRow?.mx) ? maxRow.mx : 0;
+      return send(res, 200, { ok: true, rows, maxChangedAt, incremental, sinceChangedAt: incremental ? sinceChangedAt : null });
+    }
     if (m === 'GET' && p === '/api/jobs/active-workers') return send(res, 200, { ok: true, workers: Q.activeWorkers.all(url.searchParams.get('batchId') || '') });
     // Worker heartbeat — called by workers every 30s regardless of whether
     // they claim any work. Populates the `workers` roster so armed-idle
