@@ -2274,6 +2274,11 @@ async function run() {
   assert(kpSrc.includes("view-dropdown"),                      'KPT.5 View/Show dropdown fallback path present');
   assert(kpSrc.includes('3s poll') || kpSrc.includes('3000'),  'KPT.6 poll window declared');
   assert(kpSrc.includes('Visible tab-like elements'),          'KPT.7 diagnostic dump on failure');
+
+  // Amazon-Round relevance guard: skip queries with zero brand/anchor overlap.
+  assert(kdFull.includes('isAmazonRelevant'),                  'AMZ-REL.1 relevance helper declared');
+  assert(kdFull.includes('amazonSkippedIrrelevant'),           'AMZ-REL.2 skipped-query counter tracked');
+  assert(kdFull.includes('no brand/anchor overlap'),           'AMZ-REL.3 completion log shows skip reason');
   // Client wrapper + UI wiring.
   assert(apiJsSrc.body.includes('fetchWorkerBundleHash') === false, 'VER.11 client wrapper is in modules/discovery-jobs.js not api.js (worker-side)');
   assert(appJs.body.includes('data-copy-install-cmd'),         'VER.12 UI renders copy-install-cmd button on outdated rows');
