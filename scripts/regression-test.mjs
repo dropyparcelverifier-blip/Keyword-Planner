@@ -2289,6 +2289,13 @@ async function run() {
   assert('dirty' in ver.data,                                  'MGRV.5 dirty flag present');
   assert(appJs.body.includes('refreshManagerVersion'),         'MGRV.6 client refresher present');
   assert(appJs.body.includes('managerVersionPill'),            'MGRV.7 pill element referenced');
+
+  // Analytics filter persistence — search + source + intent + min-rating +
+  // only-image-matches survive page reloads and batch switches via localStorage.
+  assert(appJs.body.includes('saveAnalyticsFilters'),          'ANF.1 save helper present');
+  assert(appJs.body.includes('restoreAnalyticsFilters'),       'ANF.2 restore helper present');
+  assert(appJs.body.includes('adbrainAnalyticsFilters'),       'ANF.3 localStorage key used');
+  assert(appJs.body.includes('ANALYTICS_FILTER_IDS'),          'ANF.4 filter-id list declared');
   // Client wrapper + UI wiring.
   assert(apiJsSrc.body.includes('fetchWorkerBundleHash') === false, 'VER.11 client wrapper is in modules/discovery-jobs.js not api.js (worker-side)');
   assert(appJs.body.includes('data-copy-install-cmd'),         'VER.12 UI renders copy-install-cmd button on outdated rows');
