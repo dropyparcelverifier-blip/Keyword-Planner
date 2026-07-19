@@ -2306,6 +2306,12 @@ async function run() {
   assert(idx.body.includes('id="copyInstallCmdBtn"'),          'FLEET-CMD.1 install-command button element');
   assert(appJs.body.includes('copyInstallCmdBtn'),             'FLEET-CMD.2 handler wired');
   assert(appJs.body.includes('install-worker.ps1'),            'FLEET-CMD.3 install one-liner referenced');
+  // Activity-log auto-follow: renderActivity must sample scrollTop before
+  // re-render and only snap back to top when the user was already there.
+  assert(/renderActivity[\s\S]{0,600}scrollTop\s*<=/.test(appJs.body),
+    'ACT-SCROLL.1 renderActivity samples scrollTop before rewrite');
+  assert(/renderActivity[\s\S]{0,1200}el\.scrollTop\s*=\s*0/.test(appJs.body),
+    'ACT-SCROLL.2 renderActivity snaps to top only when previously at top');
   // Client wrapper + UI wiring.
   assert(apiJsSrc.body.includes('fetchWorkerBundleHash') === false, 'VER.11 client wrapper is in modules/discovery-jobs.js not api.js (worker-side)');
   assert(appJs.body.includes('data-copy-install-cmd'),         'VER.12 UI renders copy-install-cmd button on outdated rows');
