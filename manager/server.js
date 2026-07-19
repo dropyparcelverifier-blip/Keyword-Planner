@@ -1513,7 +1513,16 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (m === 'GET' && p === '/api/jobs/summary')      return send(res, 200, { ok: true, batches: Q.summary.all() });
-    if (m === 'GET' && p === '/api/jobs/worker-stats') return send(res, 200, { ok: true, workers: Q.workerStats.all() });
+    if (m === 'GET' && p === '/api/jobs/worker-stats') {
+      // Passive stale-claim reaper: any claim whose heartbeat is > 5 minutes
+      // old is released before we count. Fixes the "10 in-flight for one
+      // worker" case where a SW-reloaded worker abandoned claims that never
+      // heartbeat again. Runs on every dashboard poll (10s) — cheap, one
+      // UPDATE with an index-covered filter — and self-heals ghost claims
+      // without waiting for a client to call /api/jobs/release-stale.
+      Q.releaseStale.run(now() - 5 * 60000);
+      return send(res, 200, { ok: true, workers: Q.workerStats.all() });
+    }
     if (m === 'GET' && p === '/api/jobs/per-product')  return send(res, 200, { ok: true, rows: Q.perProduct.all(url.searchParams.get('batchId') || '') });
     if (m === 'GET' && p === '/api/jobs/active-workers') return send(res, 200, { ok: true, workers: Q.activeWorkers.all(url.searchParams.get('batchId') || '') });
     // Worker heartbeat — called by workers every 30s regardless of whether

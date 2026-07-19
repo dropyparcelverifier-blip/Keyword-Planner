@@ -11,6 +11,7 @@ import {
   markJobDone,
   markJobFailed,
   releaseStaleJobs,
+  releaseByWorker,
   getJobSummary,
   getActiveWorkers,
   getFailedJobs,
@@ -554,6 +555,21 @@ async function _doAutoConnectWorker(msg = {}) {
       adbrainUserStoppedArm: false,
     }).catch(() => {});
     await releaseStaleJobs(10).catch(() => null);
+    // Ghost-claim reconciliation: on cold-start / auto-connect, release ALL
+    // claims still tagged to THIS workerId that we don't have in memory. If
+    // Chrome killed the SW mid-work (which the harness DOES routinely), the
+    // old claims sit in the DB as `claimed by <us>` with fresh heartbeats
+    // that never arrive — so release-stale never catches them but the
+    // manager's worker-stats sums both old and new. Result was "10 in-flight
+    // for a worker running one SERP" — the ghost claims. Only release when
+    // in-memory claimedJobs is empty (fresh SW) or shorter than the DB view
+    // would suggest — the safe cold-start case. Never yank live work.
+    if (state.claimedJobs.length === 0) {
+      try {
+        const r = await releaseByWorker(workerId);
+        if (r.released > 0) pushLog(`Cold-start: released ${r.released} ghost claim(s) previously held by this worker id (SW restart / Chrome reload). No live work interrupted.`, 'warn');
+      } catch {}
+    }
     let centralConfig = null;
     try { centralConfig = await fetchWorkerConfig(); } catch {}
     const centralRunOpts = centralConfig ? workerConfigToRunOpts(centralConfig) : {};
