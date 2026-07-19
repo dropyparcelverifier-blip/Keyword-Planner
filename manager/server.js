@@ -589,6 +589,12 @@ const Q = {
     WHERE status='done' AND NOT EXISTS
       (SELECT 1 FROM keywords k WHERE k.batch_id=jobs.batch_id AND k.product_url=jobs.product_url)
     AND (? IS NULL OR batch_id=?)`),
+  /* Reset a single job (by id) back to pending. Same shape as above but
+     one-shot — used by the low-yield requeue helper which iterates a
+     targeted list of jobs whose row count fell below the threshold. */
+  resetJobToPending: db.prepare(`UPDATE jobs SET status='pending',
+      claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=NULL, failed_reason=NULL
+    WHERE id=?`),
   workerStats: db.prepare(`SELECT claimed_by worker_id, batch_id,
       COUNT(*) total_touched, SUM(status='done') done_count, SUM(status='failed') failed_count,
       SUM(status='claimed') in_flight, MAX(heartbeat_at) last_heartbeat
@@ -1894,6 +1900,40 @@ const server = http.createServer(async (req, res) => {
       const bId = (b.batchId && String(b.batchId).trim()) || null;
       const info = Q.requeueDoneEmpty.run(bId, bId);
       return send(res, 200, { ok: true, updated: info.changes });
+    }
+    // Requeue every 'done' job in a batch whose keyword row count is
+    // below the low-yield threshold (default 30). Complements
+    // /api/jobs/requeue-done-empty which handles the exact zero case:
+    // this one covers 'done but under-yielded' too. Powers the SHIP
+    // badge's 1-click 'Requeue low-yield' action.
+    if (m === 'POST' && p === '/api/jobs/requeue-low-yield') {
+      const b = await readJson(req);
+      const bId = (b.batchId && String(b.batchId).trim()) || null;
+      if (!bId) return send(res, 400, { ok: false, error: 'batchId required' });
+      const minRows = Math.max(1, Number(b.minRows || 30));
+      // Identify then wipe: find the low-yield done jobs (uses the
+      // same query the readiness endpoint uses), delete their
+      // existing keyword rows so a re-run doesn't leave duplicates,
+      // then reset the job status to pending.
+      const targets = Q.lowYieldDoneJobs.all(bId, minRows);
+      if (targets.length === 0) return send(res, 200, { ok: true, updated: 0, cleared_keyword_rows: 0 });
+      const targetIds = targets.map(t => t.id);
+      let clearedKw = 0;
+      db.exec('BEGIN');
+      try {
+        for (const t of targets) {
+          const del = Q.deleteKeywordsForProduct.run(bId, t.product_url);
+          clearedKw += del.changes;
+          Q.resetJobToPending.run(t.id);
+        }
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      return send(res, 200, {
+        ok: true,
+        updated: targetIds.length,
+        cleared_keyword_rows: clearedKw,
+        skus: targets.map(t => ({ id: t.id, sku: t.sku, row_count: t.row_count })),
+      });
     }
     if (m === 'GET' && p === '/api/keywords/batches') {
       return send(res, 200, { ok: true, batches: Q.keywordsBatchList.all() });

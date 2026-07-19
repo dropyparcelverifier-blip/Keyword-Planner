@@ -1480,7 +1480,7 @@ function renderBatchOverview() {
       return `
         <tr>
           <td class="mono" style="cursor:pointer;" onclick="document.getElementById('dashBatchSelect').value='${esc(b.batch_id)}'; document.getElementById('dashBatchSelect').dispatchEvent(new Event('change'));">${esc(b.batch_id)}</td>
-          <td><span class="ship-badge ship-loading" data-ship-badge="${esc(b.batch_id)}" title="Ship-readiness — loading…">…</span></td>
+          <td><span class="ship-badge ship-loading" data-ship-badge="${esc(b.batch_id)}" data-batch-id="${esc(b.batch_id)}" title="Ship-readiness — loading…">…</span></td>
           <td>
             <div class="progress">
               <div class="progress-fill ${fillClass}" style="width: ${donePct.toFixed(1)}%;"></div>
@@ -1522,7 +1522,7 @@ function renderBatchOverview() {
   // each responds; failures show a grey '?' rather than blocking the row.
   el.querySelectorAll('[data-ship-badge]').forEach(badge => {
     const bId = badge.dataset.shipBadge;
-    api.batchReadiness(bId).then(r => renderShipBadge(badge, r)).catch(() => {
+    api.batchReadiness(bId).then(r => renderShipBadge(badge, { ...r, batchId: bId })).catch(() => {
       badge.className = 'ship-badge ship-unknown';
       badge.textContent = '?';
       badge.title = 'Ship-readiness endpoint failed (server may need a restart to pick up /api/batches/readiness)';
@@ -1557,6 +1557,31 @@ function renderShipBadge(badge, r) {
     (m.stall_minutes != null && m.stall_minutes > 5) ? `${m.stall_minutes}m since last activity` : null,
   ].filter(Boolean).join(' · ');
   badge.title = `${r.reason || r.status}\n${metricsLine}`;
+  // REVIEW with low-yield SKUs → inject a compact 1-click requeue button
+  // next to the badge. Uses the low_yield_skus list already in the
+  // response — no extra HTTP call needed for the count.
+  if (r.status === 'REVIEW' && (r.metrics?.low_yield || 0) > 0 && r.batchId) {
+    const existingBtn = badge.parentElement?.querySelector('button[data-requeue-low-yield]');
+    if (!existingBtn) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'tiny secondary';
+      btn.dataset.requeueLowYield = r.batchId;
+      btn.style.cssText = 'margin-left:6px; color:var(--warn); border-color:var(--warn); font-size:10px; padding:2px 6px;';
+      btn.textContent = `↺ ${r.metrics.low_yield}`;
+      const previewSkus = (r.low_yield_skus || []).slice(0, 6).map(s => `${s.sku || s.product_name || '(no sku)'} (${s.row_count} rows)`).join('\n');
+      btn.title = `Requeue ${r.metrics.low_yield} low-yield SKU(s):\n${previewSkus}${r.low_yield_skus?.length > 6 ? `\n… + ${r.low_yield_skus.length - 6} more` : ''}\n\nExisting keyword rows for these SKUs are cleared so the re-run doesn't duplicate.`;
+      btn.addEventListener('click', async () => {
+        if (!confirm(`Requeue ${r.metrics.low_yield} low-yield SKU(s) in this batch?\n\nEach SKU's existing keyword rows are cleared first so the re-run doesn't leave duplicates. Workers will re-claim and reprocess.`)) return;
+        try {
+          const res = await api.jobsRequeueLowYield(r.batchId, 30);
+          toast(`↺ Requeued ${res.updated} SKU(s), cleared ${res.cleared_keyword_rows} old row(s).`, 'ok', { title: 'Low-yield requeued' });
+          refreshDashboard();
+        } catch (e) { toast(e.message, 'err', { title: 'Requeue failed' }); }
+      });
+      badge.insertAdjacentElement('afterend', btn);
+    }
+  }
 }
 
 // ─────────── Queue manager modal ───────────
