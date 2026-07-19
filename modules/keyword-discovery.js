@@ -4274,6 +4274,14 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // related expansion downstream → more keywords per SKU (target 100-300).
       const MAX_R1_KP_SERP_SEEDS = 60;
       const kpRejectCounts = {};
+      // Cache the rejected KP ideas GROUPED BY REASON so the thin-yield
+      // fallback can re-admit the salvageable ones instead of dropping
+      // real KP-provided keywords on the floor. La Roche-Posay case:
+      // 506 ideas, 0 accepted (brand aliases empty), 306 generic_no_brand
+      // + 117 category_only_no_anchor + 13 anchor_only_no_commercial —
+      // all real KP data, all discarded. Now we KEEP them and the fallback
+      // rescues them if the primary pipeline came back thin.
+      const kpRejectedByReason = {};
       let kpBrandOtherStored = 0;
       const kpBrandOtherSamples = [];
       for (const item of kpKeywords) {
@@ -4287,6 +4295,8 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           if (!cls.relevant) {
             const reason = cls.reason || 'rejected';
             kpRejectCounts[reason] = (kpRejectCounts[reason] || 0) + 1;
+            if (!kpRejectedByReason[reason]) kpRejectedByReason[reason] = [];
+            kpRejectedByReason[reason].push(k);
             continue;
           }
           if (!cls.loadSERP) {
@@ -5149,78 +5159,106 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         }
       }
 
-      // ----- R3.5: CATEGORY / INTERNATIONAL FALLBACK -----
+      // ----- R3.5: THIN-YIELD FALLBACK — RE-ADMIT rejected KP ideas -----
       // Kicks in when the pipeline came back thin — typical for products
-      // that are new (no search history), imports (not in India),
-      // .com-only (US/UK market), or niche brands with no local SEO
-      // presence. Synthesises a floor of keywords using:
-      //   1. Universal commercial modifiers (buy / best / price / review)
-      //   2. International market modifiers (usa / uk / europe / .com /
-      //      "amazon.com") — for products popular in other markets
-      //   3. Availability queries ("alternative india", "dupe",
-      //      "where to buy in india") — captures users searching for
-      //      substitutes / import routes
-      //   4. Category-only autosuggest expansion — the broadest safety net
-      // Every seed is tagged with a dedicated source so the post-mortem
-      // line + CSV can show WHERE the recovery came from. No SERP loads
-      // (autosuggest only, free); minimum extra runtime.
+      // whose brand aliases the classifier couldn't extract (La Roche-Posay,
+      // Ancient Greek Face Oil, Sol De Janeiro, etc). The primary filter
+      // is BRAND-STRICT: without a brand match every KP idea gets rejected
+      // as generic_no_brand / category_only_no_anchor / anchor_only, etc —
+      // even though those queries are exactly what users search when the
+      // product is unavailable in India (buy X uk, X amazon usa, X price
+      // review, best X for oily skin india, etc).
+      //
+      // Instead of synthesizing new seeds, we RE-ADMIT the salvageable
+      // rejects from kpRejectedByReason. These are REAL KP data — Google
+      // itself surfaced them as relevant to the seed. The user was right:
+      // 'we were filtering other-country, buy, price, review, etc from our
+      // cycle but now use them'.
+      //
+      // Rescue-eligible reasons (real category / commercial queries):
+      //   generic_no_brand          — has anchor + category, no brand match
+      //   anchor_only_no_commercial — anchor without commercial modifier
+      //   category_only_no_anchor   — category-only queries
+      // NOT rescued (genuine junk):
+      //   brand_mate:<X>            — competitor brand mention
+      //   no_signals                — nothing matched
+      //   wrong_form                — physically-wrong product form
       const MIN_HEALTHY_YIELD = 50;
       if (productRows.length < MIN_HEALTHY_YIELD && !shouldStop()) {
-        const catTerms = (productContext?.categoryTerms || []).slice(0, 5);
-        const pnQuery = String(productContext?.fullProductName || productName || '').trim();
         const shortfall = MIN_HEALTHY_YIELD - productRows.length;
-        if (pnQuery || catTerms.length > 0) {
+        const RESCUABLE_REASONS = ['generic_no_brand', 'anchor_only_no_commercial', 'category_only_no_anchor'];
+        // Collect rescueable rejects, keep source-tagged so the post-mortem
+        // shows what was salvaged. Cap total to shortfall × 3 so we don't
+        // over-inflate on a run where KP returned 500+ ideas.
+        const rescueCap = Math.max(30, shortfall * 3);
+        const rescuePool = [];
+        for (const reason of RESCUABLE_REASONS) {
+          const bucket = kpRejectedByReason[reason] || [];
+          for (const item of bucket) rescuePool.push({ item, reason });
+          if (rescuePool.length >= rescueCap) break;
+        }
+        let rescuedTotal = 0;
+        const rescuedByReason = {};
+        for (const { item, reason } of rescuePool.slice(0, rescueCap)) {
+          // Tag source so the post-mortem + CSV shows this came from the
+          // rescue path — 'kp_rescued' groups all three sub-reasons.
+          const row = addRow(item.kw, 'kp_rescued', '', item);
+          if (row) {
+            rescuedTotal++;
+            rescuedByReason[reason] = (rescuedByReason[reason] || 0) + 1;
+          }
+        }
+        if (rescuedTotal > 0) {
+          const breakdown = Object.entries(rescuedByReason).map(([r, n]) => `${r}:${n}`).join(', ');
           onProgress?.({
             currentProduct: productName,
             currentSource: 'fallback',
-            currentAction: `⚠ THIN-YIELD FALLBACK: only ${productRows.length} rows so far (target ${MIN_HEALTHY_YIELD}). Adding universal + international-market seeds so unavailable-in-India / new / niche products still get keyword coverage.`,
-            logKind: 'warn',
+            currentAction: `↺ KP RESCUE: readmitted ${rescuedTotal} rejected-KP idea(s) from ${breakdown}. These are real Google-Ads keywords about the product's category / commercial intent that the brand-strict primary filter dropped — kept them for products unavailable in India / no local brand presence.`,
+            logKind: 'ok',
           });
-          const INTL_MARKETS = ['amazon com', 'usa', 'uk', 'europe', 'canada', 'imported'];
-          const UNIVERSAL_MODS = ['buy', 'best', 'price', 'review', 'online', 'where to buy'];
-          const AVAIL_QUERIES  = ['alternative in india', 'similar to', 'dupe of', 'available in india', 'is it available in india'];
-          let addedTotal = 0;
-          const addFallback = (kw, src) => {
-            if (!kw || String(kw).trim().split(/\s+/).length < 2) return;
-            const row = addRow(String(kw).toLowerCase().trim(), src, pnQuery);
-            if (row) addedTotal++;
-          };
-          // Product-name seeds — most likely to find the actual product
-          // in international markets. Capped at shortfall * 2 to avoid
-          // over-inflating on very-thin runs.
-          if (pnQuery) {
-            for (const mod of UNIVERSAL_MODS) {
-              addFallback(`${mod} ${pnQuery}`,  'universal_commercial');
-              addFallback(`${pnQuery} ${mod}`,  'universal_commercial');
+        }
+        // LAST-RESORT synth: only fires if KP gave us nothing rescuable
+        // AND we're still below the floor. Small synth pool built from
+        // product-name + category — no international market, no commercial
+        // modifier explosion, because the user's actual complaint was that
+        // we were DISCARDING valid KP output. This branch is just a safety
+        // net when KP truly returned zero relevant data.
+        if (productRows.length < MIN_HEALTHY_YIELD && rescuedTotal < 20 && !shouldStop()) {
+          const pnQuery = String(productContext?.fullProductName || productName || '').trim();
+          const catTerms = (productContext?.categoryTerms || []).slice(0, 3);
+          if (pnQuery || catTerms.length > 0) {
+            let synthTotal = 0;
+            const UNIVERSAL_MODS = ['buy', 'best', 'price', 'review'];
+            const INTL_MARKETS   = ['usa', 'uk', 'amazon com'];
+            const AVAIL_QUERIES  = ['alternative in india', 'available in india'];
+            if (pnQuery) {
+              for (const mod of UNIVERSAL_MODS) {
+                if (addRow(`${mod} ${pnQuery}`.toLowerCase(),      'universal_commercial', pnQuery)) synthTotal++;
+                if (addRow(`${pnQuery} ${mod}`.toLowerCase(),      'universal_commercial', pnQuery)) synthTotal++;
+              }
+              for (const market of INTL_MARKETS) {
+                if (addRow(`${pnQuery} ${market}`.toLowerCase(),   'international_market', pnQuery)) synthTotal++;
+              }
+              for (const q of AVAIL_QUERIES) {
+                if (addRow(`${pnQuery} ${q}`.toLowerCase(),        'availability_query',   pnQuery)) synthTotal++;
+              }
             }
-            for (const market of INTL_MARKETS) {
-              addFallback(`${pnQuery} ${market}`, 'international_market');
-              addFallback(`buy ${pnQuery} in ${market}`, 'international_market');
+            for (const cat of catTerms) {
+              for (const mod of UNIVERSAL_MODS.slice(0, 2)) {
+                if (addRow(`${mod} ${cat}`.toLowerCase(),          'category_commercial',  '')) synthTotal++;
+              }
+              if (addRow(`${cat} india`.toLowerCase(),             'category_commercial',  '')) synthTotal++;
+              if (addRow(`best ${cat} india`.toLowerCase(),        'category_commercial',  '')) synthTotal++;
             }
-            for (const q of AVAIL_QUERIES) {
-              addFallback(`${pnQuery} ${q}`, 'availability_query');
+            if (synthTotal > 0) {
+              onProgress?.({
+                currentProduct: productName,
+                currentSource: 'fallback',
+                currentAction: `Last-resort synth: KP had no rescuable ideas either. Added ${synthTotal} synthesized seed(s) (product-name + category × commercial / market / availability).`,
+                logKind: 'warn',
+              });
             }
           }
-          // Category-only variants — broadest net, guarantees some
-          // relevance floor even for products with almost no brand mass.
-          for (const cat of catTerms) {
-            for (const mod of UNIVERSAL_MODS.slice(0, 4)) {
-              addFallback(`${mod} ${cat}`, 'category_commercial');
-              addFallback(`${cat} india`, 'category_commercial');
-            }
-            addFallback(`best ${cat} india`,        'category_commercial');
-            addFallback(`${cat} for indian skin`,   'category_commercial');
-            addFallback(`${cat} online india`,      'category_commercial');
-            addFallback(`${cat} amazon`,            'international_market');
-            addFallback(`${cat} usa`,               'international_market');
-            addFallback(`${cat} uk`,                'international_market');
-          }
-          onProgress?.({
-            currentProduct: productName,
-            currentSource: 'fallback',
-            currentAction: `THIN-YIELD FALLBACK added ${addedTotal} synthesized seed(s) (universal/international/availability/category). New row total: ${productRows.length}.`,
-            logKind: addedTotal > 0 ? 'ok' : 'warn',
-          });
         }
       }
 
@@ -5382,8 +5420,9 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         related_search: 'relsrch', paa: 'PAA', product_name: 'name',
         amazon_suggest: 'amzn', commercial_modifier: 'commod',
         image_match: 'imgm',
-        // Thin-yield fallback sources (added when productRows.length < 50)
-        universal_commercial:   'univcom',
+        // Thin-yield fallback sources
+        kp_rescued:             'KPrsq',   // re-admitted filter-rejected KP ideas
+        universal_commercial:   'univcom', // last-resort synth
         international_market:   'intlmkt',
         availability_query:     'avail',
         category_commercial:    'catcom',
