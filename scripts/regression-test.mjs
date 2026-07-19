@@ -1366,14 +1366,18 @@ async function run() {
   // when the pipeline came back under MIN_HEALTHY_YIELD.
   const kdFull = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
   assert(kdFull.includes('MIN_HEALTHY_YIELD'),                   'FALLBACK.1 MIN_HEALTHY_YIELD threshold declared');
-  assert(kdFull.includes('THIN-YIELD FALLBACK'),                 'FALLBACK.2 thin-yield fallback log line present');
-  assert(kdFull.includes("'universal_commercial'"),              'FALLBACK.3 universal_commercial source tag');
-  assert(kdFull.includes("'international_market'"),              'FALLBACK.4 international_market source tag');
-  assert(kdFull.includes("'availability_query'"),                'FALLBACK.5 availability_query source tag');
-  assert(kdFull.includes("'category_commercial'"),               'FALLBACK.6 category_commercial source tag');
-  assert(kdFull.includes('INTL_MARKETS'),                        'FALLBACK.7 international-market variants declared');
-  assert(kdFull.includes('AVAIL_QUERIES'),                       'FALLBACK.8 availability queries declared');
-  assert(kdFull.includes('universal_commercial:'),               'FALLBACK.9 post-mortem source label univcom present');
+  assert(kdFull.includes('KP RESCUE'),                           'FALLBACK.2 KP RESCUE log line present (re-admits rejected KP ideas)');
+  assert(kdFull.includes('kpRejectedByReason'),                  'FALLBACK.3 rejected KP ideas cached by reason for later rescue');
+  assert(kdFull.includes('RESCUABLE_REASONS'),                   'FALLBACK.4 rescue-eligible rejection reasons whitelist');
+  assert(kdFull.includes("'generic_no_brand'"),                  'FALLBACK.5 generic_no_brand rescueable');
+  assert(kdFull.includes("'anchor_only_no_commercial'"),         'FALLBACK.6 anchor_only_no_commercial rescueable');
+  assert(kdFull.includes("'category_only_no_anchor'"),           'FALLBACK.7 category_only_no_anchor rescueable');
+  assert(kdFull.includes("'kp_rescued'"),                        'FALLBACK.8 kp_rescued source tag for readmitted rows');
+  assert(kdFull.includes('kp_rescued:'),                         'FALLBACK.9 post-mortem source label KPrsq present');
+  assert(kdFull.includes("'universal_commercial'"),              'FALLBACK.10 last-resort synth still present when KP had nothing');
+  assert(kdFull.includes("'international_market'"),              'FALLBACK.11 international_market source tag');
+  assert(kdFull.includes("'availability_query'"),                'FALLBACK.12 availability_query source tag');
+  assert(kdFull.includes("'category_commercial'"),               'FALLBACK.13 category_commercial source tag');
 
   // ===== 20o. BACKUPS + QUIESCE =====
   // Backup endpoints
