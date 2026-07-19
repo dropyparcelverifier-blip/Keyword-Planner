@@ -1901,12 +1901,62 @@ async function openWorkerMonitor(workerId) {
   title.innerHTML = `🖥 <span class="mono">${esc(workerId)}</span>`;
   body.innerHTML = `<div class="hint">Loading…</div>`;
   modal.style.display = 'flex';
+  // Remember which worker this modal is bound to. The delegated click
+  // handler reads it so the 5s auto-refresh (which rewrites innerHTML)
+  // never breaks the buttons — same fix as the fleet-grid delegation.
+  body.dataset.workerId = workerId;
+  wireMonitorDelegation(body);
   await refreshWorkerMonitor(workerId);
   if (_workerMonitorTimer) clearInterval(_workerMonitorTimer);
   _workerMonitorTimer = setInterval(() => {
     if (modal.style.display === 'none') { clearInterval(_workerMonitorTimer); _workerMonitorTimer = null; return; }
     refreshWorkerMonitor(workerId);
   }, 5000);
+}
+// Monitor-modal delegated click handler — attached once, survives every
+// 5-second refreshWorkerMonitor innerHTML replace.
+let _monitorDelegationWired = false;
+function wireMonitorDelegation(body) {
+  if (_monitorDelegationWired) return;
+  _monitorDelegationWired = true;
+  body.addEventListener('click', async (e) => {
+    const workerId = body.dataset.workerId;
+    if (!workerId) return;
+    const btn = e.target.closest?.('button');
+    if (!btn) return;
+    if (btn.dataset.cmd) {
+      const cmd = btn.dataset.cmd;
+      try {
+        await api.commandsSend(workerId, cmd, {});
+        toast(`${cmd} → ${workerId}`, 'ok');
+        setTimeout(() => refreshWorkerMonitor(workerId), 500);
+      } catch (err) { toast(err.message, 'err'); }
+      return;
+    }
+    if (btn.dataset.releaseWorker) {
+      if (!confirm(`Release all claims held by ${workerId}?`)) return;
+      try {
+        const r = await api.jobsReleaseByWorker(workerId);
+        toast(`Released ${r.released} SKU(s)`, 'ok');
+        refreshWorkerMonitor(workerId);
+      } catch (err) { toast(err.message, 'err'); }
+      return;
+    }
+    if (btn.dataset.wol) {
+      try { await api.wakeOnLan(workerId); toast(`WoL sent to ${workerId}`, 'ok'); }
+      catch (err) { toast(err.message, 'err'); }
+      return;
+    }
+    if (btn.id === 'wmClearBtn') {
+      if (!confirm(`Clear activity log for ${workerId}?`)) return;
+      try {
+        const r = await api.activityClear({ workerId });
+        toast(`Cleared ${r.deleted} row(s)`, 'ok');
+        refreshWorkerMonitor(workerId);
+      } catch (err) { toast(err.message, 'err'); }
+      return;
+    }
+  });
 }
 async function refreshWorkerMonitor(workerId) {
   const body = $('workerMonitorBody');
@@ -1967,35 +2017,9 @@ async function refreshWorkerMonitor(workerId) {
           <span class="wm-log-msg">${esc(e.message)}</span>
         </div>`).join('')}
     </div>`;
-  // Wire the in-modal action buttons (same handlers as the fleet grid).
-  body.querySelectorAll('button[data-cmd]').forEach(btn => btn.addEventListener('click', async () => {
-    const cmd = btn.dataset.cmd;
-    try {
-      await api.commandsSend(workerId, cmd, {});
-      toast(`${cmd} → ${workerId}`, 'ok');
-      setTimeout(() => refreshWorkerMonitor(workerId), 500);
-    } catch (e) { toast(e.message, 'err'); }
-  }));
-  body.querySelectorAll('button[data-release-worker]').forEach(btn => btn.addEventListener('click', async () => {
-    if (!confirm(`Release all claims held by ${workerId}?`)) return;
-    try {
-      const r = await api.jobsReleaseByWorker(workerId);
-      toast(`Released ${r.released} SKU(s)`, 'ok');
-      refreshWorkerMonitor(workerId);
-    } catch (e) { toast(e.message, 'err'); }
-  }));
-  body.querySelectorAll('button[data-wol]').forEach(btn => btn.addEventListener('click', async () => {
-    try { await api.wakeOnLan(workerId); toast(`WoL sent to ${workerId}`, 'ok'); }
-    catch (e) { toast(e.message, 'err'); }
-  }));
-  body.querySelector('#wmClearBtn')?.addEventListener('click', async () => {
-    if (!confirm(`Clear activity log for ${workerId}?`)) return;
-    try {
-      const r = await api.activityClear({ workerId });
-      toast(`Cleared ${r.deleted} row(s)`, 'ok');
-      refreshWorkerMonitor(workerId);
-    } catch (e) { toast(e.message, 'err'); }
-  });
+  // Button handlers live in wireMonitorDelegation() — attached once when
+  // the modal opens, survives every 5s innerHTML replace. Do NOT re-wire
+  // here; that would double-fire clicks (delegated + direct).
 }
 
 function renderWorkerFleet() {
@@ -2174,24 +2198,14 @@ function renderWorkerFleet() {
     }).join('')}
     </tbody></table>`;
 
-  // Wire the per-row "↻ release claims" button to the direct
-  // manager-side endpoint (was going through the worker command which
-  // needed the worker to poll for it — useless when the worker is off).
-  el.querySelectorAll('button[data-release-worker]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const wid = btn.dataset.releaseWorker;
-      if (!confirm(`Release all claims held by ${wid}? Those SKUs go back to pending immediately.`)) return;
-      try {
-        const r = await api.jobsReleaseByWorker(wid);
-        toast(`Released ${r.released} SKU(s) from ${wid} — other workers can now claim them.`, 'ok', { title: '↻ Claims released' });
-        refreshDashboard();
-      } catch (e) { toast(e.message, 'err', { title: 'Release failed' }); }
-    });
-  });
-  // Wire the 🖥 monitor button — opens per-worker modal.
-  el.querySelectorAll('button[data-monitor]').forEach(btn => {
-    btn.addEventListener('click', () => openWorkerMonitor(btn.dataset.worker));
-  });
+  // Wire per-row buttons via SINGLE delegated listener on #workerGrid,
+  // attached once and left in place across every re-render. The old model
+  // re-attached individual handlers on every renderWorkerFleet call — if
+  // the user clicked a button in the ~50-200ms between innerHTML replace
+  // and the querySelectorAll wire-up, the click hit a DOM node whose new
+  // handler hadn't been attached yet. Delegation makes the listener
+  // survive every re-render, so the click always dispatches.
+  wireFleetDelegation(el);
   // Wire the "release ALL locked SKUs" banner button — one click frees
   // every stuck worker at once.
   $('releaseAllStuckBtn')?.addEventListener('click', async () => {
@@ -2218,35 +2232,63 @@ function renderWorkerFleet() {
     toast(`Hard-reset sent to ${sent} worker(s). Extension SWs will reload within ~30s (next command-poll tick).`, 'info', { title: 'Hard reset broadcast' });
     setTimeout(refreshDashboard, 5000);
   });
-  // Click worker ID -> filter activity log to that worker.
-  el.querySelectorAll('a[data-filter-worker]').forEach(a => {
-    a.addEventListener('click', (e) => {
+}
+
+// Fleet-grid click delegation — attached ONCE on first render, survives
+// every subsequent re-render. Each of the 8+ per-worker buttons is
+// dispatched by inspecting the closest button and its data-* attrs.
+// Fixes the intermittent "buttons do nothing" that happened when a click
+// landed in the ~50-200ms gap between innerHTML replace and per-button
+// wire-up. Also cheaper (one listener vs N per re-render).
+let _fleetDelegationWired = false;
+function wireFleetDelegation(root) {
+  if (_fleetDelegationWired) return;
+  _fleetDelegationWired = true;
+  root.addEventListener('click', async (e) => {
+    // Worker-id filter link (clicking the worker id under the fleet).
+    const filterA = e.target.closest?.('a[data-filter-worker]');
+    if (filterA) {
       e.preventDefault();
-      const w = a.dataset.filterWorker;
+      const w = filterA.dataset.filterWorker;
       state.workerFilter = w;
       saveUI({ workerFilter: w });
       const sel = $('activityWorkerFilter'); if (sel) sel.value = w;
       const sub = $('activityLogSub'); if (sub) sub.textContent = `filtered to ${w}`;
       toast(`Activity log now scoped to ${w}`, 'info');
       refreshDashboard();
-    });
-  });
-  // Wire per-worker action buttons.
-  el.querySelectorAll('.worker-actions button[data-worker][data-cmd]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const workerId = btn.dataset.worker;
+      return;
+    }
+    const btn = e.target.closest?.('button');
+    if (!btn) return;
+    const workerId = btn.dataset.worker;
+    if (!workerId) return;
+    // Monitor 🖥 button
+    if (btn.dataset.monitor) {
+      openWorkerMonitor(workerId);
+      return;
+    }
+    // Command buttons (wake / reconnect / pause / stop)
+    if (btn.dataset.cmd) {
       const cmd = btn.dataset.cmd;
       const cmdLabel = { wake: 'Wake', reconnect: 'Force reconnect', pause: 'Pause', release_claims: 'Release claims from', stop: 'Stop' }[cmd] || cmd;
       if (cmd === 'stop' && !confirm(`Stop worker ${workerId} and disarm it? They will not claim more work until you send Wake.`)) return;
       try { await api.commandsSend(workerId, cmd); toast(`${cmdLabel} → ${workerId}`, 'ok'); }
-      catch (e) { toast(e.message, 'err', { title: 'Command failed' }); }
-    });
-  });
-  // Wire the 🗑 remove-worker button — for ghosts (Chrome regenerated
-  // the worker ID) or decommissioned PCs.
-  el.querySelectorAll('.worker-actions button[data-remove-worker]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const workerId = btn.dataset.worker;
+      catch (err) { toast(err.message, 'err', { title: 'Command failed' }); }
+      return;
+    }
+    // Release-claims ↻
+    if (btn.dataset.releaseWorker) {
+      const wid = btn.dataset.releaseWorker;
+      if (!confirm(`Release all claims held by ${wid}? Those SKUs go back to pending immediately.`)) return;
+      try {
+        const r = await api.jobsReleaseByWorker(wid);
+        toast(`Released ${r.released} SKU(s) from ${wid} — other workers can now claim them.`, 'ok', { title: '↻ Claims released' });
+        refreshDashboard();
+      } catch (err) { toast(err.message, 'err', { title: 'Release failed' }); }
+      return;
+    }
+    // Remove-worker 🗑
+    if (btn.dataset.removeWorker) {
       const w = state.workers.find(x => x.worker_id === workerId);
       const hbAgo = w?.last_heartbeat ? Math.round((Date.now() - Number(w.last_heartbeat)) / 60000) : null;
       const hbMsg = hbAgo == null ? 'never heartbeat' : `${hbAgo} min ago`;
@@ -2255,19 +2297,16 @@ function renderWorkerFleet() {
         const r = await api.deleteWorker(workerId);
         toast(`Removed ${workerId}${r.deleted ? '' : ' (was already gone)'}`, 'ok');
         refreshDashboard();
-      } catch (e) { toast(e.message, 'err', { title: 'Remove failed' }); }
-    });
-  });
-  // Wire the Wake-on-LAN button — separate flow because it uses its
-  // own endpoint (dgram UDP magic packet, not the worker_commands DB).
-  el.querySelectorAll('.worker-actions button[data-wol]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const workerId = btn.dataset.worker;
+      } catch (err) { toast(err.message, 'err', { title: 'Remove failed' }); }
+      return;
+    }
+    // Wake-on-LAN 🔌
+    if (btn.dataset.wol) {
       try {
         const r = await api.wakeOnLan(workerId);
         toast(`Magic packet sent to ${r.mac}. PC should wake in 10-30s if WOL enabled in BIOS.`, 'ok', { title: 'WOL sent' });
-      } catch (e) {
-        if (e.status === 400 && /no MAC available/.test(e.message)) {
+      } catch (err) {
+        if (err.status === 400 && /no MAC available/.test(err.message)) {
           const mac = prompt(`No MAC stored for ${workerId}. Enter the MAC (e.g. AA:BB:CC:DD:EE:FF):\n\n(Find it on the worker PC with:  ipconfig /all)`);
           if (!mac) return;
           try {
@@ -2276,17 +2315,13 @@ function renderWorkerFleet() {
             toast(`MAC saved + WOL sent (${r2.mac})`, 'ok', { title: 'WOL sent' });
           } catch (e2) { toast(e2.message, 'err', { title: 'WOL failed' }); }
         } else {
-          toast(e.message, 'err', { title: 'WOL failed' });
+          toast(err.message, 'err', { title: 'WOL failed' });
         }
       }
-    });
-  });
-  // Recovery guide (?) — plain alert with a diagnosis + prioritized
-  // steps. Using an alert keeps the code footprint minimal but the
-  // content is enough to unblock most 'I can't reach this worker' cases.
-  el.querySelectorAll('.worker-actions button[data-recover]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const workerId = btn.dataset.worker;
+      return;
+    }
+    // Recovery guide ?
+    if (btn.dataset.recover) {
       const w = state.workers.find(x => x.worker_id === workerId);
       const hb = Number(w?.last_heartbeat || 0);
       const ago = hb ? Math.round((Date.now() - hb) / 60000) : Infinity;
@@ -2327,7 +2362,8 @@ function renderWorkerFleet() {
       lines.push('Once Chrome + SW are alive again, all manager commands');
       lines.push('start working within 30 s (next command-poll tick).');
       alert(lines.join('\n'));
-    });
+      return;
+    }
   });
 }
 
