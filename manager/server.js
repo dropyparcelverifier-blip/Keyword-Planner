@@ -890,7 +890,24 @@ foreach ($f in $list) {
   $out = Join-Path $extDir ($f -replace '/', '\\')
   New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null
   try {
-    Invoke-WebRequest -UseBasicParsing -Uri "$mgr/worker/$f" -OutFile $out -ErrorAction Stop
+    # Two-step download: fetch raw bytes, write them with WriteAllBytes.
+    # This avoids Windows PowerShell 5.1's IWR -OutFile misbehaving on
+    # .js content (adding a UTF-8 BOM or performing LF→CRLF conversion),
+    # which causes Chrome MV3 to fail SW registration with 'Status
+    # code: 15' after a fresh install.
+    $resp = Invoke-WebRequest -UseBasicParsing -Uri "$mgr/worker/$f" -ErrorAction Stop
+    [System.IO.File]::WriteAllBytes($out, $resp.Content)
+    # Sanity-check: reject empty writes and known-bad first bytes (BOM).
+    $fi = Get-Item $out
+    if ($fi.Length -eq 0) { throw "empty file downloaded" }
+    if ($f -like '*.js' -or $f -like '*.mjs' -or $f -like '*.json') {
+      $head = [System.IO.File]::ReadAllBytes($out) | Select-Object -First 3
+      if ($head.Count -ge 3 -and $head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF) {
+        # Strip BOM in place — Chrome MV3 rejects BOM in ES modules.
+        $bytes = [System.IO.File]::ReadAllBytes($out)
+        [System.IO.File]::WriteAllBytes($out, $bytes[3..($bytes.Length - 1)])
+      }
+    }
   } catch {
     $failed += $f
     Write-Host ("  [!] {0} - {1}" -f $f, $_.Exception.Message) -ForegroundColor Red
@@ -1157,8 +1174,14 @@ const server = http.createServer(async (req, res) => {
     return fs.readFile(file, (err, data) => {
       if (err) return send(res, 404, { ok: false, error: 'file missing' });
       const ext = path.extname(file).toLowerCase();
+      // Explicit charset on JS + a Content-Length so PowerShell's
+      // Invoke-WebRequest downloads as raw bytes without re-encoding
+      // (Windows PowerShell 5.1 has been observed to insert a UTF-8
+      // BOM or convert LF→CRLF on downloads whose Content-Type omits
+      // charset, which causes Chrome MV3 to fail SW registration with
+      // 'Status code: 15' on the reinstalled extension).
       const type = ext === '.html' ? 'text/html; charset=utf-8'
-        : ext === '.js' || ext === '.mjs' ? 'text/javascript'
+        : ext === '.js' || ext === '.mjs' ? 'text/javascript; charset=utf-8'
         : ext === '.css' ? 'text/css'
         : ext === '.json' ? 'application/json'
         : 'application/octet-stream';
