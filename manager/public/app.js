@@ -5961,6 +5961,18 @@ wireFleetDelegation(null);
 // the fleet row can always dispatch, even if the delegation somehow
 // failed to attach.
 window.openWorkerMonitor = openWorkerMonitor;
+// Reparent every .modal-root to <body>. All 6 modals are currently
+// declared inside <section id="panel-analytics"> in index.html, which
+// means when the Dashboard (or any other) tab is active, that section
+// has display:none → its DESCENDANTS are hidden regardless of their own
+// display style. Setting modal.style.display='flex' had no visible effect
+// because a display:none ancestor overrides child display. Users saw the
+// "click Monitor on Dashboard → nothing → switch to Analytics → modal
+// appears" flakiness. Moving modals to <body> escapes the panel and makes
+// them always visible when opened, from any tab.
+document.querySelectorAll('.modal-root').forEach(m => {
+  if (m.parentElement !== document.body) document.body.appendChild(m);
+});
 
 // Restore last-viewed tab + selected batch + refresh interval from
 // localStorage so a browser reload doesn't lose the user's context.
