@@ -347,6 +347,21 @@
 
   function findRealClickTarget(card) {
     if (!card) return null;
+    // Prefer nested interactive elements over the container. Material cards
+    // often wrap the real handler on a nested <button>/<a> — clicking the
+    // outer <div role=button> can no-op if the wrapper only exists for
+    // styling. Reduced the "Auto-click failed" recurrences: log showed
+    // clicks landing on the outer role=button div, which Material's ripple
+    // handler ignored.
+    const inner = card.querySelector?.('button, a[role="button"], a[href], [role="link"][tabindex], material-button, mat-button');
+    if (inner && visible(inner)) {
+      // Only use the inner element if it's actually inside the card's
+      // hit box (avoid grabbing an unrelated sibling nav button).
+      const cr = card.getBoundingClientRect();
+      const ir = inner.getBoundingClientRect();
+      const centerInCard = ir.left >= cr.left && ir.right <= cr.right && ir.top >= cr.top && ir.bottom <= cr.bottom;
+      if (centerInCard) return inner;
+    }
     const r = card.getBoundingClientRect();
     const x = r.left + r.width / 2;
     const y = r.top + r.height / 2;
@@ -380,31 +395,50 @@
     return false;
   }
 
-  // Multi-strategy click: pointer events + mouse events + native .click() + Enter key.
-  // For React/Angular apps that ignore some event types.
+  // Multi-strategy click: pointer events + mouse events + native .click() +
+  // Space+Enter keys. For Angular Material and React apps that ignore some
+  // event types. Focus + delay BEFORE dispatch so Material's state machine
+  // registers focus first (some ripple handlers no-op if focus arrives in the
+  // same tick as mousedown). Explicit 'click' MouseEvent added — 'mousedown'
+  // + 'mouseup' alone does NOT synthesize 'click' on most Material widgets
+  // (previously the biggest reason auto-click failed on Discover).
   async function aggressiveClick(el) {
     if (!el) return;
     el.scrollIntoView({ block: 'center' });
     await humanPause(250);
+    // Focus first, brief pause. Google Ads' Material buttons use a state
+    // machine that treats "focus first, then mousedown" as a trusted-ish
+    // pattern. Focusing in the same tick as mousedown loses the click.
+    try { if (typeof el.focus === 'function') el.focus({ preventScroll: true }); } catch {}
+    await humanPause(80);
     const r = el.getBoundingClientRect();
     const x = r.left + r.width / 2;
     const y = r.top + r.height / 2;
-    const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+    const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, screenX: x, screenY: y, button: 0, buttons: 1, composed: true };
     try {
-      el.dispatchEvent(new PointerEvent('pointerover', { ...opts, pointerId: 1, pointerType: 'mouse' }));
-      el.dispatchEvent(new PointerEvent('pointermove', { ...opts, pointerId: 1, pointerType: 'mouse' }));
-      el.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerId: 1, pointerType: 'mouse' }));
-      el.dispatchEvent(new PointerEvent('pointerup',   { ...opts, pointerId: 1, pointerType: 'mouse' }));
+      el.dispatchEvent(new PointerEvent('pointerover', { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      el.dispatchEvent(new PointerEvent('pointerenter', { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true, bubbles: false }));
+      el.dispatchEvent(new PointerEvent('pointermove', { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      el.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      el.dispatchEvent(new PointerEvent('pointerup',   { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
     } catch {}
     el.dispatchEvent(new MouseEvent('mouseover', opts));
+    el.dispatchEvent(new MouseEvent('mouseenter', { ...opts, bubbles: false }));
     el.dispatchEvent(new MouseEvent('mousemove', opts));
     el.dispatchEvent(new MouseEvent('mousedown', opts));
     el.dispatchEvent(new MouseEvent('mouseup', opts));
+    // Explicit 'click' MouseEvent — separate from mousedown+mouseup. Some
+    // Material button variants ONLY listen for click; without this the ripple
+    // fires but the routed action doesn't.
+    el.dispatchEvent(new MouseEvent('click', opts));
     try { el.click(); } catch {}
-    // Try keyboard activation if focusable
-    try { if (el.focus) el.focus(); } catch {}
-    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-    el.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+    // Keyboard activation as final backup — Space for buttons, Enter for
+    // links / role=button. Some Material components respond to keyboard
+    // events even when they ignore synthetic mouse clicks entirely.
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', keyCode: 32, bubbles: true, composed: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup',   { key: ' ', code: 'Space', keyCode: 32, bubbles: true, composed: true }));
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, composed: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, composed: true }));
   }
 
   // Wait for the ACTUALLY-interactive "Discover new keywords" card to appear.
@@ -449,29 +483,32 @@
     kpLog('waiting for interactive "Discover new keywords" card to hydrate');
     const card = await waitForInteractiveDiscoverCard(45000);
     if (card) {
-      const target = findRealClickTarget(card);
-      const desc = `<${target.tagName?.toLowerCase()}>${target.getAttribute?.('role') ? `[role=${target.getAttribute('role')}]` : ''} "${(target.innerText || target.textContent || '').trim().slice(0, 50)}"`;
-      kpLog(`clicking ${desc}`);
-      await aggressiveClick(target);
-      await humanPause(2500, 0.3);
-      if (isOnIdeasPage()) {
-        kpLog('Discover Keywords pane opened', 'ok');
-        await humanPause(600);
-        return;
-      }
-      // One retry — sometimes the first synthetic click fires before Material's
-      // ripple/listener is attached. A second click after a short delay tends
-      // to land.
-      kpLog('first click did not open pane — retrying once');
-      await aggressiveClick(target);
-      await humanPause(2500, 0.3);
-      if (isOnIdeasPage()) {
-        kpLog('Discover Keywords pane opened (after retry)', 'ok');
-        await humanPause(600);
-        return;
+      // Build a candidate list — nested button/anchor first (usually the real
+      // handler), then the target from findRealClickTarget (spatial), then
+      // the card itself. Cycling through candidates on retry is much more
+      // effective than clicking the same wrong element three times.
+      const candidates = [];
+      const inner = card.querySelector?.('button, a[role="button"], a[href], [role="link"][tabindex], material-button, mat-button');
+      if (inner && visible(inner)) candidates.push({ el: inner, why: 'nested-clickable' });
+      const spatial = findRealClickTarget(card);
+      if (spatial && !candidates.some(c => c.el === spatial)) candidates.push({ el: spatial, why: 'spatial-hit' });
+      if (!candidates.some(c => c.el === card)) candidates.push({ el: card, why: 'card-container' });
+      let opened = false;
+      for (let i = 0; i < candidates.length && !opened; i++) {
+        const { el, why } = candidates[i];
+        const desc = `<${el.tagName?.toLowerCase()}>${el.getAttribute?.('role') ? `[role=${el.getAttribute('role')}]` : ''} "${(el.innerText || el.textContent || '').trim().slice(0, 40)}" (${why})`;
+        kpLog(`click attempt ${i + 1}/${candidates.length}: ${desc}`);
+        await aggressiveClick(el);
+        await humanPause(2500, 0.3);
+        if (isOnIdeasPage()) {
+          kpLog(`Discover Keywords pane opened via ${why}`, 'ok');
+          await humanPause(600);
+          opened = true;
+          return;
+        }
       }
     } else {
-      kpLog('interactive Discover card did not appear within 45s', 'err');
+      kpLog('interactive Discover card did not appear within 45s', 'warn');
     }
 
     // ----- Manual fallback -----
