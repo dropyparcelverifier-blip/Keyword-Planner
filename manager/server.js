@@ -80,6 +80,136 @@ function stripToShopifyAllowlist(payload) {
   }
   return { safe: out, stripped };
 }
+// Preflight validator — runs against the tier rubric BEFORE any Shopify write.
+// Returns {ok, critical: [], warn: [], stats}. Critical failures block the
+// push (unless caller passes force:true); warnings are surfaced but don't block.
+// Belt to the "Claude self-checks in the prompt" suspenders — trust-but-verify.
+//
+// context: {
+//   primaryKeyword?: string,           // used to check title / handle
+//   competitorBrands?: string[],       // words that must NOT appear in body copy
+//   hasReviewData?: boolean,           // whether AggregateRating is legitimate
+// }
+function validateShopifyPatch(patch, context = {}) {
+  const critical = [];
+  const warn = [];
+  const stats = {};
+  const pushCrit = (id, msg) => critical.push({ id, msg });
+  const pushWarn = (id, msg) => warn.push({ id, msg });
+
+  const title = String(patch?.title || '');
+  const handle = String(patch?.handle || '');
+  const bodyHtml = String(patch?.body_html || '');
+  const seoTitle = String(patch?.seo_title || patch?.metafields_global_title_tag || '');
+  const seoDesc  = String(patch?.seo_description || patch?.metafields_global_description_tag || '');
+  const tags = String(patch?.tags || '');
+  const productCategory = String(patch?.product_category || '');
+
+  // ─── Title checks ──────────────────────────────────────────────
+  if (title) {
+    stats.title_chars = title.length;
+    if (title.length > 70)  pushWarn('title_length', `title ${title.length} chars — Shopify soft-warns > 70`);
+    const primary = String(context.primaryKeyword || '').toLowerCase().trim();
+    if (primary) {
+      const first3 = title.toLowerCase().split(/\s+/).slice(0, 3).join(' ');
+      if (!first3.includes(primary.split(/\s+/)[0])) {
+        pushWarn('title_primary_keyword', `primary keyword "${primary}" not in first 3 words of title`);
+      }
+    }
+  }
+
+  // ─── Handle checks ─────────────────────────────────────────────
+  if (handle) {
+    if (handle.length > 255)               pushCrit('handle_too_long', `handle ${handle.length} chars, Shopify max 255`);
+    if (!/^[a-z0-9-]+$/i.test(handle))     pushCrit('handle_bad_chars', 'handle must be alphanumeric + hyphens only');
+    const primary = String(context.primaryKeyword || '').toLowerCase().trim();
+    if (primary && !handle.toLowerCase().includes(primary.split(/\s+/)[0])) {
+      pushWarn('handle_primary_keyword', `primary keyword "${primary}" not in handle`);
+    }
+  }
+
+  // ─── SEO title + description ───────────────────────────────────
+  if (seoTitle) {
+    stats.seo_title_chars = seoTitle.length;
+    if (seoTitle.length < 40 || seoTitle.length > 70) {
+      pushWarn('seo_title_length', `seo_title ${seoTitle.length} chars — target 55-60 (Shopify soft-warns > 60)`);
+    }
+  }
+  if (seoDesc) {
+    stats.seo_description_chars = seoDesc.length;
+    if (seoDesc.length < 120 || seoDesc.length > 170) {
+      pushWarn('seo_description_length', `seo_description ${seoDesc.length} chars — target 150-160 (Shopify soft-warns > 160)`);
+    }
+    if (!/(shop|buy|order|get|discover|find|try|explore|add to cart)/i.test(seoDesc)) {
+      pushWarn('seo_description_no_cta', 'seo_description missing a CTA verb (shop / buy / order / get / etc.)');
+    }
+  }
+
+  // ─── body_html — size, structure, schema, content ──────────────
+  if (bodyHtml) {
+    const bytes = Buffer.byteLength(bodyHtml, 'utf8');
+    const words = bodyHtml.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/gi, ' ').trim().split(/\s+/).filter(Boolean).length;
+    stats.body_bytes = bytes;
+    stats.body_words = words;
+    if (bytes > 40 * 1024) pushCrit('body_too_large', `body_html ${(bytes / 1024).toFixed(1)} KB > 40 KB page-speed cap`);
+    if (words < 800)       pushCrit('body_too_short', `body_html ${words} words < 800 minimum (target 1200-2000)`);
+    else if (words < 1200) pushWarn('body_short', `body_html ${words} words < 1200 target`);
+    // Page-speed guardrails
+    const scriptMatches = bodyHtml.match(/<script\b[^>]*>/gi) || [];
+    const jsonLdCount = scriptMatches.filter(s => /application\/ld\+json/i.test(s)).length;
+    const nonLdScripts = scriptMatches.length - jsonLdCount;
+    if (nonLdScripts > 0) pushCrit('body_has_scripts', `body_html has ${nonLdScripts} non-JSON-LD <script> tag(s) — page-speed + XSS risk`);
+    if (jsonLdCount === 0) pushCrit('body_no_json_ld', 'body_html has NO JSON-LD schema block — misses Product/FAQPage/HowTo rich snippets');
+    if (/<iframe\b/i.test(bodyHtml))                pushCrit('body_iframe', 'body_html contains <iframe> — forbidden');
+    if (/\bdata:image[^"'\s>]+base64/i.test(bodyHtml)) pushCrit('body_base64', 'body_html contains base64 image URI — forbidden (bloats payload)');
+    if (/<link\b[^>]*stylesheet/i.test(bodyHtml))   pushCrit('body_external_css', 'body_html contains external <link rel=stylesheet> — forbidden');
+    // Required sections
+    if (!/<h2\b[^>]*>[^<]{0,80}(FAQ|frequently asked)/i.test(bodyHtml))      pushWarn('body_no_faq_heading', 'body_html has no FAQ <h2> heading');
+    if (!/<details\b[^>]*>/i.test(bodyHtml) && !/faqpage/i.test(bodyHtml))    pushWarn('body_no_faq_block', 'body_html has no FAQ accordion (<details>) OR FAQPage schema');
+    if (!/<h2\b[^>]*>[^<]{0,80}(ingredient|key active|specification|specs)/i.test(bodyHtml)) pushWarn('body_no_ingredient_section', 'body_html has no Ingredient / Specification <h2>');
+    if (!/<h2\b[^>]*>[^<]{0,80}(how.*compares|comparison|vs\.?)/i.test(bodyHtml)) pushWarn('body_no_comparison', 'body_html has no "How it compares" section');
+    if (!/<h2\b[^>]*>[^<]{0,80}(buying guide|how to choose|which.*for)/i.test(bodyHtml)) pushWarn('body_no_buying_guide', 'body_html has no Buying guide section');
+    if (!/href=["']\/collections\//i.test(bodyHtml))                          pushWarn('body_no_internal_links', 'body_html has no /collections/ internal links (Related on dropy.in section missing?)');
+    if (!/<time\b[^>]*datetime=/i.test(bodyHtml) && !/last updated/i.test(bodyHtml)) pushWarn('body_no_freshness', 'body_html has no <time datetime> or "Last updated" freshness marker');
+    // Trust signals (India-first)
+    if (!/(pan[- ]?india|COD|cash on delivery|GST|₹|inr)/i.test(bodyHtml))    pushWarn('body_no_india_trust', 'body_html mentions no India-first trust signals (pan-India / COD / GST / ₹ / INR)');
+    // Fabricated AggregateRating check — biggest integrity risk
+    if (/aggregaterating|"AggregateRating"/i.test(bodyHtml)) {
+      if (!context.hasReviewData) pushCrit('fabricated_agg_rating', 'body_html includes AggregateRating schema but no real review data was provided in the request — cannot be validated as truthful');
+    }
+    // Competitor brand names in copy
+    for (const brand of (Array.isArray(context.competitorBrands) ? context.competitorBrands : [])) {
+      if (!brand || brand.length < 3) continue;
+      const rx = new RegExp(`\\b${brand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      // Allow the brand in JSON-LD (schema.org "brand" field is OUR brand);
+      // reject in prose. Rough heuristic: strip <script>...</script> before check.
+      const prose = bodyHtml.replace(/<script[\s\S]*?<\/script>/gi, ' ');
+      if (rx.test(prose)) pushCrit(`competitor_brand_${brand}`, `body_html mentions competitor brand "${brand}" in copy`);
+    }
+  }
+
+  // ─── tags ──────────────────────────────────────────────────────
+  if (tags) {
+    const tagList = tags.split(/\s*,\s*/).filter(Boolean);
+    stats.tag_count = tagList.length;
+    if (tagList.length < 5)         pushWarn('tags_too_few',  `tags ${tagList.length} entries — target 10-15 for on-site search + auto-collections`);
+    else if (tagList.length > 20)   pushWarn('tags_too_many', `tags ${tagList.length} entries — Shopify tag-search performance degrades > 20`);
+  }
+
+  // ─── product_category (Standard Taxonomy) ─────────────────────
+  if (productCategory && !/^gid:\/\/shopify\/ProductTaxonomyNode\/\d+$/.test(productCategory)) {
+    pushCrit('bad_product_category', `product_category "${productCategory}" is not a valid gid://shopify/ProductTaxonomyNode/N — Shopify will reject`);
+  }
+
+  return {
+    ok: critical.length === 0,
+    critical, warn, stats,
+    summary: {
+      critical_count: critical.length,
+      warn_count: warn.length,
+    },
+  };
+}
 // Extract Shopify product handle from a URL like
 // https://dropy.in/products/<handle> or /products/<handle>?variant=…
 function extractShopifyHandle(url) {
@@ -2005,6 +2135,16 @@ const server = http.createServer(async (req, res) => {
     // filtered against SHOPIFY_ALLOWED_FIELDS BEFORE the PUT; stripped
     // fields are returned in the response so the UI can show
     // "these were dropped, will not be sent" — the safety guarantee.
+    // Standalone preflight — validate Claude's JSON without pushing. Useful
+    // for the UI to show a red/yellow/green report next to the "Push" button
+    // and let the user iterate on the prompt if the rubric flags issues.
+    if (m === 'POST' && p === '/api/shopify/validate-patch') {
+      const b = await readJson(req);
+      if (!b.patch || typeof b.patch !== 'object') return send(res, 400, { ok: false, error: 'patch object required' });
+      const { safe, stripped } = stripToShopifyAllowlist(b.patch);
+      const preflight = validateShopifyPatch(safe, b.validationContext || {});
+      return send(res, 200, { ok: true, preflight, stripped, safe });
+    }
     if (m === 'POST' && p === '/api/shopify/update-product') {
       const b = await readJson(req);
       const productId = Number(b.productId);
@@ -2014,6 +2154,20 @@ const server = http.createServer(async (req, res) => {
       const { safe, stripped } = stripToShopifyAllowlist(b.patch);
       if (Object.keys(safe).length === 0) {
         return send(res, 400, { ok: false, error: 'no allowlisted fields in patch (all were stripped)', stripped });
+      }
+      // Preflight rubric validation on the ALLOWLISTED (safe) payload. Critical
+      // failures block the push unless caller explicitly passes force:true so
+      // an obvious problem never reaches the store. Warnings surface but don't
+      // block. Callers can dry-run via /api/shopify/validate-patch first.
+      const preflight = validateShopifyPatch(safe, b.validationContext || {});
+      if (!preflight.ok && !b.force) {
+        return send(res, 400, {
+          ok: false,
+          error: `Preflight FAILED: ${preflight.critical.length} critical issue(s). Fix Claude's output or pass force:true to override.`,
+          preflight,
+          stripped,
+          sent: safe,
+        });
       }
       const cfgRow = Q.getConfig.get();
       const cfg = cfgRow?.config ? JSON.parse(cfgRow.config) : {};

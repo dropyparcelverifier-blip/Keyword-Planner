@@ -98,6 +98,7 @@ export const api = {
   jobsRequeueDoneEmpty:(batchId)       => _fetch('/api/jobs/requeue-done-empty', { method: 'POST', body: { batchId: batchId || null } }),
   shopifyDebugLookup:  (sku)           => _fetch(`/api/shopify/debug-lookup?sku=${encodeURIComponent(sku)}`),
   shopifyUpdateImageAlts: (productId, alts) => _fetch('/api/shopify/update-image-alts', { method: 'POST', body: { confirm: 'PUSH', productId, alts } }),
+  shopifyValidatePatch:   (patch, validationContext) => _fetch('/api/shopify/validate-patch', { method: 'POST', body: { patch, validationContext } }),
   deleteWorker:        (workerId)      => _fetch('/api/workers/delete', { method: 'POST', body: { workerId } }),
   pruneStaleWorkers:   (olderThanMinutes) => _fetch('/api/workers/prune-stale', { method: 'POST', body: { olderThanMinutes: olderThanMinutes || 240 } }),
 };

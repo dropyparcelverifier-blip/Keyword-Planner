@@ -945,6 +945,74 @@ async function run() {
   // (Source-inspection assertions for extractReviewSignals + GraphQL routing
   // live in the srv-inspection block below, where srvFull has been loaded.)
 
+  // ===== Preflight validator =====
+  // Dry-run endpoint: returns preflight without pushing. Missing patch → 400.
+  const preNoPatch = await req('POST', '/api/shopify/validate-patch', {});
+  assertEq(preNoPatch.status, 400,                              'PREF.1 validate-patch without patch = 400');
+  // Empty patch → passes trivially (nothing to validate against, no critical
+  // failures possible because there are no fields to fail).
+  const preEmpty = await req('POST', '/api/shopify/validate-patch', { patch: {} });
+  assertEq(preEmpty.status, 200,                                'PREF.2 empty patch validation = 200');
+  assertEq(preEmpty.data.preflight.ok, true,                    'PREF.3 empty patch has no critical failures');
+  // Body too small → critical fail body_too_short.
+  const preTiny = await req('POST', '/api/shopify/validate-patch', {
+    patch: { body_html: 'Tiny body. Not enough words. Only fifteen or so.' },
+  });
+  assert(preTiny.data.preflight.ok === false,                   'PREF.4 tiny body_html fails preflight');
+  assert(preTiny.data.preflight.critical.some(c => c.id === 'body_too_short'), 'PREF.5 body_too_short critical raised');
+  // Base64 image URI → critical fail.
+  const preB64 = await req('POST', '/api/shopify/validate-patch', {
+    patch: { body_html: 'x '.repeat(900) + '<img src="data:image/png;base64,iVBORw0K">' },
+  });
+  assert(preB64.data.preflight.critical.some(c => c.id === 'body_base64'), 'PREF.6 base64 URI critical raised');
+  // Non-JSON-LD <script> tag → critical fail body_has_scripts.
+  const preScript = await req('POST', '/api/shopify/validate-patch', {
+    patch: { body_html: 'x '.repeat(900) + '<script>alert(1)</script>' },
+  });
+  assert(preScript.data.preflight.critical.some(c => c.id === 'body_has_scripts'), 'PREF.7 non-JSON-LD script critical raised');
+  // Fabricated AggregateRating when no review data supplied → critical fail.
+  const preFakeRating = await req('POST', '/api/shopify/validate-patch', {
+    patch: { body_html: 'x '.repeat(900) + '<script type="application/ld+json">{"@type":"Product","aggregateRating":{"ratingValue":"4.5"}}</script>' },
+    validationContext: { hasReviewData: false },
+  });
+  assert(preFakeRating.data.preflight.critical.some(c => c.id === 'fabricated_agg_rating'), 'PREF.8 fabricated AggregateRating critical raised (no real reviews)');
+  // Same body but WITH real review context → no critical for that check.
+  const preRealRating = await req('POST', '/api/shopify/validate-patch', {
+    patch: { body_html: 'x '.repeat(900) + '<script type="application/ld+json">{"@type":"Product","aggregateRating":{"ratingValue":"4.5"}}</script>' },
+    validationContext: { hasReviewData: true },
+  });
+  assert(!preRealRating.data.preflight.critical.some(c => c.id === 'fabricated_agg_rating'), 'PREF.9 AggregateRating allowed when hasReviewData:true');
+  // Competitor brand in copy → critical fail (context-aware).
+  const preCompetitor = await req('POST', '/api/shopify/validate-patch', {
+    patch: { body_html: 'x '.repeat(900) + '<script type="application/ld+json">{}</script> unlike Amazon our product is better' },
+    validationContext: { competitorBrands: ['Amazon'] },
+  });
+  assert(preCompetitor.data.preflight.critical.some(c => c.id === 'competitor_brand_Amazon'), 'PREF.10 competitor brand in copy critical raised');
+  // Bad product_category shape → critical.
+  const preBadCat = await req('POST', '/api/shopify/validate-patch', {
+    patch: { product_category: 'skincare' },
+  });
+  assert(preBadCat.data.preflight.critical.some(c => c.id === 'bad_product_category'), 'PREF.11 non-gid product_category critical raised');
+  // Valid gid passes.
+  const preGoodCat = await req('POST', '/api/shopify/validate-patch', {
+    patch: { product_category: 'gid://shopify/ProductTaxonomyNode/1085' },
+  });
+  assert(!preGoodCat.data.preflight.critical.some(c => c.id === 'bad_product_category'), 'PREF.12 valid gid product_category passes');
+  // update-product with failing preflight and no force → 400 with preflight in body.
+  const upWithBadPatch = await req('POST', '/api/shopify/update-product', {
+    confirm: 'PUSH', productId: 1,
+    patch: { body_html: 'too short' },
+  });
+  assertEq(upWithBadPatch.status, 400,                          'PREF.13 update-product with failing preflight = 400');
+  assert(upWithBadPatch.data.preflight?.critical?.length > 0,   'PREF.14 update-product response carries preflight report');
+  // update-product with force:true bypasses preflight (but will still fail at Shopify creds; we just check preflight was skipped).
+  const upForced = await req('POST', '/api/shopify/update-product', {
+    confirm: 'PUSH', productId: 1, force: true,
+    patch: { body_html: 'too short' },
+  });
+  // Shopify creds missing → 502, but importantly NOT the preflight 400.
+  assert(upForced.status !== 400 || !upForced.data.preflight,   'PREF.15 update-product with force:true bypasses preflight');
+
   // ===== Bulk SKU import — Dropy-<ASIN> → amazon.in/dp/<ASIN> =====
   const bulkBatch = 'bulk-import-test';
   // Dry-run first — should NOT insert.
