@@ -94,6 +94,21 @@ export async function releaseStaleJobs(staleMinutes = 10) {
   catch (e) { return { released: 0, error: e.message }; }
 }
 
+// Release ALL claims held by a specific worker id — no staleness check.
+// Called on cold-start / fresh-connect so a SW-reloaded worker doesn't leave
+// ghost claims in the DB (they'd show as in-flight forever because there's
+// no live process heartbeating them and no heartbeat-timeout would trigger
+// release-stale on the next cycle since fresh heartbeats keep coming from
+// the NEW claims). Fixes the "10 in-flight for one worker" reconciliation
+// gap where /api/jobs/worker-stats showed old + new claims summed.
+export async function releaseByWorker(workerId) {
+  if (!workerId) return { released: 0, error: 'workerId required' };
+  try {
+    const r = await _post('/api/jobs/release-by-worker', { workerId });
+    return { released: r.released || 0, workerId };
+  } catch (e) { return { released: 0, error: e.message }; }
+}
+
 // MANAGER UI: per-batch summary (counts by status). SQLite returns integers.
 export async function getJobSummary() {
   const r = await _get('/api/jobs/summary');
