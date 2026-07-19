@@ -1544,6 +1544,27 @@ function renderBatchOverview() {
 // color + label + hover tooltip. Clicking a REVIEW badge opens the queue
 // manager filtered to the problem SKUs; other statuses just switch to the
 // batch on the dashboard.
+// Pop a toast the moment a SKU crosses status = done. Row count comes
+// from the client-side keyword cache (analytics.allRows) so we can
+// distinguish 'healthy done' (>= 30 rows) from 'low-yield' / 'empty'.
+function notifyOnSkuComplete(job) {
+  const rowCount = analytics.allRows.filter(r => r.product_url === job.product_url).length;
+  const label = job.sku || job.product_name || job.product_url || 'SKU';
+  const shortLabel = String(label).length > 55 ? String(label).slice(0, 52) + '…' : String(label);
+  if (rowCount === 0) {
+    toast(`${shortLabel} — 0 rows landed. Reload the extension on the worker PC + click ↺ empty on the Batches row.`, 'err', { title: '⚠ Phantom done' });
+  } else if (rowCount < 30) {
+    toast(`${shortLabel} — only ${rowCount} rows (low yield). Consider requeuing.`, 'warn', { title: '⚠ Low yield done' });
+  } else {
+    toast(`${shortLabel} — ${rowCount.toLocaleString()} rows`, 'ok', { title: '✓ SKU complete' });
+  }
+}
+function notifyOnSkuFailed(job) {
+  const label = job.sku || job.product_name || job.product_url || 'SKU';
+  const shortLabel = String(label).length > 55 ? String(label).slice(0, 52) + '…' : String(label);
+  const reason = job.failed_reason ? ` — ${String(job.failed_reason).slice(0, 80)}` : '';
+  toast(`${shortLabel}${reason}`, 'err', { title: '✗ SKU failed' });
+}
 // Compact ETA pill next to a batch's progress bar. Format:
 //   ETA ~15m ↗   (accelerating pace)
 //   ETA ~2h ↘    (decelerating — throughput dropping)
@@ -3364,6 +3385,15 @@ const analytics = {
   // a full refresh at boot/batch-switch/every-5th-tick and updated in place
   // by incremental deltas.
   perProductById: new Map(),
+  // Tracks which job ids we've ALREADY noted as done — used to detect
+  // fresh completions on each tick so we can pop a toast the moment a
+  // new SKU crosses the finish line. Cleared on batch switch.
+  seenDoneSkuIds: new Set(),
+  // Same idea for failed SKUs — user should see failure toasts too.
+  seenFailedSkuIds: new Set(),
+  // Skip toasts for the FIRST tick after a batch switch (avoid a flood
+  // when opening a batch that already has 50 done SKUs).
+  toastSuppressUntilTick: 1,
   // Tick counter for the periodic full-refresh safety net. Every N ticks
   // we do a from-scratch fetch instead of incremental, so rare edits /
   // deletes / server-side dedupe merges eventually reconcile client-side.
@@ -4741,6 +4771,29 @@ async function tickAnalyticsLive() {
     // Rebuild jr.rows from the cache so downstream code (tree render,
     // stats) sees the FULL merged list, not just the delta.
     jr.rows = Array.from(analytics.perProductById.values());
+    // Fresh-completion detection — for every job in the cache whose
+    // status became 'done' since the last tick and we haven't already
+    // toasted, pop a completion notification. Also handles 'failed'.
+    // Skipped on the first tick after a batch switch so opening a
+    // batch with 50 done SKUs doesn't spam 50 toasts.
+    if (analytics.tickCount > analytics.toastSuppressUntilTick) {
+      for (const job of jr.rows) {
+        if (job.status === 'done' && !analytics.seenDoneSkuIds.has(job.id)) {
+          analytics.seenDoneSkuIds.add(job.id);
+          notifyOnSkuComplete(job);
+        } else if (job.status === 'failed' && !analytics.seenFailedSkuIds.has(job.id)) {
+          analytics.seenFailedSkuIds.add(job.id);
+          notifyOnSkuFailed(job);
+        }
+      }
+    } else {
+      // First tick after batch switch — pre-populate the seen sets so
+      // subsequent ticks only fire for NEW completions.
+      for (const job of jr.rows) {
+        if (job.status === 'done')    analytics.seenDoneSkuIds.add(job.id);
+        if (job.status === 'failed')  analytics.seenFailedSkuIds.add(job.id);
+      }
+    }
     const newRows = r.rows || [];
     // Server always returns maxId; use it as our next cursor. Falling back
     // to computing from returned rows lets us handle old-server responses.
@@ -4896,6 +4949,12 @@ async function loadAnalyticsBatch(batchId) {
   analytics.tickCount = 0;
   analytics.lastPerProductChangedAt = 0;
   analytics.perProductById.clear();
+  // Reset seen-done/failed sets + toast suppression so opening a batch
+  // with 50 existing done SKUs doesn't spam 50 toasts — the first tick
+  // pre-populates the sets, subsequent ticks only fire for NEW events.
+  analytics.seenDoneSkuIds.clear();
+  analytics.seenFailedSkuIds.clear();
+  analytics.toastSuppressUntilTick = 1;
   startAnalyticsPolling();
 }
 
