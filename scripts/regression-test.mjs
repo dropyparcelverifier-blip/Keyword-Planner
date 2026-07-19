@@ -2302,6 +2302,10 @@ async function run() {
   assert(appJs.body.includes('loadAnalyticsSkuByBatch'),       'ANF.7 SKU load helper');
   // Column sort persistence
   assert(appJs.body.includes('adbrainAnalyticsSort'),          'ANF.8 sort state localStorage key');
+  // 'Copy install command' button in Fleet card header.
+  assert(idx.body.includes('id="copyInstallCmdBtn"'),          'FLEET-CMD.1 install-command button element');
+  assert(appJs.body.includes('copyInstallCmdBtn'),             'FLEET-CMD.2 handler wired');
+  assert(appJs.body.includes('install-worker.ps1'),            'FLEET-CMD.3 install one-liner referenced');
   // Client wrapper + UI wiring.
   assert(apiJsSrc.body.includes('fetchWorkerBundleHash') === false, 'VER.11 client wrapper is in modules/discovery-jobs.js not api.js (worker-side)');
   assert(appJs.body.includes('data-copy-install-cmd'),         'VER.12 UI renders copy-install-cmd button on outdated rows');
