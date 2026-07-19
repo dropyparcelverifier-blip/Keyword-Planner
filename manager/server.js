@@ -1577,7 +1577,35 @@ const server = http.createServer(async (req, res) => {
       const b = url.searchParams.get('excludeBatch') || '';
       return send(res, 200, { ok: true, active: !!Q.existsActiveUrl.get(u, b) });
     }
-    if (m === 'POST' && p === '/api/jobs/done')   { const b = await readJson(req); Q.markDone.run(now(), b.batchId, b.productUrl); return send(res, 200, { ok: true }); }
+    if (m === 'POST' && p === '/api/jobs/done')   {
+      const b = await readJson(req);
+      Q.markDone.run(now(), b.batchId, b.productUrl);
+      // Phantom-done detection — if we've just marked a SKU 'done' but the
+      // keywords table has ZERO rows for it, log a clear err event so the
+      // user sees WHY the SKU landed empty. Root cause 99% of the time
+      // this session was the client-side batch_id mismatch (fixed in
+      // 45a4717) which caused every keyword push to be rejected as
+      // orphan_batch, then markDone flipped the SKU regardless.
+      // With this alert, the pattern is visible IN THE MANAGER LOG the
+      // instant it happens — no more "silent 0-row done" surprises.
+      if (b.batchId && b.productUrl) {
+        try {
+          const kwCount = db.prepare(`SELECT COUNT(*) AS n FROM keywords WHERE batch_id=? AND product_url=?`).get(b.batchId, b.productUrl);
+          if (Number(kwCount?.n || 0) === 0) {
+            Q.insertActivity.run(
+              b.batchId,
+              b.workerId || null,
+              'err',
+              'phantom_done',
+              `⚠ PHANTOM DONE: SKU marked done but the manager has ZERO keyword rows for it. Common causes: (1) worker's cached batch_id doesn't match this batch (see 'ORPHAN-BATCH REJECT' events), (2) push failed after markDone. Requeue via 'Requeue empty' or the SHIP-badge low-yield action.`,
+              b.productUrl,
+              null,
+            );
+          }
+        } catch {}
+      }
+      return send(res, 200, { ok: true });
+    }
     if (m === 'POST' && p === '/api/jobs/failed') { const b = await readJson(req); Q.markFailed.run(b.reason || null, now(), b.batchId, b.productUrl); return send(res, 200, { ok: true }); }
     if (m === 'POST' && p === '/api/jobs/release-stale') {
       const b = await readJson(req); const mins = Number.isFinite(b.staleMinutes) ? b.staleMinutes : 10;
@@ -2024,6 +2052,39 @@ const server = http.createServer(async (req, res) => {
       const pinnedKw = (cfgKw?.active_batch_id || '').trim();
       let activeKw = pinnedKw && Q.batchHasPending.get(pinnedKw) ? pinnedKw : null;
       if (!activeKw) activeKw = Q.newestPendingBatch.get()?.batch_id || null;
+      // Rejection alerting — turn silent orphan-batch rejections into
+      // visible err-level activity events so the user sees the actual
+      // mismatch in the Activity log. Groups rejections by (batch_id,
+      // product_url) so a 339-row push produces one log line, not 339.
+      // The user's #1 blocker this session was the SILENT orphan-batch
+      // rejection path (see 45a4717 for the client-side root cause fix).
+      if (rejected.length > 0) {
+        const groups = new Map();
+        for (const rj of rejected) {
+          const b_id = rj.row?.batch_id || b.batchId || '(none)';
+          const pu   = rj.row?.product_url || '(unknown)';
+          const key  = `${rj.reason}|${b_id}|${pu}`;
+          const cur  = groups.get(key) || { reason: rj.reason, batch_id: b_id, product_url: pu, sku: rj.row?.sku || null, count: 0 };
+          cur.count++;
+          groups.set(key, cur);
+        }
+        for (const g of groups.values()) {
+          const msg = g.reason === 'orphan_batch'
+            ? `⛔ ORPHAN-BATCH REJECT: ${g.count} row(s) rejected — worker sent batch_id "${g.batch_id}" which does not exist in this manager's jobs. Manager's active batch is "${activeKw || '(none)'}". Worker should resync via /api/jobs/active-batch.`
+            : `⛔ ROW REJECT (${g.reason}): ${g.count} row(s) rejected for product ${g.product_url}`;
+          try {
+            Q.insertActivity.run(
+              activeKw || g.batch_id || null,
+              null,
+              'err',
+              'orphan_guard',
+              msg,
+              g.product_url,
+              g.sku,
+            );
+          } catch {}
+        }
+      }
       return send(res, 200, { ok: true, inserted: n, rejected: rejected.length, active_batch_id: activeKw });
     }
     if (m === 'GET' && p === '/api/keywords') {

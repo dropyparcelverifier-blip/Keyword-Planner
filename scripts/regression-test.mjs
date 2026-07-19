@@ -1289,6 +1289,33 @@ async function run() {
   assert(apiJsSrc.body.includes('jobsRequeueLowYield'),         'REQUE.8 client wrapper for requeue-low-yield');
   assert(appJs.body.includes('data-requeue-low-yield'),         'REQUE.9 UI button renders inline with REVIEW badge');
 
+  // ===== Orphan-batch + phantom-done alerting =====
+  // Orphan-batch push → err-level activity event with clear mismatch details.
+  const alertBatch = 'orphan-alert-test';
+  await req('POST', '/api/jobs/upload', { batchId: alertBatch, products: [{ product_url: 'https://o.example/1', product_name: 'O', sku: 'O' }] });
+  await req('POST', '/api/keywords', { rows: [{ batch_id: 'ghost-batch-that-does-not-exist', keyword: 'x', product_url: 'https://o.example/1' }] });
+  // Fetch WITHOUT batch scope — my orphan_guard alert logs against the
+  // manager's authoritative active_batch_id (which may or may not be the
+  // one the caller tried to push to), so verify it exists somewhere.
+  const actAfterOrphan = await req('GET', `/api/activity?level=err&limit=30`);
+  assert(actAfterOrphan.data.events.some(e => e.source === 'orphan_guard' && /ORPHAN-BATCH REJECT/.test(e.message)),
+    'ALERT.1 orphan-batch rejection logs an err activity event');
+  // Phantom-done: markDone for a SKU with no keyword rows → phantom-done event.
+  await req('POST', '/api/jobs/upload', { batchId: alertBatch, products: [{ product_url: 'https://o.example/2', product_name: 'O2', sku: 'O2' }] });
+  await req('POST', '/api/jobs/done', { batchId: alertBatch, productUrl: 'https://o.example/2' });
+  const actAfterDone = await req('GET', `/api/activity?batchId=${encodeURIComponent(alertBatch)}&level=err&limit=20`);
+  assert(actAfterDone.data.events.some(e => e.source === 'phantom_done' && /PHANTOM DONE/.test(e.message)),
+    'ALERT.2 markDone with 0 rows logs a phantom-done err event');
+  // markDone AFTER successful keyword push → no phantom event.
+  await req('POST', '/api/jobs/upload', { batchId: alertBatch, products: [{ product_url: 'https://o.example/3', product_name: 'O3', sku: 'O3' }] });
+  await req('POST', '/api/keywords', { rows: [{ batch_id: alertBatch, keyword: 'real-kw', product_url: 'https://o.example/3' }] });
+  const beforeDone3 = await req('GET', `/api/activity?batchId=${encodeURIComponent(alertBatch)}&level=err&limit=50`);
+  const phantomCountBefore = beforeDone3.data.events.filter(e => e.source === 'phantom_done' && e.product_url === 'https://o.example/3').length;
+  await req('POST', '/api/jobs/done', { batchId: alertBatch, productUrl: 'https://o.example/3' });
+  const afterDone3 = await req('GET', `/api/activity?batchId=${encodeURIComponent(alertBatch)}&level=err&limit=50`);
+  const phantomCountAfter = afterDone3.data.events.filter(e => e.source === 'phantom_done' && e.product_url === 'https://o.example/3').length;
+  assertEq(phantomCountAfter, phantomCountBefore,               'ALERT.3 markDone with rows does NOT log phantom-done');
+
   // ===== 20o. BACKUPS + QUIESCE =====
   // Backup endpoints
   const bList = await req('GET', '/api/backups/list');
