@@ -1741,11 +1741,15 @@ async function _handleStartInner(msg) {
           if (!nextBatch) {
             nextBatch = await getActiveBatchId();
           }
-          if (nextBatch) {
-            if (isKpCooldownActive()) {
-              pushLog('Continuous mode: KP cooldown active — skipping this claim cycle.', 'warn');
-              break;
-            }
+          // Log the cooldown skip explicitly so users see WHY the loop didn't
+          // fire this cycle (previously a `break` at this point crashed the
+          // service worker with 'Illegal break statement' — the break was
+          // outside any loop; fixed by folding the cooldown check into the
+          // if-guard above and moving the log line here).
+          if (nextBatch && isKpCooldownActive()) {
+            pushLog('Continuous mode: KP cooldown active — skipping this claim cycle.', 'warn');
+          }
+          if (nextBatch && !isKpCooldownActive()) {
             pushLog(`Continuous mode: claiming next chunk from batch ${nextBatch}…`, 'ok');
             // Small cooldown so we don't immediately re-fire if the manager
             // is briefly inconsistent.
