@@ -3807,11 +3807,49 @@ $('anSkuSelect').addEventListener('change', () => {
   analytics.sku = $('anSkuSelect').value;
   filterAndRenderAnalytics();
 });
-['anSearch', 'anSource', 'anIntent', 'anMinRating', 'anOnlyImgMatches'].forEach(id => {
+// Analytics filter controls — wire to filterAndRenderAnalytics AND persist
+// to localStorage so refresh + revisit-later doesn't wipe carefully-tuned
+// filter combos. Restored during bootRestoreUI + on batch load. Debounced
+// save for the search input so typing doesn't spam localStorage.
+const ANALYTICS_FILTER_IDS = ['anSearch', 'anSource', 'anIntent', 'anMinRating', 'anOnlyImgMatches'];
+let _anFilterSaveTimer = null;
+function saveAnalyticsFilters() {
+  const snap = {};
+  for (const id of ANALYTICS_FILTER_IDS) {
+    const el = $(id);
+    if (!el) continue;
+    snap[id] = el.type === 'checkbox' ? el.checked : el.value;
+  }
+  try { localStorage.setItem('adbrainAnalyticsFilters', JSON.stringify(snap)); } catch {}
+}
+function restoreAnalyticsFilters() {
+  try {
+    const snap = JSON.parse(localStorage.getItem('adbrainAnalyticsFilters') || '{}');
+    for (const id of ANALYTICS_FILTER_IDS) {
+      const el = $(id);
+      if (!el || !(id in snap)) continue;
+      if (el.type === 'checkbox') el.checked = !!snap[id];
+      else                        el.value   = String(snap[id] ?? '');
+    }
+  } catch {}
+}
+ANALYTICS_FILTER_IDS.forEach(id => {
   const el = $(id);
   if (!el) return;
-  el.addEventListener(id === 'anSearch' ? 'input' : 'change', filterAndRenderAnalytics);
+  el.addEventListener(id === 'anSearch' ? 'input' : 'change', () => {
+    filterAndRenderAnalytics();
+    // Debounce for search-input; direct save for dropdowns/checkbox.
+    if (id === 'anSearch') {
+      clearTimeout(_anFilterSaveTimer);
+      _anFilterSaveTimer = setTimeout(saveAnalyticsFilters, 400);
+    } else {
+      saveAnalyticsFilters();
+    }
+  });
 });
+// Restore filter state as soon as controls exist (script order guarantees
+// they're already in the DOM at this point in app.js).
+restoreAnalyticsFilters();
 // ─────────── Claude listing-brief prompt builder ───────────
 // Bundles everything the model needs to write a full Shopify listing +
 // Amazon bullets + Google ad copy from the SKU's real research data.
@@ -5006,6 +5044,11 @@ async function loadAnalyticsBatch(batchId) {
   analytics.seenDoneSkuIds.clear();
   analytics.seenFailedSkuIds.clear();
   analytics.toastSuppressUntilTick = 1;
+  // Filter controls got repainted / re-rendered indirectly during batch
+  // load — re-apply the saved filter state so a batch switch doesn't
+  // wipe carefully-tuned filters. Cheap and idempotent.
+  restoreAnalyticsFilters();
+  filterAndRenderAnalytics();
   startAnalyticsPolling();
 }
 
