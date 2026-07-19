@@ -5665,9 +5665,15 @@ function renderAnalyticsHero(rows) {
               : dq >= 3 ? { l: 'C', c: 'var(--warn)',    t: 'Partial — some signals missing' }
               :           { l: 'D', c: 'var(--danger)',  t: 'Thin — analytics may mislead' };
 
-  // Product identity strip.
+  // Product identity strip. The product name is now the primary link to
+  // the dropy.in product page (was a separate 'Open product ↗' button
+  // easy to miss). Keeping the button too as a secondary affordance for
+  // the classic click-outside-the-header pattern.
+  const nameHtml = productUrl
+    ? `<a class="an-hp-name" href="${esc(productUrl)}" target="_blank" rel="noopener" title="Open ${esc(productName)} on dropy.in ↗">${esc(productName)}</a>`
+    : `<div class="an-hp-name" title="${esc(productName)}">${esc(productName)}</div>`;
   prod.innerHTML = `
-    <div class="an-hp-name" title="${esc(productName)}">${esc(productName)}</div>
+    ${nameHtml}
     ${sku ? `<span class="an-hp-sku">${esc(sku)}</span>` : ''}
     <span class="an-hp-badge" style="background:${grade.c}20; color:${grade.c}; border-color:${grade.c};" title="Data quality: ${esc(grade.t)}">DQ ${grade.l}</span>
     ${productUrl ? `<a href="${esc(productUrl)}" target="_blank" rel="noopener" class="an-hp-link">Open product ↗</a>` : ''}
