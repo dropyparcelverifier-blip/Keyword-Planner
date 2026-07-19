@@ -1452,55 +1452,70 @@ input.qm-select { cursor: pointer; }
 .tab.active kbd { border-color: var(--accent); color: var(--accent); }
 
 /* Per-worker action buttons on worker cards */
+/* Fleet actions — icon-only, single horizontal line, color-coded by
+   intent. Sized so all 9 buttons + 2 separators fit in ~330px which is
+   safe for a typical actions column on any laptop / desktop screen.
+   Never wraps to a vertical stack (that trashed the layout on narrow
+   viewports). If the column is even narrower, the row scrolls
+   horizontally rather than stacking. */
 .worker-actions {
-  display: flex; gap: 4px; margin-top: 4px; align-items: center;
-  flex-wrap: wrap;
+  display: inline-flex; gap: 3px; align-items: center;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  max-width: 100%;
+  padding: 2px 0;
+  scrollbar-width: thin;
 }
-/* Base button + legacy danger-btn kept for backwards compat with any
-   consumer we missed; new redesign uses .wa + variant classes below. */
-.worker-actions button {
-  padding: 2px 8px; font-size: 10px; font-weight: 600;
-  background: var(--bg-3); border: 1px solid var(--line-2); color: var(--text-2);
-  border-radius: 4px;
-}
-.worker-actions button:hover { background: var(--line-2); color: var(--text-1); }
-.worker-actions button.danger-btn { color: var(--danger); border-color: var(--danger); }
-.worker-actions button.danger-btn:hover { background: var(--danger-soft); }
-/* Grouped, labeled buttons — new design that fixes the "10 orange
-   rectangles look identical" complaint. Each variant has its own hover
-   tone so scanning the row surfaces intent without reading tooltips. */
+.worker-actions::-webkit-scrollbar { height: 4px; }
+.worker-actions::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 2px; }
+/* Base button — compact 26×26 hit target, icon-centered. */
 .worker-actions .wa {
-  padding: 3px 9px;
-  font-size: 11px;
-  font-family: var(--mono);
+  flex: 0 0 auto;
+  width: 26px; height: 26px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
   border-radius: 4px;
   border: 1px solid var(--line-2);
   background: var(--bg-3);
   color: var(--text-2);
   cursor: pointer;
-  transition: background 100ms ease, color 100ms ease, border-color 100ms ease;
-  white-space: nowrap;
-  line-height: 1.35;
+  transition: background 100ms ease, color 100ms ease, border-color 100ms ease, transform 60ms ease;
+  user-select: none;
 }
 .worker-actions .wa:hover { background: var(--line-2); color: var(--text-0); }
+.worker-actions .wa:active { transform: scale(0.94); }
+/* Variants — border-color drives the visible group signal. Icon color
+   matches the border so glancing at the row is enough to see intent. */
 .worker-actions .wa-primary { color: var(--info); border-color: var(--info); }
-.worker-actions .wa-primary:hover { background: rgba(59, 130, 246, 0.12); }
+.worker-actions .wa-primary:hover { background: rgba(59, 130, 246, 0.15); color: var(--info); }
 .worker-actions .wa-ok { color: var(--success); border-color: var(--success); }
-.worker-actions .wa-ok:hover { background: var(--success-soft); }
+.worker-actions .wa-ok:hover { background: var(--success-soft); color: var(--success); }
 .worker-actions .wa-warn { color: var(--warn); border-color: var(--warn); }
-.worker-actions .wa-warn:hover { background: rgba(245, 158, 11, 0.12); }
+.worker-actions .wa-warn:hover { background: rgba(245, 158, 11, 0.15); color: var(--warn); }
 .worker-actions .wa-danger { color: var(--danger); border-color: var(--danger); }
-.worker-actions .wa-danger:hover { background: var(--danger-soft); }
+.worker-actions .wa-danger:hover { background: var(--danger-soft); color: var(--danger); }
 .worker-actions .wa-mute { color: var(--text-3); }
-.worker-actions .wa-mute:hover { color: var(--text-1); }
-/* Vertical separator between button groups — reads as "these two
-   groups do different things" at a glance. */
+.worker-actions .wa-mute:hover { color: var(--text-1); border-color: var(--line-3); }
+/* Vertical separator between button groups. */
 .worker-actions .wa-sep {
+  flex: 0 0 auto;
   display: inline-block;
-  width: 1px; height: 18px;
+  width: 1px; height: 16px;
   background: var(--line-2);
   margin: 0 2px;
 }
+/* Legacy .worker-actions button + .danger-btn kept for anything using
+   the older markup so it doesn't blow up in the transition. */
+.worker-actions button:not(.wa) {
+  padding: 2px 8px; font-size: 10px; font-weight: 600;
+  background: var(--bg-3); border: 1px solid var(--line-2); color: var(--text-2);
+  border-radius: 4px;
+}
+.worker-actions button:not(.wa):hover { background: var(--line-2); color: var(--text-1); }
+.worker-actions button.danger-btn { color: var(--danger); border-color: var(--danger); }
+.worker-actions button.danger-btn:hover { background: var(--danger-soft); }
 /* Fleet-actions legend — the "? What do these buttons do?" popover in
    the Worker fleet card head. Keeps the row itself compact while giving
    users a one-click reference for every button. */
