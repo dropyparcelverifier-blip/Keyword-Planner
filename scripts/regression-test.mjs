@@ -2174,6 +2174,69 @@ async function run() {
   // Commercial-modifier rows from R1 also enter Amazon Round.
   assert(/r\.source === 'commercial_modifier'/.test(kdSrcCaps), '20s.18 R1 commercial_modifier rows also enter Amazon Round');
 
+  // ===== V8-based semantic compilation check for every extension file =====
+  // node --check only does SYNTACTIC parsing and lets a lot of things through
+  // that V8 (Chrome) rejects at compile-time — illegal break/continue outside
+  // loops, illegal return outside functions, TDZ shadow-const errors, etc.
+  // Session 88261db was a break; inside an if-block that node --check passed
+  // but Chrome's service-worker parser threw 'SyntaxError: Illegal break
+  // statement' on, silently registering the SW as failed with the generic
+  // 'Status code: 15'. Cost: hours of triage.
+  //
+  // Now every worker-facing .js/.mjs is compiled through V8's proper module
+  // path (vm.SourceTextModule with an ESM-compatible options bag) which runs
+  // the SAME parse+compile V8 uses in Chrome. If Chrome would reject the
+  // module at load time, this test fails locally FIRST.
+  {
+    const { Script } = await import('node:vm');
+    const workerFiles = [
+      'background.js',
+      'kp.js',
+      'serp-reader.js',
+      'amazon-reader.js',
+      'popup.js',
+      'dashboard.js',
+      'offscreen.js',
+      'sandbox.js',
+      'modules/keyword-discovery.js',
+      'modules/keyword-filter.js',
+      'modules/discovery-jobs.js',
+      'modules/discovery-export.js',
+      'modules/image-matcher.js',
+      'modules/attribute-families.js',
+      'config/discovery-config.js',
+    ];
+    // Strip ES module top-level import/export statements so vm.Script (which
+    // is script-mode, not module-mode) can compile the rest. Break/return/
+    // continue outside a valid target is a PARSE-TIME check in V8 that fires
+    // regardless of script vs module mode, so this still catches the exact
+    // class of bug that produced 88261db.
+    const stripEsModuleSyntax = (src) => src
+      .replace(/^\s*export\s+default\s+/gm, '')
+      .replace(/^\s*export\s+(async\s+)?function\s+/gm, '$1function ')
+      .replace(/^\s*export\s+(const|let|var|class)\s+/gm, '$1 ')
+      .replace(/^\s*export\s*\{[^}]*\}\s*;?\s*$/gm, '')
+      .replace(/^\s*export\s*\*\s+from\s+['"][^'"]+['"]\s*;?\s*$/gm, '')
+      .replace(/^\s*import\s+[^;]+;?\s*$/gm, '')
+      .replace(/^\s*import\s*\{[\s\S]*?\}\s*from\s+['"][^'"]+['"]\s*;?\s*$/gm, '');
+    let compiledOk = 0;
+    for (const rel of workerFiles) {
+      try {
+        const raw = readFileSync(resolve(REPO, rel), 'utf-8');
+        const stripped = stripEsModuleSyntax(raw);
+        // vm.Script triggers V8's full parse+compile — catches illegal
+        // break/continue/return, illegal await, label conflicts, TDZ
+        // shadow-const, and anything else V8 rejects at compile-time
+        // (which is what Chrome MV3 does when loading the SW).
+        new Script(stripped, { filename: rel });
+        compiledOk++;
+      } catch (e) {
+        assert(false, `V8.1 V8 compile ${rel}: ${e.message} — Chrome will reject this too`);
+      }
+    }
+    assertEq(compiledOk, workerFiles.length, `V8.2 all ${workerFiles.length} worker files pass V8 strict parse`);
+  }
+
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
   const [s1, w1, a1] = await Promise.all([
