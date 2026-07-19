@@ -1750,24 +1750,36 @@
   function collectRelatedSearches() {
     const out = new Set();
 
-    // Bottom-of-page container ONLY. #botstuff is the official Google
-    // wrapper for the post-results section that holds related searches.
-    // #bres is the legacy fallback (sometimes still present).
+    // ─── SOURCE 1: Bottom-of-page "Related searches" (#botstuff) ─────
+    // #botstuff is the official Google wrapper for the post-results
+    // section that holds related searches. #bres is legacy fallback.
     const bottom = document.querySelector('#botstuff') || document.querySelector('#bres');
-    if (!bottom) return [];
+    if (bottom) {
+      // Explicit "related searches" anchors — any /search?q= link inside.
+      bottom.querySelectorAll('a[href*="/search"]').forEach(a => {
+        const text = (a.innerText || a.textContent || '').trim().split('\n')[0].trim();
+        if (text.length < 4 || text.length > 100) return;
+        if (isFilterChipText(text)) return;
+        if (/^(Images|Videos|News|Maps|Shopping|Books|Flights|Personal|Tools)$/i.test(text)) return;
+        out.add(text);
+      });
+      // "People also search for" tiles use data-q attributes.
+      bottom.querySelectorAll('[data-q]').forEach(el => {
+        const q = el.getAttribute('data-q');
+        if (!q) return;
+        if (q.length < 4 || q.length > 100) return;
+        if (isFilterChipText(q)) return;
+        out.add(q.trim());
+      });
+    }
 
-    // Method 1: explicit "related searches" anchors. Inside #botstuff,
-    // any anchor pointing at /search?q= IS a related-search link.
-    bottom.querySelectorAll('a[href*="/search"]').forEach(a => {
-      const text = (a.innerText || a.textContent || '').trim().split('\n')[0].trim();
-      if (text.length < 4 || text.length > 100) return;
-      if (isFilterChipText(text)) return;
-      if (/^(Images|Videos|News|Maps|Shopping|Books|Flights|Personal|Tools)$/i.test(text)) return;
-      out.add(text);
-    });
-
-    // Method 2: "People also search for" tiles use data-q attributes.
-    bottom.querySelectorAll('[data-q]').forEach(el => {
+    // ─── SOURCE 2: Mid-SERP "People also search for" (NEW) ───────────
+    // Google now surfaces PASF outside #botstuff too — the middle-of-page
+    // 'People also search for' horizontal card row appears near shopping /
+    // knowledge panel results, above organic. Scan the WHOLE document for
+    // [data-q] outside #botstuff (which we already covered above).
+    document.querySelectorAll('[data-q]').forEach(el => {
+      if (bottom && bottom.contains(el)) return; // already collected
       const q = el.getAttribute('data-q');
       if (!q) return;
       if (q.length < 4 || q.length > 100) return;
@@ -1775,7 +1787,45 @@
       out.add(q.trim());
     });
 
-    return Array.from(out).slice(0, 16);
+    // ─── SOURCE 3: Per-result "People also search for" dropdowns ─────
+    // When Google detects a specific product query it sometimes attaches
+    // a small "People also search for" dropdown BELOW an individual organic
+    // result. Marked by [aria-label*="People also search for"] on the
+    // container, and children carry the same [data-q] convention OR
+    // plain <a href="/search"> children.
+    document.querySelectorAll('[aria-label*="People also search"], [aria-label*="people also search"], [data-hveid][data-async-context*="pasf"]').forEach(container => {
+      container.querySelectorAll('a[href*="/search"], [data-q]').forEach(el => {
+        const q = el.getAttribute?.('data-q') || (el.innerText || el.textContent || '').trim().split('\n')[0].trim();
+        if (!q) return;
+        if (q.length < 4 || q.length > 100) return;
+        if (isFilterChipText(q)) return;
+        if (/^(Images|Videos|News|Maps|Shopping|Books|Flights|Personal|Tools)$/i.test(q)) return;
+        out.add(q);
+      });
+    });
+
+    // ─── SOURCE 4: "Others also asked" / "Others also searched" ──────
+    // Semantic variants of PASF that Google A/B-tests periodically. Same
+    // DOM structure but different heading text — the container wrapping
+    // them still uses [data-q] on its chip children.
+    document.querySelectorAll('div, section').forEach(container => {
+      const heading = (container.querySelector('[role="heading"]')?.innerText || container.querySelector('h2, h3')?.innerText || '').toLowerCase();
+      if (!heading) return;
+      if (!/(others also|people also search|related search|similar search)/i.test(heading)) return;
+      container.querySelectorAll('a[href*="/search"], [data-q]').forEach(el => {
+        const q = el.getAttribute?.('data-q') || (el.innerText || el.textContent || '').trim().split('\n')[0].trim();
+        if (!q) return;
+        if (q.length < 4 || q.length > 100) return;
+        if (isFilterChipText(q)) return;
+        out.add(q);
+      });
+    });
+
+    // Cap raised 16→24 to accommodate the extra sources without losing
+    // quality — the SERP-cycle picks the top N anyway, so more choices
+    // = better yield on niche products where each source might contribute
+    // only 2-3 unique queries.
+    return Array.from(out).slice(0, 24);
   }
 
   function addIfImage(src, out) {

@@ -1378,6 +1378,16 @@ async function run() {
   assert(kdFull.includes("'international_market'"),              'FALLBACK.11 international_market source tag');
   assert(kdFull.includes("'availability_query'"),                'FALLBACK.12 availability_query source tag');
   assert(kdFull.includes("'category_commercial'"),               'FALLBACK.13 category_commercial source tag');
+  // Extended PASF ("People also search for") extraction — was bottom-of-
+  // page only; now covers mid-SERP + per-result dropdowns + semantic
+  // variants ("Others also asked", "Related searches" headings).
+  const serpReader = readFileSync(resolve(REPO, 'serp-reader.js'), 'utf-8');
+  assert(serpReader.includes('SOURCE 1: Bottom-of-page'),        'PASF.1 bottom-of-page source retained');
+  assert(serpReader.includes('SOURCE 2: Mid-SERP'),              'PASF.2 mid-SERP source added');
+  assert(serpReader.includes('SOURCE 3: Per-result'),            'PASF.3 per-result dropdown source added');
+  assert(serpReader.includes('SOURCE 4: "Others also asked"'),   'PASF.4 semantic-variant source added');
+  assert(serpReader.includes("aria-label*=\"People also search\""), 'PASF.5 per-result aria-label selector present');
+  assert(serpReader.includes('.slice(0, 24)'),                   'PASF.6 cap raised 16→24 to fit extra sources');
 
   // ===== 20o. BACKUPS + QUIESCE =====
   // Backup endpoints
