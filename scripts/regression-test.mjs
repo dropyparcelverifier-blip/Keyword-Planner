@@ -1316,6 +1316,46 @@ async function run() {
   const phantomCountAfter = afterDone3.data.events.filter(e => e.source === 'phantom_done' && e.product_url === 'https://o.example/3').length;
   assertEq(phantomCountAfter, phantomCountBefore,               'ALERT.3 markDone with rows does NOT log phantom-done');
 
+  // ===== Batch ETA =====
+  const etaNoBatch = await req('GET', '/api/batches/eta');
+  assertEq(etaNoBatch.status, 400,                              'ETA.1 batch ETA requires batchId');
+  const etaBatch = 'eta-test-batch';
+  await req('POST', '/api/jobs/upload', { batchId: etaBatch, products: [
+    { product_url: 'https://e.example/1', product_name: 'E1', sku: 'E1' },
+    { product_url: 'https://e.example/2', product_name: 'E2', sku: 'E2' },
+    { product_url: 'https://e.example/3', product_name: 'E3', sku: 'E3' },
+  ] });
+  // No rows landed yet → eta_minutes null with a helpful reason.
+  const etaCold = await req('GET', `/api/batches/eta?batchId=${encodeURIComponent(etaBatch)}`);
+  assertEq(etaCold.status, 200,                                 'ETA.2 valid batch returns 200');
+  assertEq(etaCold.data.eta_minutes, null,                      'ETA.3 no rows yet → null ETA');
+  assert(typeof etaCold.data.reason === 'string',               'ETA.4 reason string surfaced when null');
+  // Land some rows for one product, mark it done → we have an avg.
+  const kwE1 = [];
+  for (let i = 0; i < 40; i++) kwE1.push({ batch_id: etaBatch, keyword: `e1-${i}`, product_url: 'https://e.example/1' });
+  await req('POST', '/api/keywords', { rows: kwE1 });
+  await req('POST', '/api/jobs/done', { batchId: etaBatch, productUrl: 'https://e.example/1' });
+  const etaWarm = await req('GET', `/api/batches/eta?batchId=${encodeURIComponent(etaBatch)}`);
+  assert(etaWarm.data.metrics.avg_rows_per_done_sku === 40,     'ETA.5 avg_rows_per_done_sku computed from done SKU');
+  assert(etaWarm.data.metrics.total === 3,                      'ETA.6 total SKU count reported');
+  assert(etaWarm.data.metrics.remaining_skus === 2,             'ETA.7 remaining_skus = pending + claimed');
+  assert(['accelerating', 'stable', 'decelerating', 'unknown'].includes(etaWarm.data.metrics.trend), 'ETA.8 trend classified');
+  // Rate metrics returned.
+  assert(typeof etaWarm.data.metrics.short_rate_per_min === 'number', 'ETA.9 short_rate_per_min returned');
+  assert(typeof etaWarm.data.metrics.long_rate_per_min === 'number',  'ETA.10 long_rate_per_min returned');
+  // All done → eta = 0.
+  await req('POST', '/api/keywords', { rows: [{ batch_id: etaBatch, keyword: 'e2-1', product_url: 'https://e.example/2' }] });
+  await req('POST', '/api/jobs/done', { batchId: etaBatch, productUrl: 'https://e.example/2' });
+  await req('POST', '/api/keywords', { rows: [{ batch_id: etaBatch, keyword: 'e3-1', product_url: 'https://e.example/3' }] });
+  await req('POST', '/api/jobs/done', { batchId: etaBatch, productUrl: 'https://e.example/3' });
+  const etaAllDone = await req('GET', `/api/batches/eta?batchId=${encodeURIComponent(etaBatch)}`);
+  assertEq(etaAllDone.data.eta_minutes, 0,                      'ETA.11 all SKUs settled → eta 0');
+  assert(etaAllDone.data.reason?.includes('all SKUs settled'),  'ETA.12 reason confirms settled');
+  // Client wrapper + UI wiring.
+  assert(apiJsSrc.body.includes('batchEta'),                    'ETA.13 client wrapper api.batchEta');
+  assert(appJs.body.includes('renderEtaPill'),                  'ETA.14 renderEtaPill helper present');
+  assert(appJs.body.includes('data-eta-pill'),                  'ETA.15 ETA pill rendered in Batches row');
+
   // ===== 20o. BACKUPS + QUIESCE =====
   // Backup endpoints
   const bList = await req('GET', '/api/backups/list');

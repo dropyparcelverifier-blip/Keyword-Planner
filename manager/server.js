@@ -656,6 +656,9 @@ const Q = {
   // Every batch that has keyword rows — used by the UI to surface orphan
   // batches (keywords landed after their jobs were wiped by reset-all).
   keywordsBatchList:     db.prepare(`SELECT batch_id, COUNT(*) AS row_count, MIN(created_at) AS first_at, MAX(created_at) AS last_at FROM keywords GROUP BY batch_id ORDER BY last_at DESC`),
+  // ETA support — row landings in the last N minutes for the given batch.
+  // Used by /api/batches/eta to compute rate + trend + projected finish.
+  keywordsRateBatch: db.prepare(`SELECT COUNT(*) AS n FROM keywords WHERE batch_id=? AND created_at >= ?`),
   // Orphan detection + cleanup — keyword rows whose batch_id has no matching
   // jobs. Happens when reset-all wipes jobs while workers are mid-push.
   countOrphanKeywords:   db.prepare(`SELECT COUNT(*) AS n, COUNT(DISTINCT batch_id) AS batches FROM keywords WHERE batch_id NOT IN (SELECT DISTINCT batch_id FROM jobs)`),
@@ -1790,6 +1793,82 @@ const server = http.createServer(async (req, res) => {
           stall_minutes: Number.isFinite(stall_minutes) ? stall_minutes : null,
         },
         low_yield_skus: lowYieldRows,
+      });
+    }
+    // Per-batch ETA — projected finish time based on recent row-landing rate.
+    // Answers "when will this batch actually be done?" by combining:
+    //   · rows landed in the last SHORT window (default 5 min) → recent_rate
+    //   · rows landed in the last LONG window (default 30 min) → long_rate
+    //   · a comparison of the two → trend (accelerating / stable / decelerating)
+    //   · remaining jobs × avg rows/SKU-so-far → estimated rows remaining
+    //   · rows remaining / rate → ETA minutes
+    // Returns null ETA (with reason) when we can't compute — no rows yet,
+    // no pending jobs, etc — so the UI can degrade gracefully.
+    if (m === 'GET' && p === '/api/batches/eta') {
+      const batchId = url.searchParams.get('batchId') || '';
+      if (!batchId) return send(res, 400, { ok: false, error: 'batchId required' });
+      const shortWinMin = Math.max(1, Number(url.searchParams.get('shortWindowMin') || 5));
+      const longWinMin  = Math.max(shortWinMin, Number(url.searchParams.get('longWindowMin') || 30));
+      const nowTs = now();
+      const shortStart = nowTs - shortWinMin * 60000;
+      const longStart  = nowTs - longWinMin  * 60000;
+      const shortR = Q.keywordsRateBatch.get(batchId, shortStart);
+      const longR  = Q.keywordsRateBatch.get(batchId, longStart);
+      const shortN = Number(shortR?.n || 0);
+      const longN  = Number(longR?.n  || 0);
+      const shortRate = shortN / shortWinMin;     // rows/min
+      const longRate  = longN  / longWinMin;      // rows/min
+      // Prefer short rate (matches current pace); fall back to long if short is 0.
+      const activeRate = shortRate > 0 ? shortRate : longRate;
+      // Job status snapshot from batchReadiness aggregate — reuse to avoid duplication.
+      const rd = Q.batchReadiness.get(batchId);
+      if (!rd) return send(res, 200, { ok: true, batchId, eta_minutes: null, reason: 'no jobs found', metrics: {} });
+      const total   = Number(rd.total || 0);
+      const done    = Number(rd.done || 0);
+      const pending = Number(rd.pending || 0);
+      const claimed = Number(rd.claimed || 0);
+      const totalRows = Number(rd.total_rows || 0);
+      const remainingSkus = pending + claimed;
+      const avgRowsPerDone = done > 0 ? Math.round(totalRows / done) : null;
+      // Trend: (short_rate - long_rate) / long_rate. 0=stable, +ve=accelerating.
+      let trend = 'unknown';
+      if (longRate > 0) {
+        const delta = (shortRate - longRate) / longRate;
+        trend = delta > 0.20 ? 'accelerating' : delta < -0.20 ? 'decelerating' : 'stable';
+      }
+      // ETA: if no work remaining, done. If no rate, unknown.
+      let eta_minutes = null, reason = null;
+      if (remainingSkus === 0) {
+        eta_minutes = 0;
+        reason = 'all SKUs settled';
+      } else if (activeRate <= 0) {
+        reason = shortN === 0 && longN === 0
+          ? `no rows landed in the last ${longWinMin} min — workers may be running but haven't produced anything yet (or the extension hasn't been reloaded to pick up the batch_id fix)`
+          : `throughput too low to project`;
+      } else if (avgRowsPerDone == null || avgRowsPerDone === 0) {
+        reason = 'no done SKUs yet, cannot estimate rows-per-SKU';
+      } else {
+        const rowsRemaining = remainingSkus * avgRowsPerDone;
+        eta_minutes = Math.round(rowsRemaining / activeRate);
+      }
+      return send(res, 200, {
+        ok: true,
+        batchId,
+        eta_minutes,
+        reason,
+        eta_at: eta_minutes != null ? nowTs + eta_minutes * 60000 : null,
+        metrics: {
+          total, done, pending, claimed, remaining_skus: remainingSkus,
+          total_rows: totalRows,
+          avg_rows_per_done_sku: avgRowsPerDone,
+          short_window_min: shortWinMin,
+          long_window_min:  longWinMin,
+          rows_last_short_min: shortN,
+          rows_last_long_min:  longN,
+          short_rate_per_min:  Math.round(shortRate * 10) / 10,
+          long_rate_per_min:   Math.round(longRate  * 10) / 10,
+          trend,
+        },
       });
     }
     if (m === 'GET' && p === '/api/jobs/worker-stats') {
