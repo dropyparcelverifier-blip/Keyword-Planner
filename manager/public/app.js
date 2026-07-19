@@ -1488,6 +1488,7 @@ function renderBatchOverview() {
             <div style="font-size: 10px; color: var(--text-3); margin-top: 2px;">
               ${done + failed}/${total} · ${donePct.toFixed(0)}%
               ${claimed > 0 ? ` · <span style="color: var(--warn);">${claimed} in flight</span>` : ''}
+              <span class="eta-pill" data-eta-pill="${esc(b.batch_id)}" style="margin-left: 8px; color: var(--text-3);">…</span>
             </div>
           </td>
           <td class="num">${total}</td>
@@ -1528,11 +1529,54 @@ function renderBatchOverview() {
       badge.title = 'Ship-readiness endpoint failed (server may need a restart to pick up /api/batches/readiness)';
     });
   });
+  // ETA pills — populated by /api/batches/eta. Compact 'ETA ~15m ↗'
+  // format so it fits the tiny space next to the progress bar. Hover
+  // shows the rate + trend breakdown.
+  el.querySelectorAll('[data-eta-pill]').forEach(pill => {
+    const bId = pill.dataset.etaPill;
+    api.batchEta(bId).then(r => renderEtaPill(pill, r)).catch(() => {
+      pill.textContent = '';
+      pill.title = 'ETA endpoint failed (older manager?)';
+    });
+  });
 }
 // Compact ship-readiness badge renderer. Maps the server's status enum to
 // color + label + hover tooltip. Clicking a REVIEW badge opens the queue
 // manager filtered to the problem SKUs; other statuses just switch to the
 // batch on the dashboard.
+// Compact ETA pill next to a batch's progress bar. Format:
+//   ETA ~15m ↗   (accelerating pace)
+//   ETA ~2h ↘    (decelerating — throughput dropping)
+//   ETA ~45m →   (stable pace)
+//   done          (all SKUs settled)
+//   —             (nothing to project, e.g. no rows landed yet)
+// Hover tooltip carries the full metrics + reason so the compact form
+// stays uncluttered but the full story is one hover away.
+function renderEtaPill(pill, r) {
+  if (!r?.ok) { pill.textContent = ''; return; }
+  const m = r.metrics || {};
+  const eta = r.eta_minutes;
+  const trendArrow = { accelerating: '↗', stable: '→', decelerating: '↘', unknown: '' }[m.trend || 'unknown'];
+  const trendColor = { accelerating: 'var(--success)', decelerating: 'var(--warn)', stable: 'var(--text-2)', unknown: 'var(--text-3)' }[m.trend || 'unknown'];
+  let label;
+  if (eta === 0)            label = 'done';
+  else if (eta == null)     label = '—';
+  else if (eta < 1)         label = 'ETA <1m';
+  else if (eta < 60)        label = `ETA ~${eta}m`;
+  else                      label = `ETA ~${Math.floor(eta / 60)}h${eta % 60 > 0 ? ` ${eta % 60}m` : ''}`;
+  pill.textContent = `${label} ${trendArrow}`.trim();
+  pill.style.color = trendColor;
+  const at = r.eta_at ? new Date(r.eta_at).toLocaleTimeString() : null;
+  pill.title = [
+    r.reason ? `Note: ${r.reason}` : null,
+    eta != null && at ? `Projected finish: ${at}` : null,
+    `Recent rate: ${m.short_rate_per_min ?? 0}/min (last ${m.short_window_min || 5} min)`,
+    `Long rate:   ${m.long_rate_per_min ?? 0}/min (last ${m.long_window_min  || 30} min)`,
+    m.avg_rows_per_done_sku != null ? `Avg ${m.avg_rows_per_done_sku} rows/SKU (from ${m.done ?? 0} done)` : null,
+    m.remaining_skus != null ? `${m.remaining_skus} SKU(s) remaining` : null,
+    m.trend ? `Trend: ${m.trend}` : null,
+  ].filter(Boolean).join('\n');
+}
 function renderShipBadge(badge, r) {
   const statusStyles = {
     READY:       { color: 'success', label: 'READY',   icon: '✓' },
