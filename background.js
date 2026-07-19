@@ -156,6 +156,14 @@ const state = {
   workerId: '',
   queueBatchId: '',
   claimedJobs: [],
+  // KP session-dead detection: after 2 consecutive per-product KP failures,
+  // we conclude the KP tab / Google Ads session is dead for this worker.
+  // Rather than burn through 25 more claims returning 0-row DONE products,
+  // release the current chunk back to the queue and stop claiming for a
+  // 5-minute cooldown. Reset on any successful KP fetch — a transient
+  // outage (rate limit, brief network blip) doesn't trigger the block.
+  consecutiveKpFailures: 0,
+  kpDeadUntil: 0,
   // Continuous-claim mode: when true, after the engine finishes processing
   // a claimed chunk, the worker AUTOMATICALLY claims the next chunk from
   // the same batch (or the newest pending batch if queueBatchId is empty).
@@ -317,6 +325,22 @@ function pushLog(text, kind) {
 
 function emitProgress(payload) {
   if (payload?.currentAction) pushLog(payload.currentAction, payload.logKind);
+  // KP session-dead accounting: track consecutive per-product KP failures
+  // vs successes. See state.consecutiveKpFailures for context.
+  if (payload?.currentSource === 'kp') {
+    const msg = String(payload.currentAction || '');
+    const isFail = payload.logKind === 'err' && /^⚠ KP FAILED/.test(msg);
+    const isOk   = payload.logKind === 'ok'  && /^KP returned \d/.test(msg);
+    if (isFail) {
+      state.consecutiveKpFailures = (state.consecutiveKpFailures || 0) + 1;
+      if (state.consecutiveKpFailures >= 2 && Date.now() >= (state.kpDeadUntil || 0)) {
+        triggerKpSessionDead().catch(() => {});
+      }
+    } else if (isOk) {
+      if (state.consecutiveKpFailures > 0) pushLog(`KP recovered after ${state.consecutiveKpFailures} failure(s) — counter reset.`, 'ok');
+      state.consecutiveKpFailures = 0;
+    }
+  }
   // Also buffer the line for the operations dashboard. Only meaningful
   // when distributed mode is active (state.workerId set) — bufferActivity
   // bails on its own otherwise.
@@ -343,6 +367,47 @@ function emitProgress(payload) {
     enriched.productsDone = state.doneProducts.length;
   }
   broadcast({ action: 'discoveryProgress', payload: enriched });
+}
+
+// KP session-dead handler. Two consecutive per-product KP failures on this
+// worker → we conclude the KP tab / Google Ads session is broken, release
+// the current chunk back to pending so another worker (with a live session)
+// can pick them up, and disarm continuousClaim for a 5-minute cooldown.
+// After cooldown expires, the worker is free to retry (the user may have
+// re-logged into Google Ads in the meantime). Emits a clear activity line
+// AND a persistent notification-style pushLog so the manager surfaces it.
+const KP_SESSION_COOLDOWN_MS = 5 * 60 * 1000;
+async function triggerKpSessionDead() {
+  const cooldownMin = Math.round(KP_SESSION_COOLDOWN_MS / 60000);
+  state.kpDeadUntil = Date.now() + KP_SESSION_COOLDOWN_MS;
+  state.consecutiveKpFailures = 0;  // reset so we don't re-fire mid-cooldown
+  // Disarm continuous-claim so we don't immediately reclaim after release.
+  state.continuousClaim = false;
+  await chrome.storage.local.set({ adbrainContinuousClaim: false }).catch(() => {});
+  // Release remaining claimed jobs back to pending — other workers with a
+  // live KP session can process them without waiting for our cooldown.
+  const heldCount = state.claimedJobs.length;
+  if (state.workerId && heldCount > 0) {
+    try {
+      const r = await releaseByWorker(state.workerId);
+      pushLog(`⛔ KP SESSION DEAD: 2 consecutive KP failures → released ${r.released || heldCount} claimed SKU(s) back to queue. Cooling down ${cooldownMin} min before reclaiming. Fix: re-login to Google Ads in this Chrome profile + verify the KP URL in Settings.`, 'err');
+    } catch (e) {
+      pushLog(`⛔ KP SESSION DEAD: 2 consecutive KP failures. Release attempt failed (${e.message}) — manual release may be needed. Cooling down ${cooldownMin} min before reclaiming.`, 'err');
+    }
+    state.claimedJobs = [];
+    await chrome.storage.local.set({ [STORAGE_KEY_CLAIMED_JOBS]: [] }).catch(() => {});
+  } else {
+    pushLog(`⛔ KP SESSION DEAD: 2 consecutive KP failures. No claimed SKUs to release. Cooling down ${cooldownMin} min before reclaiming.`, 'err');
+  }
+}
+// Cooldown check before any claim attempt. Returns true if we're STILL in
+// the KP-session-dead cooldown window — callers should abort the claim.
+function isKpCooldownActive() {
+  const until = Number(state.kpDeadUntil || 0);
+  if (until <= 0 || Date.now() >= until) return false;
+  const remainMin = Math.ceil((until - Date.now()) / 60000);
+  pushLog(`KP session cooldown active — ${remainMin} min remaining before we retry claiming. (Set by 2 consecutive KP failures.)`, 'warn');
+  return true;
 }
 
 // Strip internal `_*` fields (which may contain Float32Array embeddings used
@@ -580,6 +645,9 @@ async function _doAutoConnectWorker(msg = {}) {
     const effectiveKpUrl = (centralRunOpts.kpUrl || localKpUrl || '').trim();
     if (!effectiveKpUrl || !effectiveKpUrl.includes('ads.google.com')) {
       return { ok: false, error: 'No Keyword Planner URL configured. Set it in the manager Config tab (KP URL) and Save + push to all workers.' };
+    }
+    if (isKpCooldownActive()) {
+      return { ok: false, error: 'KP session cooldown active — refusing to claim more SKUs until cooldown expires. Fix the Google Ads / KP session first, then use Force reconnect.' };
     }
     const jobs = await claimJobs({ workerId, batchId, limit: chunkSize });
     if (jobs.length === 0) {
@@ -1632,6 +1700,10 @@ async function _handleStartInner(msg) {
             nextBatch = await getActiveBatchId();
           }
           if (nextBatch) {
+            if (isKpCooldownActive()) {
+              pushLog('Continuous mode: KP cooldown active — skipping this claim cycle.', 'warn');
+              break;
+            }
             pushLog(`Continuous mode: claiming next chunk from batch ${nextBatch}…`, 'ok');
             // Small cooldown so we don't immediately re-fire if the manager
             // is briefly inconsistent.
@@ -1891,6 +1963,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // we pick them up too. Cheap, idempotent, distributed cleanup.
         const r = await releaseStaleJobs(10).catch(() => null);
         if (r && r.released > 0) pushLog(`Released ${r.released} stale claim(s) from offline workers`, 'ok');
+        if (isKpCooldownActive()) {
+          sendResponse({ ok: false, error: 'KP session cooldown active. Fix the Google Ads / KP session first, then use Force reconnect.' });
+          return;
+        }
         const jobs = await claimJobs({ workerId, batchId, limit });
         if (jobs.length === 0) {
           sendResponse({ ok: true, claimed: 0, message: 'no pending jobs in this batch' });
@@ -2123,6 +2199,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         // Claim a chunk and start the engine (re-uses the existing
         // claimAndStart code path).
+        if (isKpCooldownActive()) {
+          sendResponse({ ok: false, error: 'KP session cooldown active. Fix Google Ads / KP session first, then Force reconnect.' });
+          return;
+        }
         const jobs = await claimJobs({ workerId, batchId, limit: chunkSize });
         if (jobs.length === 0) {
           // Nothing to claim right now — clear continuous flag so we
