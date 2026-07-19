@@ -2675,6 +2675,12 @@ function renderActivity(events) {
     el.innerHTML = `<div class="empty">No activity yet.</div>`;
     return;
   }
+  // Auto-follow: if the user is at (or near) the top before we re-render, snap
+  // them back to the top after — so newest events (which land at index 0)
+  // stay visible. If they've scrolled down to read history, we leave them
+  // parked there and don't yank the viewport around. 40px slack absorbs
+  // sub-pixel scroll drift + inertial-scroll overshoot on trackpads.
+  const wasAtTop = el.scrollTop <= 40;
   el.innerHTML = events.map(e => {
     const src = (e.source || 'engine').toLowerCase().slice(0, 8);
     return `
@@ -2685,6 +2691,7 @@ function renderActivity(events) {
       <span class="msg">${esc(e.message || '')}</span>
     </div>`;
   }).join('');
+  if (wasAtTop) el.scrollTop = 0;
 }
 
 function renderOutputStats(stats) {
