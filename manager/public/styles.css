@@ -157,6 +157,22 @@ body { min-height: 100vh; display: flex; flex-direction: column; }
   background: var(--bg-2); border: 1px solid var(--line-2);
   font-size: 11px; font-weight: 600; cursor: pointer;
 }
+/* Manager version pill — quiet gray so the health indicator remains
+   the primary status signal. Amber tint when the working tree is
+   dirty (uncommitted changes). Empty when the endpoint is unavailable. */
+.topbar .version-pill {
+  display: inline-flex; align-items: center;
+  padding: 4px 10px; border-radius: var(--radius-pill);
+  background: var(--bg-2); border: 1px solid var(--line-2);
+  color: var(--text-3);
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  margin-right: 8px;
+  cursor: help;
+}
+.topbar .version-pill:empty { display: none; }
+.topbar .version-pill-dirty {
+  background: var(--warn-soft); color: var(--warn); border-color: var(--warn);
+}
 .topbar .health.ok { background: var(--success-soft); color: var(--success); border-color: var(--success); }
 .topbar .health.warn { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
 .topbar .health.err { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); }

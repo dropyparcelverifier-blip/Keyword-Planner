@@ -47,6 +47,7 @@ async function _fetch(path, { method = 'GET', body } = {}) {
 
 export const api = {
   health:            ()                => _fetch('/api/health'),
+  managerVersion:    ()                => _fetch('/api/manager/version'),
   jobsUpload:        (batchId, products) => _fetch('/api/jobs/upload', { method: 'POST', body: { batchId, products } }),
   jobsSummary:       ()                => _fetch('/api/jobs/summary'),
   batchReadiness:    (batchId, opts = {}) => _fetch(`/api/batches/readiness?batchId=${encodeURIComponent(batchId)}${opts.minRows != null ? `&minRows=${opts.minRows}` : ''}${opts.stuckMinutes != null ? `&stuckMinutes=${opts.stuckMinutes}` : ''}`),
