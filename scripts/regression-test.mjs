@@ -1850,7 +1850,15 @@ async function run() {
   assert(/MAX_KP_SEEDS\s*=\s*5\b/.test(kdSrcCaps),          '20s.11 MAX_KP_SEEDS raised to 5');
   assert(/MAX_R1_KP_SERP_SEEDS\s*=\s*60\b/.test(kdSrcCaps), '20s.12 MAX_R1_KP_SERP_SEEDS raised to 60');
   assert(/R2_KP_CAP_PER_SEED\s*=\s*40\b/.test(kdSrcCaps),   '20s.13 R2_KP_CAP_PER_SEED raised to 40');
-  assert(/maxAmazonKeywords \|\| 50/.test(kdSrcCaps),       '20s.14 maxAmazonKeywords default raised to 50');
+  assert(/maxAmazonKeywords \|\| 80/.test(kdSrcCaps),       '20s.14 maxAmazonKeywords default raised to 80 (compounds with widened R1 filter + modifier expansion)');
+  // Amazon-side modifier synthesis: for the top-3 seeds, generate 4×2=8
+  // buy/best/price/review variants each, boosting Amazon-Round coverage
+  // for niche brands where KP is thin.
+  assert(/AMAZON_MODIFIERS/.test(kdSrcCaps),                 '20s.15 AMAZON_MODIFIERS constant declared');
+  assert(/AMAZON_MOD_TOP/.test(kdSrcCaps),                   '20s.16 AMAZON_MOD_TOP constant declared');
+  assert(/source: 'amazon_mod'/.test(kdSrcCaps),             '20s.17 Amazon-modifier variants tagged with amazon_mod source');
+  // Commercial-modifier rows from R1 also enter Amazon Round.
+  assert(/r\.source === 'commercial_modifier'/.test(kdSrcCaps), '20s.18 R1 commercial_modifier rows also enter Amazon Round');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.

@@ -2413,9 +2413,11 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
   //   product to fill kp_* columns on non-KP rows (autosuggest/PAA/related/amazon).
   const backfillKpMetrics = opts.backfillKpMetrics !== false;
   // maxAmazonKeywords: cap on keywords per product entering the Amazon Round.
-  // Raised default 30→50 to keep pace with the wider R1/R2 KP net so total
-  // per-SKU output reliably lands in the 100-300 target range.
-  const maxAmazonKeywords = Math.max(1, opts.maxAmazonKeywords || 50);
+  // Raised default 30→50→80 to keep pace with the wider R1/R2 KP net + the
+  // R1 commercial-modifier expansion + the widened filter (anchor_commercial
+  // now accepted). Amazon Round rate is ~3s per seed → 80 seeds ≈ 4 min per
+  // product, still bounded. Total per-SKU output target: 100-300 rows.
+  const maxAmazonKeywords = Math.max(1, opts.maxAmazonKeywords || 80);
   // verifyMatchedLinks: open each matched result's destination page and re-check
   //   it carries our product image (bounded to matched links only).
   const verifyMatchedLinks = opts.verifyMatchedLinks !== false;
@@ -4714,17 +4716,49 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           pushParent(pnRow);
         }
 
-        // 2) All KP rows that survived the relevance filter.
+        // 2) All KP rows that survived the relevance filter (both KP1 and KP2).
         for (const r of productRows) {
           if (r.source === 'kp_idea' || r.source === 'kp_reexpand') pushParent(r);
         }
-        // Autosuggest rows also enter the Amazon Round (after KP ideas, which
-        // keep priority within the cap) so long-tail queries get Amazon data.
+        // 3) Commercial-modifier seeds — the R1 modifier expansion synthesised
+        // 'buy X / X price / best X / X review' variants that are HIGH commercial
+        // intent by construction. Amazon Round is the perfect place for them:
+        // marketplace queries about buying intent are exactly what these express.
+        // Ranked ahead of autosuggest because intent is more explicit.
+        for (const r of productRows) {
+          if (r.source === 'commercial_modifier') pushParent(r);
+        }
+        // 4) Autosuggest rows — long-tail queries that got past the relevance
+        // filter. Keep them for coverage, but they're the last to enter the cap.
         for (const r of productRows) {
           if (r.source === 'autosuggest') pushParent(r);
         }
-        // Cap: KP-driven runs return ~20-30 ideas; limit to keep Amazon Round
-        // bounded to a few minutes.
+        // 5) Amazon-side modifier synthesis — for the top-3 seeds we've picked
+        // so far, synthesise 4 commercial variants each (12 ephemeral queries).
+        // These NEVER become rows (Amazon-only search, then discarded); the
+        // result rows carry the parent seed as source. Cheap way to squeeze
+        // marketplace-specific queries out of a niche brand where KP was sparse.
+        const AMAZON_MODIFIERS = ['buy', 'best', 'price', 'review'];
+        const AMAZON_MOD_TOP = 3;
+        const topSoFar = topForAmazon.slice(0, AMAZON_MOD_TOP);
+        for (const base of topSoFar) {
+          for (const mod of AMAZON_MODIFIERS) {
+            for (const variant of [`${mod} ${base.keyword}`, `${base.keyword} ${mod}`]) {
+              // Reuse pushParent's dedupe/tier guards. Synthesised rows are
+              // transient (never persist) and carry the parent's tier.
+              pushParent({
+                keyword: variant,
+                source: 'amazon_mod',
+                tier: base.tier,
+                _transient: true,
+                _amazonModifier: mod,
+                _amazonModifierParent: base.keyword,
+              });
+            }
+          }
+        }
+        // Cap: bounded so Amazon Round doesn't take 10+ minutes per product.
+        // Default 80 = ~4min at 3s/seed.
         if (topForAmazon.length > MAX_AMAZON_TOP_KEYWORDS) {
           topForAmazon.length = MAX_AMAZON_TOP_KEYWORDS;
         }
