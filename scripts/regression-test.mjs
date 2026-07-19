@@ -1355,6 +1355,11 @@ async function run() {
   assert(apiJsSrc.body.includes('batchEta'),                    'ETA.13 client wrapper api.batchEta');
   assert(appJs.body.includes('renderEtaPill'),                  'ETA.14 renderEtaPill helper present');
   assert(appJs.body.includes('data-eta-pill'),                  'ETA.15 ETA pill rendered in Batches row');
+  // Live toast notifications on SKU completion / failure.
+  assert(appJs.body.includes('notifyOnSkuComplete'),            'TOAST.1 notifyOnSkuComplete helper present');
+  assert(appJs.body.includes('notifyOnSkuFailed'),              'TOAST.2 notifyOnSkuFailed helper present');
+  assert(appJs.body.includes('seenDoneSkuIds'),                 'TOAST.3 seenDoneSkuIds tracker declared');
+  assert(appJs.body.includes('toastSuppressUntilTick'),         'TOAST.4 first-tick suppression prevents cold-start toast flood');
 
   // ===== 20o. BACKUPS + QUIESCE =====
   // Backup endpoints
