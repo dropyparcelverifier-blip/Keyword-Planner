@@ -1360,6 +1360,20 @@ async function run() {
   assert(appJs.body.includes('notifyOnSkuFailed'),              'TOAST.2 notifyOnSkuFailed helper present');
   assert(appJs.body.includes('seenDoneSkuIds'),                 'TOAST.3 seenDoneSkuIds tracker declared');
   assert(appJs.body.includes('toastSuppressUntilTick'),         'TOAST.4 first-tick suppression prevents cold-start toast flood');
+  // Thin-yield fallback stage — catches products with no Indian brand
+  // presence (La Roche-Posay, Ancient Greek Face Oil, etc) by synthesizing
+  // universal / international / availability / category-commercial seeds
+  // when the pipeline came back under MIN_HEALTHY_YIELD.
+  const kdFull = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+  assert(kdFull.includes('MIN_HEALTHY_YIELD'),                   'FALLBACK.1 MIN_HEALTHY_YIELD threshold declared');
+  assert(kdFull.includes('THIN-YIELD FALLBACK'),                 'FALLBACK.2 thin-yield fallback log line present');
+  assert(kdFull.includes("'universal_commercial'"),              'FALLBACK.3 universal_commercial source tag');
+  assert(kdFull.includes("'international_market'"),              'FALLBACK.4 international_market source tag');
+  assert(kdFull.includes("'availability_query'"),                'FALLBACK.5 availability_query source tag');
+  assert(kdFull.includes("'category_commercial'"),               'FALLBACK.6 category_commercial source tag');
+  assert(kdFull.includes('INTL_MARKETS'),                        'FALLBACK.7 international-market variants declared');
+  assert(kdFull.includes('AVAIL_QUERIES'),                       'FALLBACK.8 availability queries declared');
+  assert(kdFull.includes('universal_commercial:'),               'FALLBACK.9 post-mortem source label univcom present');
 
   // ===== 20o. BACKUPS + QUIESCE =====
   // Backup endpoints
