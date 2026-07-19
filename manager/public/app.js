@@ -6452,6 +6452,15 @@ wireFleetDelegation(null);
 // the fleet row can always dispatch, even if the delegation somehow
 // failed to attach.
 window.openWorkerMonitor = openWorkerMonitor;
+// One-click 'copy install command' on the Fleet card header. Complements
+// the per-worker ⟳ update badge for the common 'need to update all my
+// PCs' case where you don't want to hunt through the fleet grid.
+document.getElementById('copyInstallCmdBtn')?.addEventListener('click', () => {
+  const cmd = `irm ${location.origin}/install-worker.ps1 | iex`;
+  copyToClipboard(cmd).then(ok => {
+    toast(ok ? `Copied: ${cmd}` : 'Copy failed — command visible in the button title', ok ? 'ok' : 'warn', { title: '📋 Install command copied' });
+  });
+});
 // Reparent every .modal-root to <body>. All 6 modals are currently
 // declared inside <section id="panel-analytics"> in index.html, which
 // means when the Dashboard (or any other) tab is active, that section
