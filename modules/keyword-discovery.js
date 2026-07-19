@@ -5149,6 +5149,81 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         }
       }
 
+      // ----- R3.5: CATEGORY / INTERNATIONAL FALLBACK -----
+      // Kicks in when the pipeline came back thin — typical for products
+      // that are new (no search history), imports (not in India),
+      // .com-only (US/UK market), or niche brands with no local SEO
+      // presence. Synthesises a floor of keywords using:
+      //   1. Universal commercial modifiers (buy / best / price / review)
+      //   2. International market modifiers (usa / uk / europe / .com /
+      //      "amazon.com") — for products popular in other markets
+      //   3. Availability queries ("alternative india", "dupe",
+      //      "where to buy in india") — captures users searching for
+      //      substitutes / import routes
+      //   4. Category-only autosuggest expansion — the broadest safety net
+      // Every seed is tagged with a dedicated source so the post-mortem
+      // line + CSV can show WHERE the recovery came from. No SERP loads
+      // (autosuggest only, free); minimum extra runtime.
+      const MIN_HEALTHY_YIELD = 50;
+      if (productRows.length < MIN_HEALTHY_YIELD && !shouldStop()) {
+        const catTerms = (productContext?.categoryTerms || []).slice(0, 5);
+        const pnQuery = String(productContext?.fullProductName || productName || '').trim();
+        const shortfall = MIN_HEALTHY_YIELD - productRows.length;
+        if (pnQuery || catTerms.length > 0) {
+          onProgress?.({
+            currentProduct: productName,
+            currentSource: 'fallback',
+            currentAction: `⚠ THIN-YIELD FALLBACK: only ${productRows.length} rows so far (target ${MIN_HEALTHY_YIELD}). Adding universal + international-market seeds so unavailable-in-India / new / niche products still get keyword coverage.`,
+            logKind: 'warn',
+          });
+          const INTL_MARKETS = ['amazon com', 'usa', 'uk', 'europe', 'canada', 'imported'];
+          const UNIVERSAL_MODS = ['buy', 'best', 'price', 'review', 'online', 'where to buy'];
+          const AVAIL_QUERIES  = ['alternative in india', 'similar to', 'dupe of', 'available in india', 'is it available in india'];
+          let addedTotal = 0;
+          const addFallback = (kw, src) => {
+            if (!kw || String(kw).trim().split(/\s+/).length < 2) return;
+            const row = addRow(String(kw).toLowerCase().trim(), src, pnQuery);
+            if (row) addedTotal++;
+          };
+          // Product-name seeds — most likely to find the actual product
+          // in international markets. Capped at shortfall * 2 to avoid
+          // over-inflating on very-thin runs.
+          if (pnQuery) {
+            for (const mod of UNIVERSAL_MODS) {
+              addFallback(`${mod} ${pnQuery}`,  'universal_commercial');
+              addFallback(`${pnQuery} ${mod}`,  'universal_commercial');
+            }
+            for (const market of INTL_MARKETS) {
+              addFallback(`${pnQuery} ${market}`, 'international_market');
+              addFallback(`buy ${pnQuery} in ${market}`, 'international_market');
+            }
+            for (const q of AVAIL_QUERIES) {
+              addFallback(`${pnQuery} ${q}`, 'availability_query');
+            }
+          }
+          // Category-only variants — broadest net, guarantees some
+          // relevance floor even for products with almost no brand mass.
+          for (const cat of catTerms) {
+            for (const mod of UNIVERSAL_MODS.slice(0, 4)) {
+              addFallback(`${mod} ${cat}`, 'category_commercial');
+              addFallback(`${cat} india`, 'category_commercial');
+            }
+            addFallback(`best ${cat} india`,        'category_commercial');
+            addFallback(`${cat} for indian skin`,   'category_commercial');
+            addFallback(`${cat} online india`,      'category_commercial');
+            addFallback(`${cat} amazon`,            'international_market');
+            addFallback(`${cat} usa`,               'international_market');
+            addFallback(`${cat} uk`,                'international_market');
+          }
+          onProgress?.({
+            currentProduct: productName,
+            currentSource: 'fallback',
+            currentAction: `THIN-YIELD FALLBACK added ${addedTotal} synthesized seed(s) (universal/international/availability/category). New row total: ${productRows.length}.`,
+            logKind: addedTotal > 0 ? 'ok' : 'warn',
+          });
+        }
+      }
+
       // ----- KP metrics backfill (R4) -----
       // Autosuggest / PAA / related-search / amazon rows never went through KP,
       // so their kp_* columns are empty. Collect every metric-less row and run
@@ -5307,6 +5382,11 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         related_search: 'relsrch', paa: 'PAA', product_name: 'name',
         amazon_suggest: 'amzn', commercial_modifier: 'commod',
         image_match: 'imgm',
+        // Thin-yield fallback sources (added when productRows.length < 50)
+        universal_commercial:   'univcom',
+        international_market:   'intlmkt',
+        availability_query:     'avail',
+        category_commercial:    'catcom',
       };
       const breakdown = [...sourceCounts.entries()]
         .sort((a, b) => b[1] - a[1])
