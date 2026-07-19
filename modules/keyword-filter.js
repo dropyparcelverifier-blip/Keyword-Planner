@@ -4,6 +4,12 @@
 // Pure functions — no chrome.* APIs. Imported by background.js and passed
 // to the discovery engine via opts.
 
+// Top-of-file import — MV3 SW parsers reject mid-file `import` statements
+// even though the ES spec permits them (hoisting). Was buried at ~L1984
+// next to the attribute-family resolver; moved here so Chrome loads the
+// module without failing SW registration with 'Status code: 15'.
+import { ATTRIBUTE_FAMILIES, BRAND_FAMILY_OVERRIDES } from './attribute-families.js';
+
 // ============ 1A. shouldKeepKeyword ============
 
 // Non-India location tokens — drop these. Word-boundary matching only so
@@ -1981,7 +1987,8 @@ export function checkSiblingAmbiguity(text, productContext) {
 // product → no veto on that axis; generic informational keywords pass
 // freely. Families are resolved once per product (cached on productContext)
 // so per-thumbnail checks are just string-set lookups.
-import { ATTRIBUTE_FAMILIES, BRAND_FAMILY_OVERRIDES } from './attribute-families.js';
+// (Imports for ATTRIBUTE_FAMILIES + BRAND_FAMILY_OVERRIDES moved to the
+// top of the file — Chrome MV3 SW parser needs top-level imports.)
 
 // Resolve the effective attribute-family map for a product:
 //   _global  ←  ATTRIBUTE_FAMILIES[category]  ←  BRAND_FAMILY_OVERRIDES[brand]
