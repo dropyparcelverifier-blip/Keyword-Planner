@@ -2183,15 +2183,20 @@ function renderWorkerFleet() {
         <td class="num" style="color:${(w.failed||0) > 0 ? 'var(--danger)' : 'var(--text-3)'};">${w.failed || 0}</td>
         <td>
           <div class="worker-actions">
-            <button data-worker="${esc(w.worker_id)}" data-monitor="1" title="Open this worker's monitor — full status, all controls, filtered activity log." style="color: var(--info); border-color: var(--info);">🖥</button>
-            <button data-worker="${esc(w.worker_id)}" data-cmd="wake"   title="Wake — start claiming (respects manual Stop on the worker PC). If the worker was stopped by the user, use ⟳ Force reconnect instead.">▶</button>
-            <button data-worker="${esc(w.worker_id)}" data-cmd="reconnect" title="Force reconnect — overrides Stop. Use this when Wake gets 'ignored' because the worker was manually stopped." style="color: var(--warn); border-color: var(--warn);">⟳</button>
-            <button data-worker="${esc(w.worker_id)}" data-cmd="pause"  title="Pause after current SKU">⏸</button>
-            <button data-worker="${esc(w.worker_id)}" data-release-worker="${esc(w.worker_id)}" class="danger-btn" title="Release this worker's claims back to queue (manager-side — works even if worker is offline).">↻</button>
-            <button data-worker="${esc(w.worker_id)}" data-cmd="stop"   class="danger-btn" title="Stop and disarm">■</button>
-            <button data-worker="${esc(w.worker_id)}" data-wol="1" title="Wake-on-LAN — send magic packet to this PC's NIC (only works if this manager PC is on the same physical LAN as the target)" style="color: var(--info); border-color: var(--info);">🔌</button>
-            <button data-worker="${esc(w.worker_id)}" data-recover="1" title="Recovery guide — step-by-step for bringing an OFFLINE worker back under manager control." style="color: var(--text-2);">?</button>
-            <button data-worker="${esc(w.worker_id)}" data-remove-worker="1" title="Remove this worker from the fleet roster (ghost — Chrome regenerated the ID, or this PC is decommissioned). Doesn't touch its claims — use ↻ Release claims first if it's holding jobs." style="color: var(--text-3);">🗑</button>
+            <!-- Group 1: primary control -->
+            <button data-worker="${esc(w.worker_id)}" data-monitor="1" class="wa wa-primary" title="Open worker monitor — full status, all controls, filtered activity log.">🖥 Monitor</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="wake"   class="wa wa-ok"      title="Wake — start claiming (respects manual Stop). Use Force reconnect if Wake gets 'ignored'.">▶ Wake</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="reconnect" class="wa wa-warn"  title="Force reconnect — overrides Stop. Use when Wake was ignored.">⟳ Force</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="pause"  class="wa"            title="Pause after current SKU">⏸ Pause</button>
+            <span class="wa-sep"></span>
+            <!-- Group 2: destructive -->
+            <button data-worker="${esc(w.worker_id)}" data-release-worker="${esc(w.worker_id)}" class="wa wa-danger" title="Release this worker's claims back to queue (manager-side — works even if worker is offline).">↻ Release</button>
+            <button data-worker="${esc(w.worker_id)}" data-cmd="stop"   class="wa wa-danger" title="Stop and disarm — worker requires an explicit Connect to resume.">■ Stop</button>
+            <span class="wa-sep"></span>
+            <!-- Group 3: recovery / admin -->
+            <button data-worker="${esc(w.worker_id)}" data-wol="1"       class="wa wa-primary" title="Wake-on-LAN — send magic packet (works only on same LAN as target).">🔌 WoL</button>
+            <button data-worker="${esc(w.worker_id)}" data-recover="1"   class="wa wa-mute"    title="Recovery guide — step-by-step for offline workers.">? Guide</button>
+            <button data-worker="${esc(w.worker_id)}" data-remove-worker="1" class="wa wa-mute" title="Remove from roster (ghost / decommissioned). Doesn't touch claims — use ↻ Release first.">🗑 Remove</button>
           </div>
         </td>
       </tr>`;
@@ -2234,17 +2239,19 @@ function renderWorkerFleet() {
   });
 }
 
-// Fleet-grid click delegation — attached ONCE on first render, survives
-// every subsequent re-render. Each of the 8+ per-worker buttons is
-// dispatched by inspecting the closest button and its data-* attrs.
-// Fixes the intermittent "buttons do nothing" that happened when a click
-// landed in the ~50-200ms gap between innerHTML replace and per-button
-// wire-up. Also cheaper (one listener vs N per re-render).
+// Fleet delegation — attached to DOCUMENT, not #workerGrid. Absolutely
+// bulletproof: even if a parent card gets recreated, or #workerGrid is
+// re-rendered from scratch by some other code path, the listener still
+// catches the click. Scoped to elements inside .worker-actions or the
+// worker-id filter anchor so it doesn't intercept unrelated clicks.
 let _fleetDelegationWired = false;
-function wireFleetDelegation(root) {
+function wireFleetDelegation(_ignoredRoot) {
   if (_fleetDelegationWired) return;
   _fleetDelegationWired = true;
-  root.addEventListener('click', async (e) => {
+  document.addEventListener('click', async (e) => {
+    // Only handle clicks INSIDE the fleet card. Cheap guard prevents any
+    // interference with the rest of the page.
+    if (!e.target.closest?.('#workerGrid')) return;
     // Worker-id filter link (clicking the worker id under the fleet).
     const filterA = e.target.closest?.('a[data-filter-worker]');
     if (filterA) {
