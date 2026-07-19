@@ -3244,6 +3244,16 @@ const analytics = {
   // rows. Slashes bandwidth 20-100x on batches that have grown past a
   // few hundred rows. Reset to 0 on batch switch.
   lastMaxId: 0,
+  // Same idea for the jobs-per-product tree — track the highest changed_at
+  // timestamp seen so we can ask the server for only rows that have moved
+  // since. Server-side query filters by MAX(done_at, heartbeat_at, claimed_at)
+  // so this catches new claims / new dones / new heartbeats (which mark
+  // active work) without re-sending the whole 5000-row tree every tick.
+  lastPerProductChangedAt: 0,
+  // Client-side cache of the full jobs list keyed by job id. Populated by
+  // a full refresh at boot/batch-switch/every-5th-tick and updated in place
+  // by incremental deltas.
+  perProductById: new Map(),
   // Tick counter for the periodic full-refresh safety net. Every N ticks
   // we do a from-scratch fetch instead of incremental, so rare edits /
   // deletes / server-side dedupe merges eventually reconcile client-side.
@@ -4603,10 +4613,24 @@ async function tickAnalyticsLive() {
                           || analytics.allRows.length === 0
                           || analytics.lastMaxId === 0;
     const sinceId = doFullRefresh ? null : analytics.lastMaxId;
+    const sinceChangedAt = doFullRefresh ? null : analytics.lastPerProductChangedAt;
     const [r, jr] = await Promise.all([
       api.keywordsGet(analytics.batchId, sinceId),
-      api.jobsPerProduct(analytics.batchId).catch(() => ({ rows: [] })),
+      api.jobsPerProduct(analytics.batchId, sinceChangedAt).catch(() => ({ rows: [], incremental: false, maxChangedAt: 0 })),
     ]);
+    // Merge jobs into the client-side by-id cache. Full refresh → replace
+    // entire map; incremental → upsert changed rows in place. Then read
+    // back a stable ordered array for the tree.
+    if (!jr.incremental) {
+      analytics.perProductById.clear();
+      for (const row of (jr.rows || [])) analytics.perProductById.set(row.id, row);
+    } else {
+      for (const row of (jr.rows || [])) analytics.perProductById.set(row.id, row);
+    }
+    analytics.lastPerProductChangedAt = Number.isFinite(jr.maxChangedAt) ? jr.maxChangedAt : analytics.lastPerProductChangedAt;
+    // Rebuild jr.rows from the cache so downstream code (tree render,
+    // stats) sees the FULL merged list, not just the delta.
+    jr.rows = Array.from(analytics.perProductById.values());
     const newRows = r.rows || [];
     // Server always returns maxId; use it as our next cursor. Falling back
     // to computing from returned rows lets us handle old-server responses.
@@ -4760,6 +4784,8 @@ async function loadAnalyticsBatch(batchId) {
   analytics.lastFingerprint = '';
   analytics.lastMaxId = 0;
   analytics.tickCount = 0;
+  analytics.lastPerProductChangedAt = 0;
+  analytics.perProductById.clear();
   startAnalyticsPolling();
 }
 

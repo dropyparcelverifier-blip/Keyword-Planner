@@ -49,7 +49,7 @@ export const api = {
   health:            ()                => _fetch('/api/health'),
   jobsUpload:        (batchId, products) => _fetch('/api/jobs/upload', { method: 'POST', body: { batchId, products } }),
   jobsSummary:       ()                => _fetch('/api/jobs/summary'),
-  jobsPerProduct:    (batchId)         => _fetch(`/api/jobs/per-product?batchId=${encodeURIComponent(batchId)}`),
+  jobsPerProduct:    (batchId, sinceChangedAt) => _fetch(`/api/jobs/per-product?batchId=${encodeURIComponent(batchId)}${sinceChangedAt != null ? `&sinceChangedAt=${encodeURIComponent(sinceChangedAt)}` : ''}`),
   jobsWorkerStats:   ()                => _fetch('/api/jobs/worker-stats'),
   workersList:       ()                => _fetch('/api/workers/list'),
   jobsActiveWorkers: (batchId)         => _fetch(`/api/jobs/active-workers?batchId=${encodeURIComponent(batchId)}`),
