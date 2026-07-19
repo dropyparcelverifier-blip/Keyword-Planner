@@ -3482,6 +3482,16 @@ try {
   const saved = JSON.parse(localStorage.getItem('adbrainAnGroups') || 'null');
   if (Array.isArray(saved)) analytics.visibleGroups = new Set(saved);
 } catch {}
+// Restore sort column + direction — clicking any column header persists
+// them; boot pulls the last choice back so the table renders the way
+// you left it.
+try {
+  const savedSort = JSON.parse(localStorage.getItem('adbrainAnalyticsSort') || 'null');
+  if (savedSort && typeof savedSort.key === 'string' && (savedSort.dir === 'asc' || savedSort.dir === 'desc')) {
+    analytics.sortKey = savedSort.key;
+    analytics.sortDir = savedSort.dir;
+  }
+} catch {}
 
 // Full analytics-table column set — mirrors the CSV/XLSX export field list.
 // Each entry lives in exactly one group; 'core' is always visible.
@@ -6311,6 +6321,14 @@ function renderAnalyticsTable(rows) {
       const k = th.dataset.sortKey;
       if (analytics.sortKey === k) analytics.sortDir = analytics.sortDir === 'desc' ? 'asc' : 'desc';
       else { analytics.sortKey = k; analytics.sortDir = 'desc'; }
+      // Persist so refresh + revisit-later preserves your column-sort choice.
+      // Extends the filter + SKU persistence pattern (0e272e8, 193b579) so
+      // every tunable in the Analytics view survives page reloads.
+      try {
+        localStorage.setItem('adbrainAnalyticsSort', JSON.stringify({
+          key: analytics.sortKey, dir: analytics.sortDir,
+        }));
+      } catch {}
       filterAndRenderAnalytics();
     });
   });
