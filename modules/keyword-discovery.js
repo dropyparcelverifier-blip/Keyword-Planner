@@ -2244,6 +2244,32 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
     matchedLinks,
     matchedPrices,
     matchedQualities,
+    // All destination links seen on this SERP (matched thumbnails + unmatched),
+    // deduped and ranked by descending CLIP score of the associated thumbnail.
+    // Used by the unmatched-link fallback verifier: when 0 thumbnails match,
+    // the engine opens the top N destinations and re-runs CLIP against the
+    // page's own product image. Rescues cases where the SERP thumbnail is a
+    // poor angle / low-res version of our product.
+    allResultLinks: (() => {
+      const links = [];
+      const seenLinks = new Set();
+      // Rank by thumb CLIP score if we have one, otherwise by URL order.
+      const orderedUrls = allScores.length > 0
+        ? [...urls].sort((a, b) => {
+            const ai = urls.indexOf(a), bi = urls.indexOf(b);
+            return (allScores[bi] || 0) - (allScores[ai] || 0);
+          })
+        : urls;
+      for (const u of orderedUrls) {
+        const ctx = ctxByUrl.get(u);
+        const link = ctx?.link;
+        if (!link || typeof link !== 'string' || !/^https?:\/\//i.test(link)) continue;
+        if (seenLinks.has(link)) continue;
+        seenLinks.add(link);
+        links.push(link);
+      }
+      return links;
+    })(),
     urlMatchCount,
     paa,
     // Rich SERP context — every keyword carries its own seller landscape +
@@ -3931,6 +3957,69 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                   currentProduct: productName,
                   currentSource: 'verify',
                   currentAction: `${label} "${row.keyword}" — link verify: ${verified}/${checked} destination page(s) confirmed carry our product`,
+                  logKind: verified > 0 ? 'ok' : undefined,
+                });
+              }
+            }
+            // ----- Unmatched-link FALLBACK verification -----
+            // When 0 SERP thumbnails matched our product but the SERP DID
+            // return results, open the top N destinations and re-check via
+            // the same getProductImages + CLIP pipeline. Rescues:
+            //   · thumbnail is a poor angle / different pack size
+            //   · thumbnail is Google's cropped/compressed version below CLIP
+            //     threshold, but the destination page's hero image matches
+            //   · Amazon variant-carousel where the SERP thumb was a
+            //     collage of multiple variants and CLIP misfired
+            // Bounded to UNMATCHED_LINK_CAP (default 5) to keep runtime
+            // sane — the average unmatched keyword costs 5 × getProductImages
+            // (~1-2s each) = ~10s added per 0-match SERP with results.
+            // Only runs when SERP thumbs failed (>= 1 match already had
+            // its own verify above). If ANY destination page carries our
+            // product, we treat it as a match and lift the row's
+            // linkVerified/linkVerifiedCount so downstream scoring picks
+            // it up (R2 gate composite; opportunity score).
+            const UNMATCHED_LINK_CAP = 5;
+            const alreadyVerifiedThumbs = (row.imageCount || 0) > 0;
+            if (verifyMatchedLinks && !alreadyVerifiedThumbs &&
+                productFps && productFps.length > 0) {
+              const fallbackLinks = Array.from(new Set(
+                (serpData.allResultLinks || [])
+                  .filter(u => typeof u === 'string' && /^https?:\/\//i.test(u))
+              )).slice(0, UNMATCHED_LINK_CAP);
+              if (fallbackLinks.length > 0) {
+                onProgress?.({
+                  currentProduct: productName,
+                  currentSource: 'verify',
+                  currentAction: `${label} "${row.keyword}" — 0 SERP-thumb matches; falling back to check top ${fallbackLinks.length} destination page(s) for our product`,
+                });
+                let checked = 0, verified = 0;
+                const verifiedLinks = [];
+                for (const link of fallbackLinks) {
+                  if (shouldStop()) break;
+                  try {
+                    const destImages = await getProductImages(link, () => {});
+                    if (!destImages || destImages.length === 0) { checked++; continue; }
+                    const results = await matchImages(productFps, destImages, clipThreshold);
+                    const isMatch = Array.isArray(results) && results.some(r => r && r.isMatch);
+                    checked++;
+                    if (isMatch) { verified++; verifiedLinks.push(link); }
+                  } catch { checked++; }
+                  await sleep(randInt(600, 1500));
+                }
+                row.linkCheckedCount  = (row.linkCheckedCount  || 0) + checked;
+                row.linkVerifiedCount = (row.linkVerifiedCount || 0) + verified;
+                row.linkVerified      = row.linkVerified || (verified > 0);
+                row.verifiedLinks     = [...(row.verifiedLinks || []), ...verifiedLinks];
+                // Tag as recovered so downstream analytics can distinguish
+                // "SERP thumb matched" from "SERP missed but destination
+                // page carried our product" for QA purposes.
+                if (verified > 0) row.fallbackLinkVerified = true;
+                onProgress?.({
+                  currentProduct: productName,
+                  currentSource: 'verify',
+                  currentAction: verified > 0
+                    ? `${label} "${row.keyword}" — FALLBACK RESCUED ${verified}/${checked} destination page(s) confirm our product (SERP thumbs missed but landing pages match)`
+                    : `${label} "${row.keyword}" — fallback: ${checked} destination page(s) checked, none carried our product`,
                   logKind: verified > 0 ? 'ok' : undefined,
                 });
               }
