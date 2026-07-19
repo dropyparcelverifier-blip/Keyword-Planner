@@ -1258,6 +1258,37 @@ async function run() {
   assert(appJs.body.includes('ship-badge'),                     'SHIP.15 ship-badge rendered in Batches table');
   assert(appJs.body.includes('renderShipBadge'),                'SHIP.16 renderShipBadge helper present');
 
+  // 1-click Requeue-low-yield — resets done SKUs whose row count fell
+  // below minRows back to pending so workers reprocess them. Backs the
+  // ↺ N button that renders next to a REVIEW badge.
+  const lyBatch = 'low-yield-requeue-test';
+  await req('POST', '/api/jobs/upload', { batchId: lyBatch, products: [
+    { product_url: 'https://ly.example/1', product_name: 'LY1', sku: 'LY1' },
+    { product_url: 'https://ly.example/2', product_name: 'LY2', sku: 'LY2' },
+  ] });
+  // Push 50 keywords for LY1 (healthy), 5 for LY2 (low yield).
+  const kwLy1 = []; for (let i = 0; i < 50; i++) kwLy1.push({ batch_id: lyBatch, keyword: `ly1-${i}`, product_url: 'https://ly.example/1' });
+  const kwLy2 = []; for (let i = 0; i < 5; i++)  kwLy2.push({ batch_id: lyBatch, keyword: `ly2-${i}`, product_url: 'https://ly.example/2' });
+  await req('POST', '/api/keywords', { rows: [...kwLy1, ...kwLy2] });
+  await req('POST', '/api/jobs/done', { batchId: lyBatch, productUrl: 'https://ly.example/1' });
+  await req('POST', '/api/jobs/done', { batchId: lyBatch, productUrl: 'https://ly.example/2' });
+  // Requeue with default minRows (30) should catch LY2 only.
+  const lyReq = await req('POST', '/api/jobs/requeue-low-yield', { batchId: lyBatch });
+  assertEq(lyReq.status, 200,                                   'REQUE.1 requeue-low-yield = 200');
+  assertEq(lyReq.data.updated, 1,                               'REQUE.2 only 1 job requeued (LY2)');
+  assert(lyReq.data.cleared_keyword_rows >= 5,                  'REQUE.3 LY2 5 old keyword rows cleared');
+  assert(Array.isArray(lyReq.data.skus) && lyReq.data.skus[0].sku === 'LY2', 'REQUE.4 response lists the affected SKU');
+  // LY1's rows should be untouched.
+  const kwAfterLy = await req('GET', `/api/keywords?batchId=${encodeURIComponent(lyBatch)}`);
+  assert(kwAfterLy.data.rows.filter(r => r.product_url === 'https://ly.example/1').length === 50, 'REQUE.5 healthy SKU rows preserved');
+  assert(kwAfterLy.data.rows.filter(r => r.product_url === 'https://ly.example/2').length === 0,  'REQUE.6 low-yield SKU rows cleared');
+  // Missing batchId → 400.
+  const lyNoB = await req('POST', '/api/jobs/requeue-low-yield', {});
+  assertEq(lyNoB.status, 400,                                   'REQUE.7 requeue-low-yield without batchId = 400');
+  // Client wrapper + UI wiring.
+  assert(apiJsSrc.body.includes('jobsRequeueLowYield'),         'REQUE.8 client wrapper for requeue-low-yield');
+  assert(appJs.body.includes('data-requeue-low-yield'),         'REQUE.9 UI button renders inline with REVIEW badge');
+
   // ===== 20o. BACKUPS + QUIESCE =====
   // Backup endpoints
   const bList = await req('GET', '/api/backups/list');
