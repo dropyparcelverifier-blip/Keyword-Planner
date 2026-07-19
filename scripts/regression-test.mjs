@@ -2262,6 +2262,18 @@ async function run() {
   const verList2 = await req('GET', '/api/workers/list');
   const verW2 = (verList2.data.workers || []).find(w => w.worker_id === 'ver-test-worker');
   assertEq(verW2.outdated, false,                              'VER.10 matching hash → not outdated');
+
+  // Historical-metrics tab detection — 3s poll + 3 fallback selector paths
+  // + diagnostic dump on failure. Guards against Google's periodic KP UI
+  // refreshes moving the tab (late-2024 was the last one that broke us).
+  const kpSrc = readFileSync(resolve(REPO, 'kp.js'), 'utf-8');
+  assert(kpSrc.includes("'Historical'"),                       'KPT.1 short-label variant covered');
+  assert(kpSrc.includes("'Past 12 months'"),                   'KPT.2 time-window variant covered');
+  assert(kpSrc.includes("'Search volume history'"),            'KPT.3 semantic variant covered');
+  assert(kpSrc.includes("via 'aria-label'") || kpSrc.includes('aria-label*='), 'KPT.4 aria-label fallback selector present');
+  assert(kpSrc.includes("view-dropdown"),                      'KPT.5 View/Show dropdown fallback path present');
+  assert(kpSrc.includes('3s poll') || kpSrc.includes('3000'),  'KPT.6 poll window declared');
+  assert(kpSrc.includes('Visible tab-like elements'),          'KPT.7 diagnostic dump on failure');
   // Client wrapper + UI wiring.
   assert(apiJsSrc.body.includes('fetchWorkerBundleHash') === false, 'VER.11 client wrapper is in modules/discovery-jobs.js not api.js (worker-side)');
   assert(appJs.body.includes('data-copy-install-cmd'),         'VER.12 UI renders copy-install-cmd button on outdated rows');
