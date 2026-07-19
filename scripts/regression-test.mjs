@@ -920,6 +920,30 @@ async function run() {
   assert(!impact.data.allowlist.includes('price'),    '20s.9 allowlist excludes price');
   assert(!impact.data.allowlist.includes('weight'),   '20s.10 allowlist excludes weight');
   assert(!impact.data.allowlist.includes('variants'), '20s.11 allowlist excludes variants');
+  // Modern SEO + Product Taxonomy expansion — the 4 new fields added in the
+  // Shopify improvements pass. They land via GraphQL productUpdate; REST-
+  // only fields land via products.json PUT. Both paths run together.
+  assert(impact.data.allowlist.includes('seo_title'),           '20s.12 allowlist includes modern seo_title');
+  assert(impact.data.allowlist.includes('seo_description'),     '20s.13 allowlist includes modern seo_description');
+  assert(impact.data.allowlist.includes('product_category'),    '20s.14 allowlist includes product_category (Standard Taxonomy)');
+  // Legacy metafields kept for backwards compat + belt-and-braces.
+  assert(impact.data.allowlist.includes('metafields_global_title_tag'),       '20s.15 legacy metafields_global_title_tag still allowed');
+  assert(impact.data.allowlist.includes('metafields_global_description_tag'), '20s.16 legacy metafields_global_description_tag still allowed');
+  // Field-impact hierarchy: product_category flagged as "high" so the UI
+  // + prompt surface it prominently. seo_title flagged critical (modern
+  // path is preferred; legacy runs alongside as belt-and-braces).
+  const impactFields = impact.data.fields || [];
+  const catRow = impactFields.find(r => r.field === 'product_category');
+  assert(catRow && catRow.impact === 'high',                    '20s.17 product_category impact = high');
+  const seoTRow = impactFields.find(r => r.field === 'seo_title');
+  assert(seoTRow && seoTRow.impact === 'critical',              '20s.18 seo_title impact = critical');
+  // Image-alt endpoint reachable — 400 without alts (safety); 400 without confirm.
+  const altNoConfirm = await req('POST', '/api/shopify/update-image-alts', { productId: 1, alts: [{ imageId: 1, alt: 'x' }] });
+  assertEq(altNoConfirm.status, 400,                            '20s.19 update-image-alts without confirm = 400');
+  const altNoAlts = await req('POST', '/api/shopify/update-image-alts', { confirm: 'PUSH', productId: 1 });
+  assertEq(altNoAlts.status, 400,                               '20s.20 update-image-alts without alts array = 400');
+  // (Source-inspection assertions for extractReviewSignals + GraphQL routing
+  // live in the srv-inspection block below, where srvFull has been loaded.)
 
   // ===== Bulk SKU import — Dropy-<ASIN> → amazon.in/dp/<ASIN> =====
   const bulkBatch = 'bulk-import-test';
@@ -1542,6 +1566,27 @@ async function run() {
   // Claude "Open in Claude" now uses anchor click (preserves session cookies).
   assert(appFull.includes("a.href = 'https://claude.ai/new'"),         'CRUD.35 Open-in-Claude uses anchor click (session preserved)');
   assert(!appFull.includes("window.open('https://claude.ai/new'"),      'CRUD.36 window.open path removed');
+
+  // Shopify improvements (source-inspection block — needs srvFull loaded).
+  // extractReviewSignals covers all four review-app namespaces.
+  assert(srvFull.includes('function extractReviewSignals('),    'SHOP-EXT.1 extractReviewSignals declared');
+  assert(srvFull.includes("'loox'"),                            'SHOP-EXT.2 Loox namespace detected');
+  assert(srvFull.includes("'yotpo'"),                           'SHOP-EXT.3 Yotpo namespace detected');
+  assert(srvFull.includes("'judgeme'") || srvFull.includes("'judge.me'"), 'SHOP-EXT.4 Judge.me namespace detected');
+  assert(srvFull.includes("'reviews'"),                         'SHOP-EXT.5 Native Shopify Reviews namespace detected');
+  assert(srvFull.includes("'stamped"),                          'SHOP-EXT.6 Stamped.io namespace detected');
+  // GraphQL-only field routing — writing seo_title via REST silently no-ops.
+  assert(srvFull.includes('SHOPIFY_GRAPHQL_ONLY_FIELDS'),       'SHOP-EXT.7 GraphQL-only field set declared');
+  assert(srvFull.includes('productUpdate('),                    'SHOP-EXT.8 productUpdate mutation present in update path');
+  assert(srvFull.includes('productTaxonomyNodeId'),             'SHOP-EXT.9 productTaxonomyNodeId written on category updates');
+  assert(srvFull.includes('seo: { '),                           'SHOP-EXT.10 modern seo object emitted in GraphQL mutation');
+  // Image-alt endpoint + client wrapper.
+  assert(srvFull.includes("'/api/shopify/update-image-alts'"),  'SHOP-EXT.11 image-alt endpoint present');
+  assert(apiCrud.includes('shopifyUpdateImageAlts'),            'SHOP-EXT.12 client wrapper for image-alt endpoint');
+  // Prompt consumers: reviews + product_category.
+  assert(appFull.includes('currentProduct.reviews?.hasReviews'), 'SHOP-EXT.13 prompt consumes reviews.hasReviews');
+  assert(appFull.includes('currentProduct.product_category'),   'SHOP-EXT.14 prompt consumes product_category');
+  assert(appFull.includes('SKIP \\`AggregateRating\\` schema entirely'),   'SHOP-EXT.15 prompt tells Claude to skip AggregateRating when no reviews');
 
   // Selective wipe + Shopify integration.
   assert(srvFull.includes("'/api/wipe-selective'"),                    'WIPE.1 selective wipe endpoint');
