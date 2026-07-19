@@ -4899,9 +4899,33 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           if (amazonTabId !== null) {
             const brandAliases = (productContext?.brandAliases || []).filter(a => a && a.length > 2);
             const handleWords  = (productContext?.handleWords  || []).filter(w => w && w.length > 3);
+            // Query-relevance guard — if a query has ZERO overlap with our
+            // brand aliases AND ZERO overlap with anchor/handle words, we
+            // literally can't rank on it and there's no point burning 5-10s
+            // on Amazon SERP for a hopeless query. User's log showed the
+            // Always Maxi Pads worker hammering 'best over the counter fish
+            // oil price' etc — 100% off-topic queries that came in via KP
+            // then got modifier-multiplied. Skip them cheaply.
+            let amazonSkippedIrrelevant = 0;
+            const isAmazonRelevant = (kw) => {
+              const lo = String(kw || '').toLowerCase();
+              if (!lo) return false;
+              const hasBrand = brandAliases.some(a => lo.includes(a));
+              if (hasBrand) return true;
+              const hasAnchor = handleWords.some(w => lo.includes(w));
+              return hasAnchor;
+            };
 
             for (const parent of topForAmazon) {
               if (shouldStop() || report.size >= productCap) break;
+              // Skip queries with no product-context overlap. Product-name
+              // seeds and PAA questions always pass (they carry either the
+              // brand or an anchor word by construction). Rejects the
+              // "fish oil for pads" class of drift-during-modifier-expansion.
+              if (!isAmazonRelevant(parent.keyword)) {
+                amazonSkippedIrrelevant++;
+                continue;
+              }
 
               // --- Step 1: autosuggest from Amazon ---
               let amazonSugs = [];
@@ -5150,10 +5174,13 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             }
           }
 
+          const skipNote = amazonSkippedIrrelevant > 0
+            ? ` · skipped ${amazonSkippedIrrelevant} irrelevant query(ies) (no brand/anchor overlap — saved ~${(amazonSkippedIrrelevant * 6).toFixed(0)}s of runtime)`
+            : '';
           onProgress?.({
             currentProduct: productName,
             currentSource: 'amazon',
-            currentAction: `Amazon Round complete: ${amazonStored} new keyword(s) added, ${amazonRejected} filtered`,
+            currentAction: `Amazon Round complete: ${amazonStored} new keyword(s) added, ${amazonRejected} filtered${skipNote}`,
             logKind: 'ok',
           });
         }
