@@ -2296,6 +2296,10 @@ async function run() {
   assert(appJs.body.includes('restoreAnalyticsFilters'),       'ANF.2 restore helper present');
   assert(appJs.body.includes('adbrainAnalyticsFilters'),       'ANF.3 localStorage key used');
   assert(appJs.body.includes('ANALYTICS_FILTER_IDS'),          'ANF.4 filter-id list declared');
+  // Per-batch SKU-selection persistence.
+  assert(appJs.body.includes('adbrainAnalyticsSkuByBatch'),    'ANF.5 per-batch SKU localStorage key');
+  assert(appJs.body.includes('saveAnalyticsSkuForBatch'),      'ANF.6 SKU save helper');
+  assert(appJs.body.includes('loadAnalyticsSkuByBatch'),       'ANF.7 SKU load helper');
   // Client wrapper + UI wiring.
   assert(apiJsSrc.body.includes('fetchWorkerBundleHash') === false, 'VER.11 client wrapper is in modules/discovery-jobs.js not api.js (worker-side)');
   assert(appJs.body.includes('data-copy-install-cmd'),         'VER.12 UI renders copy-install-cmd button on outdated rows');

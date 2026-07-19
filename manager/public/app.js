@@ -3803,8 +3803,23 @@ $('anBatchSelect').addEventListener('change', async () => {
   updatePickerHints();
   await loadAnalyticsBatch(analytics.batchId);
 });
+// Per-batch SKU-selection map — {batchId: sku}. Lets refresh + revisit
+// remember which SKU you were on inside each batch, so switching batches
+// back and forth doesn't reset your position. Persisted to localStorage;
+// stale batch ids age out naturally when they're not touched.
+function loadAnalyticsSkuByBatch() {
+  try { return JSON.parse(localStorage.getItem('adbrainAnalyticsSkuByBatch') || '{}') || {}; }
+  catch { return {}; }
+}
+function saveAnalyticsSkuForBatch(batchId, sku) {
+  if (!batchId) return;
+  const map = loadAnalyticsSkuByBatch();
+  if (sku) map[batchId] = sku; else delete map[batchId];
+  try { localStorage.setItem('adbrainAnalyticsSkuByBatch', JSON.stringify(map)); } catch {}
+}
 $('anSkuSelect').addEventListener('change', () => {
   analytics.sku = $('anSkuSelect').value;
+  saveAnalyticsSkuForBatch(analytics.batchId, analytics.sku);
   filterAndRenderAnalytics();
 });
 // Analytics filter controls — wire to filterAndRenderAnalytics AND persist
@@ -5012,12 +5027,19 @@ async function loadAnalyticsBatch(batchId) {
     $('anSkuSelect').innerHTML = `<option value="">— all SKUs in batch —</option>` + skuList.map(g =>
       `<option value="${esc(g.key)}">${esc(g.key)} — ${g.rows.length} kw${g.productName ? ` · ${esc(g.productName)}` : ''}</option>`
     ).join('');
-    // If we previously had a SKU selected and it still exists, keep it.
-    if (analytics.sku && bySku.has(analytics.sku)) $('anSkuSelect').value = analytics.sku;
-    else {
-      // Auto-pick the most-productive SKU (top of skuList, already sorted
-      // desc by row count) so users see analytics immediately instead of
-      // a placeholder telling them to pick a SKU.
+    // Resolve selected SKU with a three-step preference:
+    //   1. In-memory analytics.sku if it still exists (session continuity)
+    //   2. localStorage per-batch memory (survives reloads / batch flips)
+    //   3. Fall back to the most-productive SKU (top of desc-sorted skuList)
+    // Result: refresh / batch-switch preserves the user's last SKU choice
+    // whenever possible; a batch you've never opened defaults to top-yield.
+    const persistedSku = loadAnalyticsSkuByBatch()[batchId];
+    if (analytics.sku && bySku.has(analytics.sku)) {
+      $('anSkuSelect').value = analytics.sku;
+    } else if (persistedSku && bySku.has(persistedSku)) {
+      analytics.sku = persistedSku;
+      $('anSkuSelect').value = persistedSku;
+    } else {
       analytics.sku = skuList[0]?.key || '';
       if ($('anSkuSelect')) $('anSkuSelect').value = analytics.sku;
     }
