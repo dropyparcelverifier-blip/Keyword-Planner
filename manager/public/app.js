@@ -5013,8 +5013,10 @@ function renderShopifyModalBody({ currentProduct, productUrl, prompt, impactRows
       <button class="small" id="shopifyStep3Btn" title="Parses your pasted JSON, shows the before/after diff against your current Shopify listing + preflight rubric. Push button appears if preflight passes.">3️⃣ Preview diff</button>
       <span class="spacer" style="flex:1;"></span>
       <button class="small secondary" id="shopifyHistoryBtn" title="Show every previous push to this product with a Revert button per row. Only pushes made AFTER snapshot support was deployed can be reverted.">🕘 Push history</button>
+      <button class="small secondary" id="shopifyDefsBtn" title="Show every metafield definition on your store + which alias our resolver would map each to. Use this when metafields keep coming back blank after push — the mismatch will be visible in one place.">🔍 Inspect metafield definitions</button>
     </div>
     <div id="shopifyHistoryPanel" style="display:none; margin-bottom: 12px; padding: 10px 14px; background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 6px;"></div>
+    <div id="shopifyDefsPanel" style="display:none; margin-bottom: 12px; padding: 10px 14px; background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 6px;"></div>
     <!-- Working area FIRST — prompt textarea, paste-back textarea, preview
          button. Reference sections (safety guarantee / current listing /
          field-impact) are moved BELOW so users never scroll past their
@@ -5192,6 +5194,62 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
     const box = $('shopifyPreviewBox');
     box?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     $('shopifyPreviewBtn')?.click();
+  });
+  // Metafield-definitions inspector — one-click diagnostic for
+  // 'why are metafields still blank after push'. Shows every definition
+  // on the store + whether our resolver would match it to an alias.
+  $('shopifyDefsBtn')?.addEventListener('click', async () => {
+    const panel = $('shopifyDefsPanel');
+    if (!panel) return;
+    if (panel.style.display !== 'none' && panel.dataset.loaded === '1') {
+      panel.style.display = 'none'; return;
+    }
+    panel.style.display = ''; panel.innerHTML = '<div class="hint">Fetching definitions…</div>';
+    try {
+      const r = await api.shopifyMetafieldDefinitions();
+      const rows = r.definitions || [];
+      const resolution = r.alias_resolution || [];
+      // Cross-reference: for each alias, is it going to write? for each
+      // definition, is it currently targeted by an alias?
+      const targetedNsKeys = new Set(resolution.filter(x => x.would_write_to).map(x => x.would_write_to));
+      const defsHtml = rows.map(d => {
+        const nsKey = `${d.namespace}.${d.key}`;
+        const targeted = targetedNsKeys.has(nsKey);
+        const bg = targeted ? 'var(--success-soft)' : 'var(--bg-3)';
+        const badge = targeted
+          ? `<span style="padding:2px 8px; border-radius:4px; background:var(--success); color:#fff; font-size:10px; font-weight:700;">TARGETED</span>`
+          : `<span style="padding:2px 8px; border-radius:4px; background:var(--text-3); color:var(--bg-1); font-size:10px; font-weight:700;">unlinked</span>`;
+        return `<div style="padding:8px 10px; margin:4px 0; background:${bg}; border:1px solid var(--line-1); border-radius:6px; display:grid; grid-template-columns: 1fr 240px 100px; gap:12px; align-items:center; font-size:12px;">
+          <div><strong>${esc(d.name || '(unnamed)')}</strong> <span class="hint">· ${esc(d.type || '')}</span></div>
+          <code style="font-size:11px; color:${targeted ? 'var(--success)' : 'var(--text-2)'};">${esc(nsKey)}</code>
+          ${badge}
+        </div>`;
+      }).join('');
+      const aliasHtml = resolution.map(a => {
+        const ok = !!a.would_write_to;
+        return `<div style="padding:6px 10px; margin:3px 0; background:${ok ? 'var(--success-soft)' : 'var(--warn-soft)'}; border:1px solid ${ok ? 'var(--success)' : 'var(--warn)'}; border-radius:4px; display:grid; grid-template-columns: 220px 240px 1fr; gap:12px; font-size:12px;">
+          <code>${esc(a.alias)}</code>
+          <code style="color:${ok ? 'var(--success)' : 'var(--warn)'};">${esc(a.would_write_to || '(no target)')}</code>
+          <span class="hint">${esc(a.resolved_via)}</span>
+        </div>`;
+      }).join('');
+      const unresolvedCount = resolution.filter(a => !a.would_write_to).length;
+      panel.innerHTML = `
+        <div style="display:flex; align-items:baseline; gap:10px; margin-bottom: 10px;">
+          <strong>🔍 Metafield definitions on your store</strong>
+          <span class="hint">${rows.length} definitions found · ${resolution.length - unresolvedCount}/${resolution.length} aliases have a target</span>
+          <span class="spacer" style="flex:1;"></span>
+          <button class="small ghost" id="shopifyDefsCloseBtn">Close</button>
+        </div>
+        ${unresolvedCount > 0 ? `<div class="hint" style="color:var(--warn); padding:8px 10px; background:var(--warn-soft); border:1px solid var(--warn); border-radius:6px; margin-bottom:10px;">⚠ <strong>${unresolvedCount} alias(es) can't find a matching definition</strong> — those metafields will be skipped on push and the theme tabs stay empty. Fix: either add matching definitions in Shopify Admin (name them exactly as shown), OR tell me the actual display name and I'll add the alias.</div>` : ''}
+        <div style="margin-bottom:12px;"><strong>Our resolver → your definitions:</strong>${aliasHtml}</div>
+        <div><strong>All product metafield definitions on your store:</strong>${defsHtml || '<div class="hint">No definitions found (unusual — check that Shopify Admin → Settings → Custom data → Products has definitions).</div>'}</div>
+      `;
+      panel.dataset.loaded = '1';
+      $('shopifyDefsCloseBtn')?.addEventListener('click', () => { panel.style.display = 'none'; });
+    } catch (e) {
+      panel.innerHTML = `<div class="hint" style="color:var(--danger);">Failed to load definitions: ${esc(e.message)}. Check that the manager is running the latest code (⚠ RESTART pill?) — this endpoint was added in commit 74da03f.</div>`;
+    }
   });
   // Push-history panel — lists every prior push to this product with a
   // Revert-per-row button. Only pushes made AFTER snapshot support landed

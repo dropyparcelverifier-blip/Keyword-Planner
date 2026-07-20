@@ -2622,6 +2622,37 @@ const server = http.createServer(async (req, res) => {
     if (m === 'GET' && p === '/api/shopify/field-impact') {
       return send(res, 200, { ok: true, fields: SHOPIFY_FIELD_IMPACT, allowlist: [...SHOPIFY_ALLOWED_FIELDS] });
     }
+    // Diagnostic: dump every product-level metafield definition on the store
+    // + show which alias (if any) our resolver would map each to. Answers
+    // 'why are metafields still blank after push' by making the namespace
+    // mismatch visible in one place.
+    if (m === 'GET' && p === '/api/shopify/metafield-definitions') {
+      const cfgRow = Q.getConfig.get();
+      const cfg = cfgRow?.config ? JSON.parse(cfgRow.config) : {};
+      const shop = cfg.shopify || {};
+      const apiVer = shop.apiVersion || '2024-10';
+      const r = await shopifyRequest({
+        shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+        method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`,
+        body: { query: `{ metafieldDefinitions(first: 200, ownerType: PRODUCT) { edges { node { namespace key name type { name } description } } } }` },
+      });
+      if (!r.ok) return send(res, r.status || 502, { ok: false, error: `Shopify GraphQL: ${JSON.stringify(r.error)}` });
+      const defs = (r.data?.data?.metafieldDefinitions?.edges || []).map(e => ({
+        namespace: e.node.namespace, key: e.node.key, name: e.node.name,
+        type: e.node.type?.name || null, description: e.node.description || null,
+      }));
+      // Cross-reference against our alias table so it's obvious which
+      // definitions would be writable vs skipped.
+      const resolution = Object.keys(SHOPIFY_METAFIELD_ALIASES).map(alias => {
+        const target = resolveMetafieldTarget(alias, defs);
+        return {
+          alias,
+          would_write_to: target ? `${target.namespace}.${target.key}` : null,
+          resolved_via:   target ? target.resolvedVia : 'NO MATCH — would be skipped',
+        };
+      });
+      return send(res, 200, { ok: true, definitions: defs, alias_resolution: resolution });
+    }
     // Fetch the store's shop-level policy pages (shipping, refund, privacy,
     // TOS) via Shopify Admin API. Returns strippped-plain-text body so the
     // Claude prompt can echo the store's ACTUAL policy language verbatim
