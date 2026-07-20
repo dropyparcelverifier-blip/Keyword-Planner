@@ -2478,6 +2478,16 @@ async function run() {
   assert(apiFull.includes('shopifyRevert'),                    'REVERT.8 client wrapper for revert');
   assert(appJs.body.includes('shopifyRevertLastBtn'),          'REVERT.9 revert button rendered after successful push');
   assert(appJs.body.includes('snapshot_captured'),             'REVERT.10 UI reads snapshot_captured flag from response');
+  // Prompt: performance-conscious constraints so body_html doesn't tank Lighthouse.
+  assert(appJs.body.includes('Target body_html size: 12-18 KB'), 'PERF-PROMPT.1 explicit body_html size target');
+  assert(appJs.body.includes('Section count'),                 'PERF-PROMPT.2 h2 count guidance');
+  assert(appJs.body.includes('DOM node budget'),               'PERF-PROMPT.3 DOM node budget');
+  assert(appJs.body.includes('nofollow noopener'),             'PERF-PROMPT.4 rel-attr enforcement');
+  // Server preflight: new soft warnings for oversized body / too many links / missing rel.
+  assert(srvFull.includes('body_over_soft_cap'),               'PERF-PROMPT.5 preflight warns on body > 25KB');
+  assert(srvFull.includes('body_too_many_sections'),           'PERF-PROMPT.6 preflight warns on > 12 h2');
+  assert(srvFull.includes('body_too_many_links'),              'PERF-PROMPT.7 preflight warns on > 20 anchors');
+  assert(srvFull.includes('body_external_no_rel'),             'PERF-PROMPT.8 preflight warns on external links without rel');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
