@@ -2548,6 +2548,16 @@ async function run() {
   assert(srvFull.includes('body_leaked_faq'),                   'MF-EXPAND.13 preflight warns if FAQ <details> leaked into body_html');
   // Skipped-metafield warning banner in push toast.
   assert(appJs.body.includes('skippedNote'),                    'MF-EXPAND.14 client shows skipped-metafield banner after push');
+  // Screen wake-lock: dashboard keeps display awake while jobs in-flight.
+  assert(idx.body.includes('id="wakeLockPill"'),                'WAKE.1 wake-lock pill in topbar');
+  assert(appJs.body.includes('navigator.wakeLock.request'),     'WAKE.2 uses standard Wake Lock API');
+  assert(appJs.body.includes('_wakeLockSentinel'),              'WAKE.3 sentinel state tracked');
+  assert(appJs.body.includes('WAKE_LOCK_IDLE_GRACE_MS'),        'WAKE.4 grace period before release when idle');
+  assert(appJs.body.includes('adbrainWakeLockForce'),           'WAKE.5 manual force-on/off persisted');
+  // Worker: chrome.power.requestKeepAwake — already existed, guard for regressions.
+  const bgJs = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
+  assert(bgJs.includes("chrome.power?.requestKeepAwake?.('display')"), 'WAKE.6 worker requests keep-awake during runs');
+  assert(bgJs.includes('chrome.power?.releaseKeepAwake?.()'),  'WAKE.7 worker releases keep-awake in finally');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.

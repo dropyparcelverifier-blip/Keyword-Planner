@@ -464,10 +464,80 @@ async function refreshStatsBar() {
     $('sbFailed').textContent    = totals.failed.toLocaleString();
     const lastEv = (act.events || [])[0];
     $('sbLastActivity').textContent = lastEv ? fmtAgo(lastEv.ts) : '—';
+    // Auto-manage screen wake-lock: keep the manager PC's display awake
+    // while there's active work (claimed jobs OR online workers). Once
+    // the fleet has been idle for 3 min, release so the PC can sleep
+    // normally. Uses the standard Wake Lock API (Chrome 84+).
+    _maintainDashboardWakeLock({ jobsInFlight: totals.claimed, workersOnline: online });
   } catch (e) {
     // Silent — health pill shows connection state.
   }
 }
+// Wake-lock state. Held while there's active work, released after idle
+// grace period. Auto re-acquired if the browser reclaims the tab and
+// work resumes. Manual toggle via $('wakeLockToggle') if the user wants
+// to force it on/off regardless of activity.
+let _wakeLockSentinel = null;
+let _wakeLockIdleSince = null;
+const WAKE_LOCK_IDLE_GRACE_MS = 3 * 60 * 1000;   // release after 3 min idle
+async function _maintainDashboardWakeLock({ jobsInFlight, workersOnline }) {
+  if (!('wakeLock' in navigator)) return;   // older browser — skip silently
+  const busy = (jobsInFlight > 0) || (workersOnline > 0);
+  const forced = localStorage.getItem('adbrainWakeLockForce') === '1';
+  const shouldHold = busy || forced;
+  if (shouldHold) {
+    _wakeLockIdleSince = null;
+    if (!_wakeLockSentinel) {
+      try {
+        _wakeLockSentinel = await navigator.wakeLock.request('screen');
+        _wakeLockSentinel.addEventListener('release', () => { _wakeLockSentinel = null; _updateWakeLockPill(); });
+        _updateWakeLockPill();
+      } catch { /* permission denied / other issue — retry next tick */ }
+    }
+  } else {
+    if (_wakeLockSentinel) {
+      if (!_wakeLockIdleSince) _wakeLockIdleSince = Date.now();
+      if (Date.now() - _wakeLockIdleSince > WAKE_LOCK_IDLE_GRACE_MS) {
+        try { await _wakeLockSentinel.release(); } catch {}
+        _wakeLockSentinel = null; _wakeLockIdleSince = null;
+        _updateWakeLockPill();
+      }
+    }
+  }
+}
+function _updateWakeLockPill() {
+  const pill = document.getElementById('wakeLockPill');
+  if (!pill) return;
+  if (_wakeLockSentinel) {
+    pill.textContent = '🌙 Screen kept on';
+    pill.title = 'Manager display will stay awake while work is in flight. Auto-releases after 3 min of idle. Click to force-toggle.';
+    pill.classList.add('wake-lock-active');
+  } else {
+    pill.textContent = '💤 Screen may sleep';
+    pill.title = 'No active work — display can sleep normally. Click to force-keep-on.';
+    pill.classList.remove('wake-lock-active');
+  }
+}
+// Re-acquire on tab visibility. When user backgrounds the tab, the OS
+// releases wake locks automatically; re-request when they return AND
+// work is still in-flight.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && !_wakeLockSentinel) {
+    // Trigger a stats refresh which will re-request if appropriate.
+    refreshStatsBar();
+  }
+});
+// One-time listener for the manual toggle pill (installed by the pill
+// creation code below, or by clicks on any dynamically rendered pill).
+document.addEventListener('click', (e) => {
+  if (e.target?.id === 'wakeLockPill') {
+    const forced = localStorage.getItem('adbrainWakeLockForce') === '1';
+    localStorage.setItem('adbrainWakeLockForce', forced ? '0' : '1');
+    // Immediate feedback + trigger the maintain loop.
+    refreshStatsBar();
+    toast(!forced ? 'Screen wake-lock FORCED ON — display stays awake even when idle.' : 'Screen wake-lock back to AUTO — releases after 3 min idle.', 'info', { title: forced ? '💤 Auto mode' : '🌙 Forced on' });
+  }
+});
 setInterval(refreshStatsBar, 15000);
 
 // ─────────── Collapsible cards ───────────
