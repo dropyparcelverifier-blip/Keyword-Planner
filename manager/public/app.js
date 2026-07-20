@@ -4921,9 +4921,23 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
 
   // Sticky flow-bar handlers: each button does its step end-to-end.
   $('shopifyStep1Btn')?.addEventListener('click', async () => {
-    const t = $('shopifyPromptText')?.value || '';
+    const ta = $('shopifyPromptText');
+    const t = ta?.value || '';
+    // Guard: if the prompt textarea is empty (render bug OR user cleared
+    // it), do NOT open Claude — otherwise the user pastes whatever was on
+    // clipboard before (typically the install-worker command from Fleet
+    // card 'Copy install command') and thinks the prompt was copied.
+    if (!t || t.length < 200) {
+      toast(`Prompt textarea is empty or too short (${t.length} chars). Refresh the dashboard (Ctrl+Shift+R) and re-open the modal. If it's still empty, restart the manager (⚠ RESTART pill in topbar).`, 'err', { title: 'No prompt to copy' });
+      return;
+    }
     const ok = await copyToClipboard(t);
-    toast(ok ? 'Prompt copied. Opening Claude — paste with Ctrl+V there.' : 'Copy failed — text selected, press Ctrl+C manually.', ok ? 'ok' : 'warn', { title: '1️⃣ Prompt copied' });
+    if (!ok) {
+      ta?.select();
+      toast('Copy failed. Prompt is now selected in the textarea — press Ctrl+C to copy manually, then open claude.ai yourself.', 'warn', { title: 'Clipboard blocked' });
+      return;
+    }
+    toast(`Prompt copied (${(t.length / 1024).toFixed(1)} KB). Opening Claude — paste with Ctrl+V there.`, 'ok', { title: '1️⃣ Prompt copied' });
     // Anchor-click so session cookies survive (same pattern as shopifyOpenClaudeBtn).
     const a = document.createElement('a');
     a.href = 'https://claude.ai/new'; a.target = '_blank'; a.rel = 'noreferrer';
