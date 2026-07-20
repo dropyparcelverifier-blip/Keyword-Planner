@@ -164,9 +164,23 @@ function validateShopifyPatch(patch, context = {}) {
     const words = bodyHtml.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/gi, ' ').trim().split(/\s+/).filter(Boolean).length;
     stats.body_bytes = bytes;
     stats.body_words = words;
-    if (bytes > 40 * 1024) pushCrit('body_too_large', `body_html ${(bytes / 1024).toFixed(1)} KB > 40 KB page-speed cap`);
+    if (bytes > 40 * 1024)      pushCrit('body_too_large', `body_html ${(bytes / 1024).toFixed(1)} KB > 40 KB hard cap`);
+    else if (bytes > 25 * 1024) pushWarn('body_over_soft_cap', `body_html ${(bytes / 1024).toFixed(1)} KB > 25 KB soft cap — will drop Lighthouse Performance measurably on mobile. Consider trimming FAQ/table verbosity.`);
     if (words < 800)       pushCrit('body_too_short', `body_html ${words} words < 800 minimum (target 1200-2000)`);
     else if (words < 1200) pushWarn('body_short', `body_html ${words} words < 1200 target`);
+    // Structural page-speed guardrails — count DOM cost proxies.
+    const h2Count  = (bodyHtml.match(/<h2\b/gi) || []).length;
+    const anchors  = (bodyHtml.match(/<a\b/gi) || []).length;
+    const faqBlocks = (bodyHtml.match(/<details\b/gi) || []).length;
+    stats.h2_count = h2Count;
+    stats.anchor_count = anchors;
+    if (h2Count > 12) pushWarn('body_too_many_sections', `body_html has ${h2Count} <h2> sections — target 8-10 for lean rendering`);
+    if (anchors > 20) pushWarn('body_too_many_links',    `body_html has ${anchors} <a> tags — target ≤ 15 (each link adds DOM + potential preconnect cost)`);
+    if (faqBlocks > 10) pushWarn('body_too_many_faq',    `body_html has ${faqBlocks} FAQ <details> blocks — Google truncates FAQPage rich snippets at ~5; keep 6-8`);
+    // External-link rel enforcement — big Lighthouse Best Practices signal.
+    const externalAnchorsWithoutRel = (bodyHtml.match(/<a\b[^>]*href=["']https?:\/\/(?!(?:[a-z0-9-]+\.)?dropy\.in)[^"']+["'][^>]*>/gi) || [])
+      .filter(tag => !/rel=["'][^"']*(nofollow|noopener)/i.test(tag)).length;
+    if (externalAnchorsWithoutRel > 0) pushWarn('body_external_no_rel', `body_html has ${externalAnchorsWithoutRel} external <a> tag(s) missing rel="nofollow noopener" — Lighthouse Best Practices flag`);
     // Page-speed guardrails
     const scriptMatches = bodyHtml.match(/<script\b[^>]*>/gi) || [];
     const jsonLdCount = scriptMatches.filter(s => /application\/ld\+json/i.test(s)).length;
