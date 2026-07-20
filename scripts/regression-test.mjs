@@ -2565,6 +2565,22 @@ async function run() {
   assert(appJs.body.includes('shopifyDefsBtn'),                 'MF-DIAG.4 inspector button in flow bar');
   assert(appJs.body.includes('would_write_to'),                 'MF-DIAG.5 panel renders would_write_to per alias');
   assert(appJs.body.includes("alias(es) can't find a matching definition"), 'MF-DIAG.6 panel warns loud when aliases unresolved');
+  // Server-side auto-routing: pull How-To-Use / Ingredients / FAQ out of
+  // body_html into metafields BEFORE writing. Makes it architecturally
+  // impossible for content to end up in Description-only.
+  assert(srvFull.includes('autoRouteBodyToMetafields'),         'AUTO-ROUTE.1 auto-router function present');
+  assert(srvFull.includes('_auto_routed'),                      'AUTO-ROUTE.2 result surfaced via _auto_routed');
+  assert(srvFull.includes('how_to_use_extracted'),              'AUTO-ROUTE.3 tracks whether How-To-Use was extracted');
+  assert(srvFull.includes('ingredients_extracted'),             'AUTO-ROUTE.4 tracks whether Ingredients was extracted');
+  assert(srvFull.includes('faqs_extracted'),                    'AUTO-ROUTE.5 tracks how many FAQ blocks were extracted');
+  assert(srvFull.includes('body_shrunk_by'),                    'AUTO-ROUTE.6 measures body_html shrinkage post-extract');
+  assert(appJs.body.includes('auto_routed'),                    'AUTO-ROUTE.7 client toast shows auto-routing notice');
+  assert(appJs.body.includes('Server auto-routed content'),     'AUTO-ROUTE.8 client copy explains what happened');
+  // Image alts — Claude produces per-image alt text; server PUTs each.
+  assert(srvFull.includes("image_alts' && Array.isArray(v)"),   'IMG-ALTS.1 stripToShopifyAllowlist accepts image_alts array');
+  assert(srvFull.includes('/products/${productId}/images/${entry.imageId}.json'), 'IMG-ALTS.2 server PUTs each image alt');
+  assert(appJs.body.includes('image_alts'),                     'IMG-ALTS.3 prompt output spec has image_alts key');
+  assert(appJs.body.includes("Every image gets a NEW alt"),     'IMG-ALTS.4 prompt requires per-image alt');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.

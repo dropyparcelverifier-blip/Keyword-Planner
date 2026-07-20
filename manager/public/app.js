@@ -4728,7 +4728,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('');
   L.push('## HARD CONSTRAINTS');
   L.push('- **NEVER produce**: `price`, `weight`, `weight_unit`, `location`, `inventory_quantity`, `variants`, `images`, `sku`. The manager strips them server-side; wasted output tokens.');
-  L.push('- **ONLY produce keys** from this allowlist: ' + allowlist.map(f => `\`${f}\``).join(', ') + `, AND a nested \`metafields\` object with any of these 17 keys (theme-writable): \`custom.how_to_use\`, \`custom.ingredients\`, \`custom.bullet_points\`, \`custom.department\`, \`custom.highlight_1\`, \`custom.highlight_2\`, \`custom.highlight_3\`, \`custom.faq_q_1\`, \`custom.faq_a_1\`, \`custom.faq_q_2\`, \`custom.faq_a_2\`, \`custom.faq_q_3\`, \`custom.faq_a_3\`, \`custom.faq_q_4\`, \`custom.faq_a_4\`, \`custom.faq_q_5\`, \`custom.faq_a_5\`. Anything else is stripped server-side. Only OMIT a key if you truly don't have content for it — do not skip populating an eligible metafield.`);
+  L.push('- **ONLY produce keys** from this allowlist: ' + allowlist.map(f => `\`${f}\``).join(', ') + `, PLUS an \`image_alts\` array (one entry per image on the product — see Images section above for ids), PLUS a nested \`metafields\` object with any of these 17 keys (theme-writable): \`custom.how_to_use\`, \`custom.ingredients\`, \`custom.bullet_points\`, \`custom.department\`, \`custom.highlight_1\`, \`custom.highlight_2\`, \`custom.highlight_3\`, \`custom.faq_q_1\`, \`custom.faq_a_1\`, \`custom.faq_q_2\`, \`custom.faq_a_2\`, \`custom.faq_q_3\`, \`custom.faq_a_3\`, \`custom.faq_q_4\`, \`custom.faq_a_4\`, \`custom.faq_q_5\`, \`custom.faq_a_5\`. Anything else is stripped server-side. Only OMIT a key if you truly don't have content for it — do not skip populating an eligible metafield.`);
   L.push('- **Return format**: reasoning paragraph, then ONE fenced ```json``` block. No other JSON. No commentary after.');
   L.push('- **India-first**. Currency ₹ and `INR` in schema. Pan-India context. Every trust signal India-specific.');
   L.push('- **No invented claims** — do not add "clinically proven", "dermatologist tested", certifications, awards, specific test results unless they appear in the research data.');
@@ -4864,8 +4864,17 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
     }
   }
   if (currentProduct.images?.length) {
-    L.push(`**Images** (${currentProduct.images.length} — READ-ONLY, do NOT include):`);
-    for (const im of currentProduct.images.slice(0, 4)) L.push(`  · ${im.src}  ${im.alt ? '— alt: ' + im.alt : ''}`);
+    L.push(`**Images** (${currentProduct.images.length} on this product — the SRCs are READ-ONLY, but you MUST produce a fresh alt text for EACH one via \`image_alts\` in the output):`);
+    for (const im of currentProduct.images) {
+      L.push(`  · id=\`${im.id}\` · src=${im.src.split('/').pop().split('?')[0]}  · CURRENT alt: "${im.alt || '(blank)'}"`);
+    }
+    L.push('');
+    L.push('**Image-alt rules** (Google Image Search + accessibility + main-image ranking signal):');
+    L.push('- Every image gets a NEW alt — 8-15 words, keyword-rich but natural (a screen reader should be able to speak it).');
+    L.push('- Alt #1 (the main/hero image, first in the list) is the RANKING alt: include the primary keyword + brand + a differentiator. e.g. "Cetaphil Exfoliating Face Wash 178ml bottle front view, gentle daily scrub for dry skin".');
+    L.push('- Subsequent alts describe what THAT specific image shows (back-panel ingredient label, texture close-up, in-use, size reference, packaging). Don\'t repeat the same alt N times.');
+    L.push('- No stuffing — never comma-separated keyword lists. Real descriptive sentences.');
+    L.push('- Under 125 chars each (screen-reader friendly + Amazon-compatible).');
     L.push('');
   }
   L.push('## THIS SKU (research context)');
@@ -4909,6 +4918,10 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('  "metafields_global_title_tag": "same as seo_title — legacy metafield for REST compatibility",');
   L.push('  "metafields_global_description_tag": "same as seo_description — legacy metafield for REST compatibility",');
   L.push('  "product_category": "gid://shopify/ProductTaxonomyNode/N — Standard Product Taxonomy node id, only if you can pick with high confidence; omit if unsure",');
+  L.push('  "image_alts": [');
+  L.push('    { "imageId": <numeric-id-from-Images-section-above>, "alt": "<8-15 word natural description>" },');
+  L.push('    ...one entry per image (produce ALL of them, not just the hero)...');
+  L.push('  ],');
   L.push('  "metafields": {');
   L.push('    "custom.how_to_use":    "Step-by-step usage guide. Numbered list style, ONE paragraph or short-line-per-step. Renders in the \'How To Use\' TAB on the product page. Plain text with numbered lines works (theme handles formatting).",');
   L.push('    "custom.ingredients":   "Full ingredient / composition list — echo VERBATIM from EXISTING STORE METAFIELDS if provided (never paraphrase actives/dosage — compliance risk). Renders in the \'Ingredients\' TAB. Plain text.",');
@@ -5540,9 +5553,23 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
         // Shopify Admin OR remove them from Claude's output.
         const skippedCount = mfResults.filter(r => r.skipped).length;
         const skippedNote = skippedCount > 0
-          ? `<div class="hint" style="color: var(--warn); margin-top: 6px; padding: 8px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 6px;">⏭ ${skippedCount} metafield(s) skipped — no matching definition on your store. Either define them in Shopify Admin → Settings → Custom data → Products (name them to match the aliases: 'How To Use', 'Ingredients', 'Bullet Points', 'Department', 'Highlight 1/2/3', 'F&Q Question 1..5', 'F&Q Answer 1..5'), or drop those keys from Claude's response and re-push. Writing them wouldn't have populated anything — theme reads a different namespace.</div>`
+          ? `<div class="hint" style="color: var(--warn); margin-top: 6px; padding: 8px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 6px;">⏭ ${skippedCount} metafield(s) skipped — no matching definition on your store. Click '🔍 Inspect metafield definitions' at the top of this modal to see exactly which alias failed to match + your store's actual namespace/key for each field.</div>`
           : '';
-        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${sentKeys.map(k => `<code>${k}</code>`).join(', ') || '(none)'}${mfNote}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}${snapshotNote}</div>${skippedNote}`;
+        // Auto-routing note — server extracted How-To-Use / Ingredients / FAQ
+        // from body_html into metafields. Reassures user the split happened
+        // even if Claude tried to dump everything into Description.
+        const ar = r.auto_routed;
+        const autoRoutedNote = ar
+          ? `<div class="hint" style="color: var(--accent); margin-top: 6px; padding: 8px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 6px;">🔀 Server auto-routed content out of body_html into metafields (Claude tried to dump into Description again): ${ar.how_to_use_extracted ? '<code>how_to_use</code> ' : ''}${ar.ingredients_extracted ? '<code>ingredients</code> ' : ''}${ar.faqs_extracted ? `<code>${ar.faqs_extracted} FAQ(s)</code> ` : ''}· body_html shrunk by ${ar.body_shrunk_by} chars. Theme tabs should now populate.</div>`
+          : '';
+        // Image-alts result — how many alts landed.
+        const altResults = Array.isArray(r.results?.image_alts) ? r.results.image_alts : [];
+        const altOkCount = altResults.filter(a => a.ok).length;
+        const altFailCount = altResults.filter(a => !a.ok).length;
+        const altNote = altResults.length > 0
+          ? `<div class="hint" style="margin-top: 6px;">🖼 Image alts: ${altOkCount} of ${altResults.length} updated${altFailCount > 0 ? ` · <span style="color:var(--danger);">${altFailCount} failed</span>` : ' ✓'}</div>`
+          : '';
+        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${sentKeys.map(k => `<code>${k}</code>`).join(', ') || '(none)'}${mfNote}${altNote}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}${snapshotNote}</div>${autoRoutedNote}${skippedNote}`;
         toast('Shopify listing updated. Revert button available below if needed.', 'ok', { title: 'Pushed' });
         // Wire the just-pushed revert button.
         document.getElementById('shopifyRevertLastBtn')?.addEventListener('click', async (e) => {

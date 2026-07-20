@@ -152,17 +152,104 @@ const SHOPIFY_FIELD_IMPACT = [
   { field: 'product_type',                       impact: 'medium',   why: 'categorization; filters + auto-collections' },
   { field: 'vendor',                             impact: 'low',      why: 'brand filter; rarely changes' },
 ];
+// Auto-router: no matter how forcefully we tell Claude 'do not put X in
+// body_html', it sometimes still dumps everything into Description. This
+// runs BEFORE stripToShopifyAllowlist and forcibly EXTRACTS the theme-
+// tab sections from body_html into metafields, then strips them from
+// body_html. Safety net so 'dumped everything into Description' becomes
+// architecturally impossible — even if Claude ignores the split rule,
+// the server splits it for them.
+function autoRouteBodyToMetafields(patch) {
+  const original = patch.body_html || '';
+  if (!original) return patch;
+  patch.metafields = patch.metafields || {};
+  let body = original;
+  const htmlToPlain = html => String(html || '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<li[^>]*>/gi, '\n• ')
+    .replace(/<\/li>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>|<\/h[1-6]>/gi, '\n\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  // Extract 'How to use' / 'Usage instructions' / 'Directions' h2 block.
+  const howToRe = /<h2[^>]*>\s*(?:how\s+to\s+use|usage\s+instructions|directions)[^<]*<\/h2>([\s\S]*?)(?=<h2\b|<script\b|$)/i;
+  const howToMatch = body.match(howToRe);
+  if (howToMatch && !patch.metafields['custom.how_to_use']) {
+    patch.metafields['custom.how_to_use'] = htmlToPlain(howToMatch[1]);
+    body = body.replace(howToMatch[0], '');
+  }
+  // Extract 'Ingredients' or 'Composition' h2 block (bare — not 'Ingredient
+  // breakdown' which is a body-html-appropriate deep-dive).
+  const ingRe = /<h2[^>]*>\s*(?:ingredients?|composition)\s*<\/h2>([\s\S]*?)(?=<h2\b|<script\b|$)/i;
+  const ingMatch = body.match(ingRe);
+  if (ingMatch && !patch.metafields['custom.ingredients']) {
+    patch.metafields['custom.ingredients'] = htmlToPlain(ingMatch[1]);
+    body = body.replace(ingMatch[0], '');
+  }
+  // Extract FAQ <details><summary>Q</summary>A</details> blocks — up to 5,
+  // matching our custom.faq_q_1..5 / faq_a_1..5 alias set. If Claude used
+  // FAQPage JSON-LD only (no <details>), we can also try to extract from
+  // the schema block but keep this pass simple for now.
+  const detailsRe = /<details[^>]*>\s*<summary[^>]*>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>/gi;
+  const details = [...body.matchAll(detailsRe)].slice(0, 5);
+  for (let i = 0; i < details.length; i++) {
+    const qKey = `custom.faq_q_${i + 1}`;
+    const aKey = `custom.faq_a_${i + 1}`;
+    if (!patch.metafields[qKey]) patch.metafields[qKey] = htmlToPlain(details[i][1]);
+    if (!patch.metafields[aKey]) patch.metafields[aKey] = htmlToPlain(details[i][2]);
+  }
+  // Strip the entire FAQ block (h2 heading + all details) if we extracted at
+  // least one — assume the whole FAQ section is now covered by the metafields.
+  if (details.length > 0) {
+    body = body.replace(/<h2[^>]*>\s*(?:frequently\s+asked\s+questions?|faqs?)[^<]*<\/h2>[\s\S]*?(?=<h2\b|<script\b|$)/i, '');
+    // Also strip any orphan <details> blocks that outlived the h2 strip.
+    body = body.replace(detailsRe, '');
+  }
+  // Only rewrite body_html if we actually extracted something. Trim
+  // consecutive blank lines the strips leave behind.
+  if (body !== original) {
+    patch.body_html = body.replace(/(\n\s*){3,}/g, '\n\n').trim();
+    patch._auto_routed = {
+      how_to_use_extracted: !!howToMatch,
+      ingredients_extracted: !!ingMatch,
+      faqs_extracted: details.length,
+      body_shrunk_by: original.length - patch.body_html.length,
+    };
+  }
+  return patch;
+}
+
 function stripToShopifyAllowlist(payload) {
+  // Run auto-router FIRST so extracted content lands in metafields BEFORE
+  // the allowlist strip decides what to keep. Non-destructive on payloads
+  // that already split cleanly (metafields present, body_html clean).
+  payload = autoRouteBodyToMetafields({ ...(payload || {}) });
+  const autoRouted = payload._auto_routed || null;
+  delete payload._auto_routed;   // don't emit as 'stripped'
   const out = {};
   const stripped = [];
   const metafieldsOut = {};   // 'namespace.key' → value (only allowlisted)
+  const imageAltsOut = [];    // [{imageId, alt}, ...] — routed to /update-image-alts after main push
   const raw = payload || {};
   for (const [k, v] of Object.entries(raw)) {
     if (k === 'metafields' && v && typeof v === 'object' && !Array.isArray(v)) {
-      // Nested metafields object: { 'custom.how_to_use': '...', ... }
       for (const [mkey, mval] of Object.entries(v)) {
         if (SHOPIFY_METAFIELD_ALLOWLIST[mkey]) metafieldsOut[mkey] = String(mval == null ? '' : mval);
         else stripped.push(`metafields.${mkey}`);
+      }
+    } else if (k === 'image_alts' && Array.isArray(v)) {
+      // Image alts: [{imageId, alt}, ...] — validate shape here; write via
+      // Shopify products/{pid}/images/{iid}.json PUT after main push.
+      for (const entry of v) {
+        const imageId = Number(entry?.imageId || entry?.id);
+        const alt = String(entry?.alt || '').slice(0, 512);
+        if (imageId && alt) imageAltsOut.push({ imageId, alt });
+        else stripped.push(`image_alts entry with missing imageId or alt`);
       }
     } else if (SHOPIFY_ALLOWED_FIELDS.has(k)) {
       out[k] = v;
@@ -171,7 +258,8 @@ function stripToShopifyAllowlist(payload) {
     }
   }
   if (Object.keys(metafieldsOut).length > 0) out.metafields = metafieldsOut;
-  return { safe: out, stripped };
+  if (imageAltsOut.length > 0) out.image_alts = imageAltsOut;
+  return { safe: out, stripped, autoRouted };
 }
 // Preflight validator — runs against the tier rubric BEFORE any Shopify write.
 // Returns {ok, critical: [], warn: [], stats}. Critical failures block the
@@ -2884,7 +2972,7 @@ const server = http.createServer(async (req, res) => {
     if (m === 'POST' && p === '/api/shopify/validate-patch') {
       const b = await readJson(req);
       if (!b.patch || typeof b.patch !== 'object') return send(res, 400, { ok: false, error: 'patch object required' });
-      const { safe, stripped } = stripToShopifyAllowlist(b.patch);
+      const { safe, stripped, autoRouted } = stripToShopifyAllowlist(b.patch);
       const preflight = validateShopifyPatch(safe, b.validationContext || {});
       return send(res, 200, { ok: true, preflight, stripped, safe });
     }
@@ -2894,7 +2982,7 @@ const server = http.createServer(async (req, res) => {
       if (!productId) return send(res, 400, { ok: false, error: 'productId required' });
       if (!b.patch || typeof b.patch !== 'object') return send(res, 400, { ok: false, error: 'patch object required' });
       if (b.confirm !== 'PUSH') return send(res, 400, { ok: false, error: "safety: send {confirm:'PUSH'} to proceed" });
-      const { safe, stripped } = stripToShopifyAllowlist(b.patch);
+      const { safe, stripped, autoRouted } = stripToShopifyAllowlist(b.patch);
       if (Object.keys(safe).length === 0) {
         return send(res, 400, { ok: false, error: 'no allowlisted fields in patch (all were stripped)', stripped });
       }
@@ -3085,6 +3173,23 @@ const server = http.createServer(async (req, res) => {
         // succeeded already. Surface individual failures in the response so
         // the client can show a warning banner.
       }
+      // Image alts — if Claude produced them, PUT each via the same
+      // /products/{pid}/images/{iid}.json endpoint the standalone
+      // /api/shopify/update-image-alts uses. Individual failures don't
+      // abort the whole push. Alt-text is a real ranking signal (Google
+      // Image Search + main-image ranking factor).
+      if (Array.isArray(safe.image_alts) && safe.image_alts.length > 0) {
+        const altResults = [];
+        for (const entry of safe.image_alts) {
+          const r = await shopifyRequest({
+            shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+            method: 'PUT', apiPath: `/admin/api/${apiVer}/products/${productId}/images/${entry.imageId}.json`,
+            body: { image: { id: entry.imageId, alt: entry.alt } },
+          }).catch(e => ({ ok: false, error: e.message }));
+          altResults.push({ imageId: entry.imageId, alt: entry.alt, ok: r.ok, error: r.ok ? null : r.error });
+        }
+        results.image_alts = altResults;
+      }
       // Record push history — one row per successful (or partial-success)
       // /update-product. Snapshot may be null if the pre-push fetch failed
       // — in that case there's no revert possible for this row, but we
@@ -3096,7 +3201,7 @@ const server = http.createServer(async (req, res) => {
           .run(productId, b.productUrl || null, b.sku || null, b.batchId || null, now(), b.pushedBy || null, JSON.stringify(snapshot || {}), JSON.stringify(safe));
         historyId = Number(hist.lastInsertRowid);
       } catch (e) { /* audit-only; do not fail the push */ }
-      return send(res, 200, { ok: true, productId, sent: safe, stripped, results, product: results.rest?.product || null, history_id: historyId, snapshot_captured: !!snapshot, snapshot_error: snapshotErr });
+      return send(res, 200, { ok: true, productId, sent: safe, stripped, results, product: results.rest?.product || null, history_id: historyId, snapshot_captured: !!snapshot, snapshot_error: snapshotErr, auto_routed: autoRouted });
     }
     // List push history for a product — powers the 'Revert' UI in the
     // Shopify modal. Returns most-recent first, with the fields we can
