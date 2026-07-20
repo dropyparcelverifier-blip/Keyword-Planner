@@ -4370,6 +4370,29 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('');
   L.push('**DO NOT** mention competitor names in the copy itself. Above is competitive intelligence — never write "unlike Amazon" or "better than X" in the actual `body_html`.');
   L.push('');
+  // ── Competitive review landscape: aggregate Amazon rating + review counts
+  // across every keyword we scraped Amazon results for. Data is on the
+  // keyword rows: amazon_rating (0-5) + amazon_reviews (int). Skipped
+  // entirely if we have no Amazon data — nothing worse than an empty section.
+  const amzRows = scored.filter(r => Number(r.amazon_rating) > 0 && Number(r.amazon_reviews) > 0);
+  if (amzRows.length >= 3) {
+    const ratings = amzRows.map(r => Number(r.amazon_rating));
+    const reviewCounts = amzRows.map(r => Number(r.amazon_reviews));
+    const avgRating = ratings.reduce((a, b) => a + b, 0) / ratings.length;
+    const medianReviews = [...reviewCounts].sort((a, b) => a - b)[Math.floor(reviewCounts.length / 2)];
+    const maxReviews = Math.max(...reviewCounts);
+    L.push('## COMPETITIVE REVIEW LANDSCAPE (what the ranking bar looks like on Amazon.in)');
+    L.push(`Across ${amzRows.length} keyword SERPs where an Amazon.in listing appeared:`);
+    L.push(`- **Average competitor rating**: ${avgRating.toFixed(1)}★ (out of 5)`);
+    L.push(`- **Median competitor review count**: ${medianReviews.toLocaleString('en-IN')} reviews`);
+    L.push(`- **Top-review competitor**: ${maxReviews.toLocaleString('en-IN')} reviews on the most-reviewed Amazon listing we saw`);
+    L.push('');
+    L.push('**How to use this** (NOT competitor-shaming, NOT for `body_html`):');
+    L.push(`- This is the **social-proof bar** buyers see on competitor pages. Do NOT invent our review counts to match it — only use \`AggregateRating\` if REAL review data is supplied in the current-listing block below.`);
+    L.push(`- If our real review count is well below the median, the copy's job is to **compensate**: richer content, deeper FAQ, more ingredient depth, more India-specific detail. Users bounce to Amazon primarily on missing trust signals — thin content is one of them.`);
+    L.push(`- If our real review count is at or above the median, lean into it: the \`AggregateRating\` in schema will earn stars in the SERP snippet and beat competitors on CTR even at lower positions.`);
+    L.push('');
+  }
   L.push('## RANKING PLAYBOOK (apply to every field)');
   L.push('1. **Title (highest signal)** — primary keyword literally in the first 3 words. Then descriptor + benefit. e.g. `Aquaphor Lip Repair Balm 10g — Cracked Lip Overnight Fix, Ships Pan-India`. 60-70 chars. NOT `Buy Aquaphor Balm` (weak, generic).');
   L.push('2. **Handle** — kebab-case slug MUST contain the primary keyword. If the current handle is generic (e.g. `product-1234`), replace it. If it already contains the primary keyword, KEEP IT (changing loses backlinks + existing SEO).');
