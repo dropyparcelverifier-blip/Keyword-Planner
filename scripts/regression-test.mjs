@@ -2521,6 +2521,14 @@ async function run() {
   assert(appJs.body.includes('data-revert-history-id'),        'HIST-UI.4 per-row revert buttons wired');
   assert(appJs.body.includes("no snapshot — can't revert"), 'HIST-UI.5 explains rows without snapshots');
   assert(appJs.body.includes('REVERTED'),                      'HIST-UI.6 already-reverted rows show status chip');
+  // Metafield definition resolver — writes to actual namespace/key by
+  // matching display names, not orphaned custom.* keys.
+  assert(srvFull.includes('SHOPIFY_METAFIELD_ALIASES'),        'MF-RESOLVE.1 alias table with display names');
+  assert(srvFull.includes('resolveMetafieldTarget'),           'MF-RESOLVE.2 resolver function');
+  assert(srvFull.includes('metafieldDefinitions(first: 200, ownerType: PRODUCT)'), 'MF-RESOLVE.3 fetches definitions via GraphQL');
+  assert(srvFull.includes('resolved_via'),                     'MF-RESOLVE.4 response reports how each metafield was resolved');
+  assert(srvFull.includes('metafield_definitions'),            'MF-RESOLVE.5 exposes definitions in get-product for prompt');
+  assert(appJs.body.includes('FALLBACK — no matching definition'), 'MF-RESOLVE.6 client shows fallback warning when no definition matches');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.

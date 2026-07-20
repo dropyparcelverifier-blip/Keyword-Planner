@@ -5355,8 +5355,21 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
         const mfFailed = mfResults.filter(m => !m.ok);
         const mfNote = sentMetafields.length > 0
           ? ` · Metafields: ${sentMetafields.map(k => {
-              const failure = mfFailed.find(f => f.key === k);
-              return failure ? `<code style="color:var(--danger);" title="${esc(JSON.stringify(failure.error))}">${k} ✗</code>` : `<code style="color:var(--success);">${k} ✓</code>`;
+              // Result rows now come back as {alias, wrote_to, resolved_via, ok, error}.
+              const result = mfResults.find(f => f.alias === k || f.key === k);
+              if (!result) return `<code>${k} ?</code>`;
+              const wroteTo = result.wrote_to || result.key;
+              const via = result.resolved_via;
+              const viaLabel = via === 'display-name' ? 'matched by display name'
+                              : via === 'exact-key'    ? 'exact-key match'
+                              : via === 'fallback-custom' ? '⚠ FALLBACK — no matching definition on your store; wrote to custom.* which the theme may not read'
+                              : via || '';
+              if (result.ok) {
+                const warn = via === 'fallback-custom' ? ' ⚠' : '';
+                return `<code style="color:${via === 'fallback-custom' ? 'var(--warn)' : 'var(--success)'};" title="Wrote to ${esc(wroteTo)} · ${esc(viaLabel)}">${wroteTo}${warn} ✓</code>`;
+              } else {
+                return `<code style="color:var(--danger);" title="${esc(JSON.stringify(result.error))}">${wroteTo} ✗</code>`;
+              }
             }).join(', ')}`
           : '';
         $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${sentKeys.map(k => `<code>${k}</code>`).join(', ') || '(none)'}${mfNote}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}${snapshotNote}</div>`;
