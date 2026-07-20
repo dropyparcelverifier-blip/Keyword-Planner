@@ -70,18 +70,50 @@ const SHOPIFY_ALLOWED_FIELDS = new Set([
 const SHOPIFY_GRAPHQL_ONLY_FIELDS = new Set(['seo_title', 'seo_description', 'product_category']);
 // Custom metafields the theme's product page reads to populate its
 // separate tabs (Description / How To Use / Ingredients) + the FAQ block.
-// Without these, everything Claude writes lands in body_html only and the
-// theme's dedicated tabs render EMPTY on the product page. Each entry
-// is <namespace>.<key> in Shopify's metafield naming. Type defaults to
-// multi_line_text_field which suits long-form content; bullet_points is
-// a rich_text_field so line-per-bullet renders cleanly.
-const SHOPIFY_METAFIELD_ALLOWLIST = {
-  'custom.how_to_use':    { type: 'multi_line_text_field' },
-  'custom.ingredients':   { type: 'multi_line_text_field' },
-  'custom.faq_q_1':       { type: 'single_line_text_field' },
-  'custom.faq_a_1':       { type: 'multi_line_text_field' },
-  'custom.bullet_points': { type: 'multi_line_text_field' },
+//
+// The keys below are ALIASES that Claude produces (stable, human-readable).
+// The ACTUAL namespace.key on any given store is discovered at push time
+// from the store's metafield_definitions (fetched in get-product). We
+// match by DISPLAY NAME first (case-insensitive, hyphen-insensitive),
+// then by the alias key itself as a fallback ('custom.how_to_use' etc).
+//
+// Why aliases and not fixed namespace.key: different stores use different
+// namespaces (custom / product / dropy / a custom app namespace). We were
+// writing to 'custom.*' regardless — creating orphan metafields no theme
+// read. Definition-based resolution fixes that. Rules for matching:
+//   1. Alias exactly matches a definition's namespace.key → use it.
+//   2. Alias matches a definition's `name` (spaces normalized) → use it.
+//   3. Otherwise fall back to writing at the alias's `custom.*` key
+//      (existing behavior — may still orphan on stores without matching
+//      definitions, but at least the operator sees the metafields listed
+//      in Shopify Admin and can wire them up manually).
+const SHOPIFY_METAFIELD_ALIASES = {
+  'custom.how_to_use':    { displayNames: ['how to use', 'how-to-use', 'how_to_use', 'usage'],           type: 'multi_line_text_field' },
+  'custom.ingredients':   { displayNames: ['ingredients', 'ingredient list', 'composition'],              type: 'multi_line_text_field' },
+  'custom.faq_q_1':       { displayNames: ['f&q question 1', 'faq question 1', 'faq_q_1', 'faq q 1'],   type: 'single_line_text_field' },
+  'custom.faq_a_1':       { displayNames: ['f&q answer 1', 'faq answer 1', 'faq_a_1', 'faq a 1'],       type: 'multi_line_text_field' },
+  'custom.bullet_points': { displayNames: ['bullet points', 'bullet_points', 'bullets', 'key features'], type: 'multi_line_text_field' },
 };
+// Legacy shape kept for the client-side allowlist echo (unchanged public API).
+const SHOPIFY_METAFIELD_ALLOWLIST = Object.fromEntries(
+  Object.entries(SHOPIFY_METAFIELD_ALIASES).map(([k, v]) => [k, { type: v.type }])
+);
+// Resolver: given an alias and the fetched definitions list, return the
+// {namespace, key, type} to actually POST to. Definition-based match wins.
+function resolveMetafieldTarget(alias, definitions = []) {
+  const spec = SHOPIFY_METAFIELD_ALIASES[alias];
+  if (!spec) return null;
+  const [defaultNs, defaultKey] = alias.split('.');
+  const norm = s => String(s || '').toLowerCase().replace(/[\s_-]+/g, ' ').trim();
+  // 1. Exact namespace.key match against definitions.
+  const exact = definitions.find(d => `${d.namespace}.${d.key}` === alias);
+  if (exact) return { namespace: exact.namespace, key: exact.key, type: exact.type || spec.type, resolvedVia: 'exact-key' };
+  // 2. Display name match.
+  const byName = definitions.find(d => spec.displayNames.some(n => norm(d.name) === norm(n)));
+  if (byName) return { namespace: byName.namespace, key: byName.key, type: byName.type || spec.type, resolvedVia: 'display-name' };
+  // 3. Fallback to hardcoded custom.* (previous behavior).
+  return { namespace: defaultNs, key: defaultKey, type: spec.type, resolvedVia: 'fallback-custom' };
+}
 // Field-impact hierarchy (surfaces to the UI + prompt). Ordered by ranking/
 // visibility impact — Claude is told to spend the most effort on the top
 // items, and the manager UI shows the same order in previews.
@@ -2619,7 +2651,7 @@ const server = http.createServer(async (req, res) => {
       // Metafields carry the review-app data (Judge.me / Loox / Yotpo / native).
       // Failing either request is soft — we still return the base product so the
       // prompt can render; the reviews block just stays empty.
-      const [mfRes, gqlRes] = await Promise.all([
+      const [mfRes, gqlRes, defsRes] = await Promise.all([
         shopifyRequest({
           shopDomain: shop.shopDomain, adminToken: shop.adminToken,
           method: 'GET', apiPath: `/admin/api/${apiVer}/products/${prod.id}/metafields.json`,
@@ -2629,8 +2661,25 @@ const server = http.createServer(async (req, res) => {
           method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`,
           body: { query: `{ product(id: "gid://shopify/Product/${prod.id}") { productCategory { productTaxonomyNode { id fullName name } } seo { title description } } }` },
         }).catch(() => ({ ok: false })),
+        // Third parallel fetch: metafield DEFINITIONS for Products.
+        // Definitions tell us the ACTUAL namespace + key that each display-
+        // name (e.g. "How To Use", "Ingredients", "Bullet Points") lives
+        // at on THIS store — we assumed 'custom.*' before and wrote to
+        // orphan metafields that the theme never read. This resolves that.
+        shopifyRequest({
+          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+          method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`,
+          body: { query: `{ metafieldDefinitions(first: 200, ownerType: PRODUCT) { edges { node { namespace key name type { name } description } } } }` },
+        }).catch(() => ({ ok: false })),
       ]);
       const metafields = mfRes.ok ? (mfRes.data?.metafields || []) : [];
+      // Metafield definitions — { namespace, key, name, type }.
+      const metafieldDefinitions = defsRes.ok
+        ? (defsRes.data?.data?.metafieldDefinitions?.edges || []).map(e => ({
+            namespace: e.node.namespace, key: e.node.key, name: e.node.name,
+            type: e.node.type?.name || null, description: e.node.description || null,
+          }))
+        : [];
       // Extract review signals from common namespaces used by the top India-
       // supported review apps. Never fabricate — only emit numbers we found.
       const reviews = extractReviewSignals(metafields);
@@ -2702,6 +2751,11 @@ const server = http.createServer(async (req, res) => {
           // these accidentally via bulk-edit apps.
           problem_tags: (String(prod.tags || '').split(/\s*,\s*/).filter(Boolean))
             .filter(t => /^(no-google|noindex|no-index|no-search|nosearch|no_google|hidden)$/i.test(t)),
+          // ALL metafield definitions on this store, with the display name
+          // used to map from Claude's aliases (e.g. 'How To Use') to the
+          // actual namespace/key the theme reads. Without this, previous
+          // pushes wrote to custom.* which the theme ignored.
+          metafield_definitions: metafieldDefinitions,
         },
       });
     }
@@ -2867,20 +2921,42 @@ const server = http.createServer(async (req, res) => {
           return send(res, 502, { ok: false, error: `Shopify GraphQL: ${JSON.stringify(results.graphql.error)}`, stripped, sent: safe, results, note: 'REST fields written successfully; only modern SEO/category failed' });
         }
       }
-      // Write custom metafields. Shopify's metafields.json API upserts:
-      // POST creates OR updates by namespace+key. One call per metafield —
-      // fine since our allowlist is ≤ 5 keys.
+      // Write custom metafields. Resolve alias → actual namespace/key via
+      // the store's metafield definitions. Fetches definitions first (cheap,
+      // one GraphQL call) so we write to the SAME keys the theme reads
+      // from — instead of orphaning content at custom.* keys no theme sees.
       if (Object.keys(metafieldsToWrite).length > 0) {
+        // Fetch definitions for THIS store (also fetched in get-product but
+        // that call may be stale between prompt-build and push).
+        const defsResPush = await shopifyRequest({
+          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+          method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`,
+          body: { query: `{ metafieldDefinitions(first: 200, ownerType: PRODUCT) { edges { node { namespace key name type { name } } } } }` },
+        }).catch(() => ({ ok: false }));
+        const definitionsPush = defsResPush.ok
+          ? (defsResPush.data?.data?.metafieldDefinitions?.edges || []).map(e => ({
+              namespace: e.node.namespace, key: e.node.key, name: e.node.name, type: e.node.type?.name || null,
+            }))
+          : [];
         const mfResults = [];
-        for (const [mkey, mval] of Object.entries(metafieldsToWrite)) {
-          const [ns, key] = mkey.split('.');
-          const meta = SHOPIFY_METAFIELD_ALLOWLIST[mkey] || { type: 'multi_line_text_field' };
+        for (const [alias, mval] of Object.entries(metafieldsToWrite)) {
+          const target = resolveMetafieldTarget(alias, definitionsPush);
+          if (!target) {
+            mfResults.push({ alias, ok: false, error: 'no resolver for alias', resolved_via: null });
+            continue;
+          }
           const r = await shopifyRequest({
             shopDomain: shop.shopDomain, adminToken: shop.adminToken,
             method: 'POST', apiPath: `/admin/api/${apiVer}/products/${productId}/metafields.json`,
-            body: { metafield: { namespace: ns, key: key, value: String(mval), type: meta.type } },
+            body: { metafield: { namespace: target.namespace, key: target.key, value: String(mval), type: target.type } },
           }).catch(e => ({ ok: false, error: e.message }));
-          mfResults.push({ key: mkey, ok: r.ok, status: r.status, error: r.ok ? null : r.error });
+          mfResults.push({
+            alias,
+            wrote_to: `${target.namespace}.${target.key}`,
+            resolved_via: target.resolvedVia,
+            ok: r.ok, status: r.status,
+            error: r.ok ? null : r.error,
+          });
         }
         results.metafields = mfResults;
         // Don't fail the whole push on metafield errors — product core fields
