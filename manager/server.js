@@ -68,6 +68,20 @@ const SHOPIFY_ALLOWED_FIELDS = new Set([
 // REST doesn't accept these; GraphQL does. Order: REST first (title/body/tags/
 // etc), then supplementary GraphQL mutation for anything in this set.
 const SHOPIFY_GRAPHQL_ONLY_FIELDS = new Set(['seo_title', 'seo_description', 'product_category']);
+// Custom metafields the theme's product page reads to populate its
+// separate tabs (Description / How To Use / Ingredients) + the FAQ block.
+// Without these, everything Claude writes lands in body_html only and the
+// theme's dedicated tabs render EMPTY on the product page. Each entry
+// is <namespace>.<key> in Shopify's metafield naming. Type defaults to
+// multi_line_text_field which suits long-form content; bullet_points is
+// a rich_text_field so line-per-bullet renders cleanly.
+const SHOPIFY_METAFIELD_ALLOWLIST = {
+  'custom.how_to_use':    { type: 'multi_line_text_field' },
+  'custom.ingredients':   { type: 'multi_line_text_field' },
+  'custom.faq_q_1':       { type: 'single_line_text_field' },
+  'custom.faq_a_1':       { type: 'multi_line_text_field' },
+  'custom.bullet_points': { type: 'multi_line_text_field' },
+};
 // Field-impact hierarchy (surfaces to the UI + prompt). Ordered by ranking/
 // visibility impact — Claude is told to spend the most effort on the top
 // items, and the manager UI shows the same order in previews.
@@ -87,10 +101,22 @@ const SHOPIFY_FIELD_IMPACT = [
 function stripToShopifyAllowlist(payload) {
   const out = {};
   const stripped = [];
-  for (const [k, v] of Object.entries(payload || {})) {
-    if (SHOPIFY_ALLOWED_FIELDS.has(k)) out[k] = v;
-    else stripped.push(k);
+  const metafieldsOut = {};   // 'namespace.key' → value (only allowlisted)
+  const raw = payload || {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (k === 'metafields' && v && typeof v === 'object' && !Array.isArray(v)) {
+      // Nested metafields object: { 'custom.how_to_use': '...', ... }
+      for (const [mkey, mval] of Object.entries(v)) {
+        if (SHOPIFY_METAFIELD_ALLOWLIST[mkey]) metafieldsOut[mkey] = String(mval == null ? '' : mval);
+        else stripped.push(`metafields.${mkey}`);
+      }
+    } else if (SHOPIFY_ALLOWED_FIELDS.has(k)) {
+      out[k] = v;
+    } else {
+      stripped.push(k);
+    }
   }
+  if (Object.keys(metafieldsOut).length > 0) out.metafields = metafieldsOut;
   return { safe: out, stripped };
 }
 // Preflight validator — runs against the tier rubric BEFORE any Shopify write.
@@ -2768,16 +2794,44 @@ const server = http.createServer(async (req, res) => {
         }
       } catch (e) { snapshotErr = e.message; }
       // Split the payload: REST for legacy fields, GraphQL productUpdate for
-      // modern fields (seo object, productCategory). Both run — never one
-      // instead of the other — so the caller gets full coverage regardless
-      // of which path a given field lives on.
+      // modern fields (seo object, productCategory). Metafields are a THIRD
+      // path — POST /products/{id}/metafields.json per key. All three run;
+      // caller gets full coverage regardless of which path a given field
+      // lives on.
       const restPayload = {};
       const gqlPayload = {};
+      const metafieldsToWrite = safe.metafields || {};
       for (const [k, v] of Object.entries(safe)) {
+        if (k === 'metafields') continue;
         if (SHOPIFY_GRAPHQL_ONLY_FIELDS.has(k)) gqlPayload[k] = v;
         else restPayload[k] = v;
       }
-      const results = { rest: null, graphql: null };
+      const results = { rest: null, graphql: null, metafields: null };
+      // Snapshot the current metafield values BEFORE overwriting so revert
+      // can restore. Fetches all product metafields (already cheap since
+      // we may have fetched them for the snapshot above — but this endpoint
+      // is separate from the pre-push snapshot flow, which fetched product
+      // fields not metafields). One call, then filter to what we're writing.
+      if (Object.keys(metafieldsToWrite).length > 0 && snapshot) {
+        try {
+          const mfList = await shopifyRequest({
+            shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+            method: 'GET', apiPath: `/admin/api/${apiVer}/products/${productId}/metafields.json`,
+          });
+          if (mfList.ok) {
+            const existingMetas = (mfList.data?.metafields || []);
+            snapshot.metafields = {};
+            for (const mkey of Object.keys(metafieldsToWrite)) {
+              const [ns, key] = mkey.split('.');
+              const found = existingMetas.find(mf => mf.namespace === ns && mf.key === key);
+              // Save {value, id?} — id needed to update-in-place instead of
+              // duplicating. If no existing metafield, snapshot empty string
+              // so revert clears the field (which is what 'before' was).
+              snapshot.metafields[mkey] = { value: found?.value ?? '', id: found?.id ?? null, type: found?.type ?? null };
+            }
+          }
+        } catch { /* soft-fail: revert for metafields simply won't be possible for this push */ }
+      }
       // REST update (title, body_html, tags, product_type, vendor, handle,
       // legacy SEO metafields). Skipped if only GraphQL-only fields were sent.
       if (Object.keys(restPayload).length > 0) {
@@ -2812,6 +2866,26 @@ const server = http.createServer(async (req, res) => {
           // decide (retry the GraphQL half, or accept the REST-only write).
           return send(res, 502, { ok: false, error: `Shopify GraphQL: ${JSON.stringify(results.graphql.error)}`, stripped, sent: safe, results, note: 'REST fields written successfully; only modern SEO/category failed' });
         }
+      }
+      // Write custom metafields. Shopify's metafields.json API upserts:
+      // POST creates OR updates by namespace+key. One call per metafield —
+      // fine since our allowlist is ≤ 5 keys.
+      if (Object.keys(metafieldsToWrite).length > 0) {
+        const mfResults = [];
+        for (const [mkey, mval] of Object.entries(metafieldsToWrite)) {
+          const [ns, key] = mkey.split('.');
+          const meta = SHOPIFY_METAFIELD_ALLOWLIST[mkey] || { type: 'multi_line_text_field' };
+          const r = await shopifyRequest({
+            shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+            method: 'POST', apiPath: `/admin/api/${apiVer}/products/${productId}/metafields.json`,
+            body: { metafield: { namespace: ns, key: key, value: String(mval), type: meta.type } },
+          }).catch(e => ({ ok: false, error: e.message }));
+          mfResults.push({ key: mkey, ok: r.ok, status: r.status, error: r.ok ? null : r.error });
+        }
+        results.metafields = mfResults;
+        // Don't fail the whole push on metafield errors — product core fields
+        // succeeded already. Surface individual failures in the response so
+        // the client can show a warning banner.
       }
       // Record push history — one row per successful (or partial-success)
       // /update-product. Snapshot may be null if the pre-push fetch failed
@@ -2897,9 +2971,24 @@ const server = http.createServer(async (req, res) => {
         const userErrs = g.data?.data?.productUpdate?.userErrors || [];
         if (!g.ok || userErrs.length > 0) return send(res, 502, { ok: false, error: `Shopify GraphQL revert failed: ${JSON.stringify(userErrs.length > 0 ? userErrs : g.error)}`, restReverted: true });
       }
+      // Restore metafields too — snapshot.metafields is {'ns.key': {value, id, type}}.
+      const metafieldsRestored = [];
+      if (snapshot.metafields && typeof snapshot.metafields === 'object') {
+        for (const [mkey, prev] of Object.entries(snapshot.metafields)) {
+          const [ns, key] = mkey.split('.');
+          const type = prev?.type || SHOPIFY_METAFIELD_ALLOWLIST[mkey]?.type || 'multi_line_text_field';
+          // POST upserts (Shopify treats POST with existing namespace+key as update).
+          const r = await shopifyRequest({
+            shopDomain: shop2.shopDomain, adminToken: shop2.adminToken,
+            method: 'POST', apiPath: `/admin/api/${apiVer2}/products/${row.product_id}/metafields.json`,
+            body: { metafield: { namespace: ns, key: key, value: String(prev?.value ?? ''), type } },
+          }).catch(e => ({ ok: false, error: e.message }));
+          metafieldsRestored.push({ key: mkey, ok: r.ok, error: r.ok ? null : r.error });
+        }
+      }
       // Mark original row as reverted so it can't be double-reverted.
       db.prepare(`UPDATE shopify_push_history SET reverted_at = ? WHERE id = ?`).run(now(), historyId);
-      return send(res, 200, { ok: true, revertedHistoryId: historyId, restoredFields: Object.keys(safeSnap), strippedFields: strippedSnap });
+      return send(res, 200, { ok: true, revertedHistoryId: historyId, restoredFields: Object.keys(safeSnap), restoredMetafields: metafieldsRestored, strippedFields: strippedSnap });
     }
     // Bulk-update image alt-text on a product. Deterministic template — does
     // NOT need Claude. Takes the current product images + a keyword-rich
