@@ -2451,10 +2451,22 @@ async function run() {
   // Shopify modal: 3-step quick-nav strip at top of modal body so users
   // don't get lost hunting for the paste-back textarea after expanding
   // Current-listing / Field-impact sections.
-  assert(appJs.body.includes("1️⃣ Prompt to copy"),           'MODAL-NAV.1 step 1 quick-nav button');
-  assert(appJs.body.includes("2️⃣ Paste Claude's response"),  'MODAL-NAV.2 step 2 quick-nav button');
-  assert(appJs.body.includes("3️⃣ Preview + Push"),           'MODAL-NAV.3 step 3 quick-nav button');
-  assert(appJs.body.includes("shopifyJsonInput')?.scrollIntoView"), 'MODAL-NAV.4 step 2 scrolls to + focuses textarea');
+  assert(appJs.body.includes("shopifyStep1Btn"),              'MODAL-NAV.1 step 1 button element');
+  assert(appJs.body.includes("shopifyStep2Btn"),              'MODAL-NAV.2 step 2 button element');
+  assert(appJs.body.includes("shopifyStep3Btn"),              'MODAL-NAV.3 step 3 button element');
+  assert(/shopifyStep1Btn.*?copyToClipboard/s.test(appJs.body), 'MODAL-NAV.4 step 1 handler copies prompt');
+  assert(/shopifyStep1Btn.*?claude\.ai\/new/s.test(appJs.body), 'MODAL-NAV.5 step 1 handler opens Claude');
+  assert(/shopifyStep2Btn.*?scrollIntoView/s.test(appJs.body), 'MODAL-NAV.6 step 2 handler scrolls');
+  assert(/shopifyStep2Btn.*?_looksLikeShopifyClaudeResponse/s.test(appJs.body), 'MODAL-NAV.7 step 2 handler tries clipboard auto-fill');
+  assert(/shopifyStep3Btn.*?shopifyPreviewBtn.*?click/s.test(appJs.body), 'MODAL-NAV.8 step 3 handler triggers preview click');
+  // Diff view: before/after per field + summary counts of NEW / CHANGED / SAME.
+  assert(appJs.body.includes('currentValueOf'),               'DIFF.1 current-value lookup helper');
+  assert(appJs.body.includes("'NEW'"),                        'DIFF.2 NEW label present');
+  assert(appJs.body.includes("'CHANGED'"),                    'DIFF.3 CHANGED label present');
+  assert(appJs.body.includes("'SAME'"),                       'DIFF.4 SAME label present');
+  assert(appJs.body.includes('newCount'),                     'DIFF.5 diff summary counts NEW');
+  assert(appJs.body.includes('changedCount'),                 'DIFF.6 diff summary counts CHANGED');
+  assert(appJs.body.includes('chars, ${sign}'),               'DIFF.7 char-count delta shown per field');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
