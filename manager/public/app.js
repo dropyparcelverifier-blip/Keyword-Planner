@@ -4833,7 +4833,80 @@ function renderShopifyModalBody({ currentProduct, productUrl, prompt, impactRows
     <div id="shopifyPreviewBox" style="margin-top: 12px;"></div>
   `;
 }
+// Global-ish flag: the modal is currently open + waiting for Claude's
+// response. Set true when openShopifyModal fires, false when the modal
+// closes or after a successful auto-paste (so we don't keep triggering).
+// Watched by the visibilitychange listener below.
+let _shopifyAutopasteArmed = false;
+
+// Heuristic: does this clipboard string plausibly contain Claude's
+// Shopify-update response? True if it has a ```json fence OR is valid
+// JSON OR contains any of our allowlisted key names (in the shape a
+// Claude response would use, not just a stray mention).
+function _looksLikeShopifyClaudeResponse(text, allowlist) {
+  if (!text || text.length < 10) return false;
+  if (text.length > 200_000) return false;   // sanity cap — Claude replies aren't 200KB
+  if (/```(?:json)?\s*\n[\s\S]*?```/i.test(text)) return true;
+  // Try direct JSON parse for the case where Claude was told 'no fences'.
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try { const j = JSON.parse(trimmed); if (j && typeof j === 'object') return true; } catch {}
+  }
+  // Last resort: string mentions >=2 allowlist keys with a JSON-ish shape.
+  // Rules out plain product names / SKUs on the clipboard.
+  const keyHits = (allowlist || []).filter(k => new RegExp(`"${k}"\\s*:`, 'i').test(text)).length;
+  return keyHits >= 2;
+}
+
+// Fires when the user returns to the manager tab. If (a) the Shopify
+// modal is open, (b) the paste-back textarea is still empty, and
+// (c) the clipboard content looks like a Claude response, auto-fill
+// the textarea and click Preview. Otherwise silently no-op. Requires
+// clipboard-read permission — browsers auto-prompt on first use.
+async function _tryAutopasteFromClipboard(allowlist) {
+  if (!_shopifyAutopasteArmed) return;
+  if ($('shopifyModal')?.style.display !== 'flex') return;
+  const ta = $('shopifyJsonInput');
+  if (!ta || ta.value.trim().length > 0) return;
+  let text = '';
+  try { text = await navigator.clipboard.readText(); }
+  catch {
+    // Permission denied / not granted — degrade silently. User can still
+    // manually Ctrl+V. Show a one-time hint the first time it happens.
+    if (!localStorage.getItem('adbrainClipboardHintShown')) {
+      toast('Grant clipboard permission (browser will ask) so we can auto-paste Claude responses when you return to this tab.', 'info', { title: '💡 Clipboard permission' });
+      localStorage.setItem('adbrainClipboardHintShown', '1');
+    }
+    return;
+  }
+  if (!_looksLikeShopifyClaudeResponse(text, allowlist)) return;
+  ta.value = text;
+  _shopifyAutopasteArmed = false;   // disarm — don't auto-paste again
+  // Auto-click Preview so the user sees the parsed fields immediately.
+  $('shopifyPreviewBtn')?.click();
+  toast('Auto-pasted Claude response from clipboard + previewed. Review below before pushing.', 'ok', { title: '📋 Auto-pasted' });
+}
+
+// One-time global listener — swaps between arms/no-arms; the arm state
+// itself gates auto-paste, so this is safe to install once.
+if (typeof document !== 'undefined' && !window._shopifyAutopasteListenerInstalled) {
+  window._shopifyAutopasteListenerInstalled = true;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    // Read the allowlist off the last-armed modal's Preview button dataset
+    // — set below when the modal opens. Falls back to a hardcoded shortlist
+    // if unset (shouldn't happen but keeps the helper safe).
+    const list = window._shopifyLastAllowlist || ['title', 'body_html', 'tags', 'seo_title', 'seo_description', 'handle', 'vendor', 'product_type'];
+    _tryAutopasteFromClipboard(list);
+  });
+}
+
 function wireShopifyModalHandlers(productId, allowlist, validationContext = {}) {
+  // Arm auto-paste for THIS modal open. Stash the allowlist globally
+  // so the visibilitychange listener (installed once above) can consult
+  // it without needing the modal-scoped closure.
+  _shopifyAutopasteArmed = true;
+  window._shopifyLastAllowlist = allowlist;
   $('shopifyCopyPromptBtn')?.addEventListener('click', async () => {
     const t = $('shopifyPromptText').value;
     if (await copyToClipboard(t)) toast('Prompt copied — paste into Claude.', 'ok', { title: 'Copied' });
@@ -6852,14 +6925,20 @@ function openKeywordDetail(row) {
   body.innerHTML = quickLinks + groups + extraBlock;
   modal.style.display = 'flex';
 }
-// Backdrop / Close-button close both modals.
+// Backdrop / Close-button close both modals. Also disarms Shopify
+// auto-paste so a stale return-to-tab visibility event doesn't try to
+// paste into a modal that's no longer open.
 document.addEventListener('click', (e) => {
   if (e.target?.dataset?.closeModal) {
     document.querySelectorAll('.modal-root').forEach(m => m.style.display = 'none');
+    _shopifyAutopasteArmed = false;
   }
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') document.querySelectorAll('.modal-root').forEach(m => m.style.display = 'none');
+  if (e.key === 'Escape') {
+    document.querySelectorAll('.modal-root').forEach(m => m.style.display = 'none');
+    _shopifyAutopasteArmed = false;
+  }
 });
 
 // ─────────── Boot ───────────
