@@ -4711,15 +4711,40 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   } else {
     L.push(`- **Current Product category** (Standard Taxonomy): (unset — **REAL SEO GAP**. Pick the best-fit node from Shopify's Standard Product Taxonomy and emit its \`gid://shopify/ProductTaxonomyNode/N\` id in \`product_category\`. E.g. skincare = \`gid://shopify/ProductTaxonomyNode/1085\` (Health & Beauty > Personal Care > Cosmetics > Skin Care). Guess conservatively — a wrong node ID is worse than none, so if unsure, omit the field.)`);
   }
-  // Review data — feeds the conditional AggregateRating schema. If we have
-  // real numbers, Claude MUST emit AggregateRating using them (nothing else).
-  // If empty, Claude MUST skip AggregateRating entirely.
+  // Review data — feeds the conditional AggregateRating schema. Two sources:
+  //   1. Review-app metafields (Judge.me / Loox / Yotpo) → currentProduct.reviews
+  //   2. Store's own 'Product rating' + 'Product rating count' metafields
+  //      (dropy uses these) → currentProduct.signals.rating / rating_count
+  // Either source is authoritative — never fabricate.
+  const sig = currentProduct.signals || {};
+  const hasStoreRating = (typeof sig.rating === 'number' && sig.rating > 0);
   if (currentProduct.reviews?.hasReviews) {
     L.push(`- **Reviews** (source: \`${currentProduct.reviews.source}\`): ${currentProduct.reviews.rating}★ · ${currentProduct.reviews.count} reviews — **USE THESE NUMBERS VERBATIM** in \`AggregateRating\` schema. Do NOT round, adjust, or invent additional metadata.`);
+  } else if (hasStoreRating) {
+    L.push(`- **Reviews** (source: store metafields Product rating + Product rating count): **${sig.rating}★** · **${sig.rating_count || 0}** reviews — **USE THESE NUMBERS VERBATIM** in \`AggregateRating\` schema. Do NOT round, adjust, or invent additional metadata.`);
   } else if (currentProduct.metafield_namespaces?.length) {
     L.push(`- **Reviews**: no rating found in metafields (namespaces present: ${currentProduct.metafield_namespaces.join(', ')}). **SKIP \`AggregateRating\` schema entirely** — do not invent a rating.`);
   } else {
     L.push(`- **Reviews**: no review app detected on this product. **SKIP \`AggregateRating\` schema entirely** — do not invent a rating.`);
+  }
+  // Additional signals from store metafields — Claude uses these as CONTEXT
+  // to shape copy (not to write). Skipped if empty.
+  const contextLines = [];
+  if (typeof sig.bought_past_month === 'number' && sig.bought_past_month > 0) {
+    contextLines.push(`- **Bought past month**: **${sig.bought_past_month}** units sold in the last 30 days${sig.bought_past_month >= 20 ? ' — genuine social-proof signal. Mention "trending" / "popular" in copy, and tag "bestseller" if not already there.' : ' — light demand. Don\'t emphasize popularity in copy.'}`);
+  }
+  if (sig.best_seller) contextLines.push(`- **Best-seller flag** is set to \`${sig.best_seller}\` — include "best seller" or "popular" phrasing in body_html + tags.`);
+  if (sig.department) contextLines.push(`- **Store department**: \`${sig.department}\` — currently populated. If you produce a new value for \`custom.department\`, keep it aligned or match the top research theme.`);
+  if (Array.isArray(sig.current_highlights) && sig.current_highlights.length > 0) {
+    contextLines.push(`- **Current highlights** (Highlight 1/2/3 metafields, ${sig.current_highlights.length} set): ${sig.current_highlights.map(h => `"${h}"`).join(', ')} — either keep verbatim or improve (short punchy phrases like "USA Import", "Pan-India COD", "30-Day Returns" — max ~30 chars each).`);
+  }
+  if (sig.brand_collection)   contextLines.push(`- **Brand Collection** metafield populated (\`${String(sig.brand_collection).slice(0, 60)}\`) — link to it from the "Related on dropy.in" section in body_html.`);
+  if (sig.similar_collection) contextLines.push(`- **Similar Products Collection** metafield populated — link to it from "Related on dropy.in".`);
+  if (sig.no_index_metafield) contextLines.push(`- ⚠ **SEO No-index metafield is TRUE** — this product is de-indexed from Google. Your copy improvements have zero organic SEO impact until this is toggled OFF in Shopify Admin.`);
+  if (contextLines.length > 0) {
+    L.push('');
+    L.push('**Store signals** (read-only context — shape copy accordingly):');
+    contextLines.forEach(line => L.push(line));
   }
   L.push('');
   L.push('**Current body_html** (may be blank / poor — this is what we\'re replacing):');
@@ -4815,11 +4840,23 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('  "metafields_global_description_tag": "same as seo_description — legacy metafield for REST compatibility",');
   L.push('  "product_category": "gid://shopify/ProductTaxonomyNode/N — Standard Product Taxonomy node id, only if you can pick with high confidence; omit if unsure",');
   L.push('  "metafields": {');
-  L.push('    "custom.how_to_use":    "Step-by-step usage guide. Numbered list style, ONE paragraph or short-line-per-step. This is what the store\'s theme renders in the \'How To Use\' TAB on the product page. Do NOT wrap in <ol> or <ul> — plain text with numbered lines works (theme handles formatting).",');
-  L.push('    "custom.ingredients":   "Full ingredient / composition list — echo VERBATIM from the existing metafield if provided in \'EXISTING STORE METAFIELDS\' above (never paraphrase actives/dosage — compliance risk). Renders in the \'Ingredients\' TAB. Plain text; theme formats it.",');
-  L.push('    "custom.faq_q_1":       "The single most important buyer question for this product (short phrase, matches a question-shaped query from the research). Renders in the FAQ block. Populate ONLY if you have a strong Q1 candidate — omit if the FAQs already fit best in body_html.",');
-  L.push('    "custom.faq_a_1":       "Answer to faq_q_1 — 60-100 words, plain text, factual. Feeds the theme\'s FAQ section on the product page.",');
-  L.push('    "custom.bullet_points": "5-6 Amazon-style feature bullets, one per line, capital-letter benefit tag prefix (e.g. \'GENTLE DAILY EXFOLIATION: …\'). Used by the theme for a bullet block AND by any Amazon feed apps. Plain text, no HTML."');
+  L.push('    "custom.how_to_use":    "Step-by-step usage guide. Numbered list style, ONE paragraph or short-line-per-step. Renders in the \'How To Use\' TAB on the product page. Plain text with numbered lines works (theme handles formatting).",');
+  L.push('    "custom.ingredients":   "Full ingredient / composition list — echo VERBATIM from EXISTING STORE METAFIELDS if provided (never paraphrase actives/dosage — compliance risk). Renders in the \'Ingredients\' TAB. Plain text.",');
+  L.push('    "custom.bullet_points": "5-6 Amazon-style feature bullets, one per line, capital-letter benefit-tag prefix (e.g. \'GENTLE DAILY EXFOLIATION: …\'). Used by the theme + Amazon feed apps. Rich text — the theme renders line breaks.",');
+  L.push('    "custom.department":    "Single line — the store-side category. e.g. \'Skincare\' / \'Haircare\' / \'Supplements\' / \'Feminine Care\'. Match top research theme; omit if uncertain.",');
+  L.push('    "custom.highlight_1":   "Short phrase (≤30 chars) for the trust-strip near price. e.g. \'USA Import\' / \'30-Day Returns\' / \'COD Available\'. Only populate if you know the value would improve on the current highlight.",');
+  L.push('    "custom.highlight_2":   "Second highlight — different angle than highlight_1.",');
+  L.push('    "custom.highlight_3":   "Third highlight.",');
+  L.push('    "custom.faq_q_1":       "TOP buyer question (short phrase; matches highest-value question-shaped query from research). Renders in the theme\'s FAQ section.",');
+  L.push('    "custom.faq_a_1":       "60-100 word factual answer to faq_q_1.",');
+  L.push('    "custom.faq_q_2":       "SECOND most important question. Different intent than Q1 (if Q1 is safety, Q2 could be price/availability).",');
+  L.push('    "custom.faq_a_2":       "60-100 word factual answer to faq_q_2.",');
+  L.push('    "custom.faq_q_3":       "THIRD question — usage / how-often / side-effects style.",');
+  L.push('    "custom.faq_a_3":       "60-100 word factual answer.",');
+  L.push('    "custom.faq_q_4":       "FOURTH question — comparison / \'best for X\' / variant selection.",');
+  L.push('    "custom.faq_a_4":       "60-100 word factual answer.",');
+  L.push('    "custom.faq_q_5":       "FIFTH question — price / COD / delivery / GST invoice (India-specific concerns).",');
+  L.push('    "custom.faq_a_5":       "60-100 word factual answer. If you populate Q1-Q5, ALSO put the same 5 FAQs in the FAQPage JSON-LD schema in body_html — Google reads that for rich results."');
   L.push('  }');
   L.push('}');
   L.push('```');
@@ -5355,24 +5392,29 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
         const mfFailed = mfResults.filter(m => !m.ok);
         const mfNote = sentMetafields.length > 0
           ? ` · Metafields: ${sentMetafields.map(k => {
-              // Result rows now come back as {alias, wrote_to, resolved_via, ok, error}.
               const result = mfResults.find(f => f.alias === k || f.key === k);
               if (!result) return `<code>${k} ?</code>`;
-              const wroteTo = result.wrote_to || result.key;
+              const wroteTo = result.wrote_to || result.alias || result.key;
               const via = result.resolved_via;
-              const viaLabel = via === 'display-name' ? 'matched by display name'
-                              : via === 'exact-key'    ? 'exact-key match'
-                              : via === 'fallback-custom' ? '⚠ FALLBACK — no matching definition on your store; wrote to custom.* which the theme may not read'
-                              : via || '';
-              if (result.ok) {
-                const warn = via === 'fallback-custom' ? ' ⚠' : '';
-                return `<code style="color:${via === 'fallback-custom' ? 'var(--warn)' : 'var(--success)'};" title="Wrote to ${esc(wroteTo)} · ${esc(viaLabel)}">${wroteTo}${warn} ✓</code>`;
-              } else {
-                return `<code style="color:var(--danger);" title="${esc(JSON.stringify(result.error))}">${wroteTo} ✗</code>`;
+              // Three visible states: ✓ (wrote to real definition),
+              // ⏭ (skipped — no definition on this store), ✗ (write failed).
+              if (result.skipped || via === 'no-definition') {
+                return `<code style="color:var(--warn);" title="${esc(result.error || 'no-definition')}">${k} ⏭ NO DEFINITION</code>`;
               }
+              if (result.ok) {
+                return `<code style="color:var(--success);" title="Wrote to ${esc(wroteTo)} · matched by ${esc(via || 'exact')}">${wroteTo} ✓</code>`;
+              }
+              return `<code style="color:var(--danger);" title="${esc(JSON.stringify(result.error))}">${wroteTo} ✗</code>`;
             }).join(', ')}`
           : '';
-        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${sentKeys.map(k => `<code>${k}</code>`).join(', ') || '(none)'}${mfNote}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}${snapshotNote}</div>`;
+        // If any metafields were skipped for no-definition, add a bigger
+        // warning line so the operator knows they need to define those in
+        // Shopify Admin OR remove them from Claude's output.
+        const skippedCount = mfResults.filter(r => r.skipped).length;
+        const skippedNote = skippedCount > 0
+          ? `<div class="hint" style="color: var(--warn); margin-top: 6px; padding: 8px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 6px;">⏭ ${skippedCount} metafield(s) skipped — no matching definition on your store. Either define them in Shopify Admin → Settings → Custom data → Products (name them to match the aliases: 'How To Use', 'Ingredients', 'Bullet Points', 'Department', 'Highlight 1/2/3', 'F&Q Question 1..5', 'F&Q Answer 1..5'), or drop those keys from Claude's response and re-push. Writing them wouldn't have populated anything — theme reads a different namespace.</div>`
+          : '';
+        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${sentKeys.map(k => `<code>${k}</code>`).join(', ') || '(none)'}${mfNote}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}${snapshotNote}</div>${skippedNote}`;
         toast('Shopify listing updated. Revert button available below if needed.', 'ok', { title: 'Pushed' });
         // Wire the just-pushed revert button.
         document.getElementById('shopifyRevertLastBtn')?.addEventListener('click', async (e) => {
