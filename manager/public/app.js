@@ -399,16 +399,25 @@ async function refreshManagerVersion() {
       : `${Math.floor(ageMs / 86400000)}d ago`
       : '';
     const dirtyTag = r.dirty ? ' •dirty' : '';
-    el.textContent = `${r.commit}${dirtyTag} · ${ago}`;
+    // Restart-needed detection: server captures the git commit it was
+    // BOOTED with once at module load. If the current on-disk HEAD is
+    // newer, the running process is stale — bug fixes / prompt changes
+    // won't take effect until the operator restarts `node manager/server.js`.
+    // Without this signal, changes look shipped but silently don't apply
+    // and users (rightly) blame the code.
+    const needsRestart = !!r.needs_restart;
+    const restartTag = needsRestart ? ` · ⚠ RESTART` : '';
+    el.textContent = `${r.commit}${dirtyTag}${restartTag} · ${ago}`;
     el.title = [
       `Branch: ${r.branch || '(unknown)'}`,
-      `Commit: ${r.commit}${r.dirty ? ' (working tree dirty)' : ''}`,
+      `Commit (on disk): ${r.commit}${r.dirty ? ' (working tree dirty)' : ''}`,
+      r.boot_commit ? `Commit (running process was booted with): ${r.boot_commit}` : null,
+      needsRestart ? `\n⚠ RESTART REQUIRED — the server on disk is newer than the running process.\nStop the manager (Ctrl+C in its terminal) and run: node manager/server.js\nWithout a restart, recent server-side changes (bug fixes, new endpoints, prompt changes) will NOT take effect even though the dashboard code shows them.` : null,
       r.subject ? `Message: ${r.subject}` : null,
       r.committed_at ? `Committed: ${new Date(r.committed_at).toLocaleString()}` : null,
-      '',
-      'After today, this pill answers the "am I on the latest?" question at a glance.',
     ].filter(v => v != null).join('\n');
     el.classList.toggle('version-pill-dirty', !!r.dirty);
+    el.classList.toggle('version-pill-restart', needsRestart);
   } catch (e) {
     el.textContent = '';
     el.title = `Version endpoint unavailable (server may be older): ${e.message}`;

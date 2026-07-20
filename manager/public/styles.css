@@ -173,6 +173,17 @@ body { min-height: 100vh; display: flex; flex-direction: column; }
 .topbar .version-pill-dirty {
   background: var(--warn-soft); color: var(--warn); border-color: var(--warn);
 }
+/* Restart-needed styling — server on disk is newer than running process.
+   Louder than dirty because the impact is real (bug fixes silently no-op
+   until the operator restarts node manager/server.js). */
+.topbar .version-pill-restart {
+  background: var(--danger-soft); color: var(--danger); border-color: var(--danger);
+  animation: version-pill-pulse 2.5s ease-in-out infinite;
+}
+@keyframes version-pill-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
 .topbar .health.ok { background: var(--success-soft); color: var(--success); border-color: var(--success); }
 .topbar .health.warn { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
 .topbar .health.err { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); }
