@@ -4217,6 +4217,7 @@ async function openShopifyModal() {
       impactRows,
       allowlist,
     });
+    renderBulkQueueHeader();
     // Build validationContext for the preflight checker. Same signals the
     // prompt builder used, extracted from the SKU's research rows:
     //   · primaryKeyword — highest opportunity_score keyword (if computed)
@@ -4710,6 +4711,15 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}) 
         const r = await api.shopifyUpdateProduct(productId, kept, { force, validationContext });
         $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${Object.keys(r.sent || {}).map(k => `<code>${k}</code>`).join(', ') || '(none)'}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}</div>`;
         toast('Shopify listing updated.', 'ok', { title: 'Pushed' });
+        // Bulk-run: record the win + auto-advance to the next SKU. If the
+        // user unchecked auto-advance, just record the outcome — the next
+        // SKU waits on their explicit '▶ Next' click.
+        const q = analytics.bulkQueue;
+        if (q) {
+          const cur = q.skus[q.index];
+          if (cur && !q.done.includes(cur.sku)) q.done.push(cur.sku);
+          if (q.autoAdvance) setTimeout(() => advanceBulkQueue(q.index + 1), 800);
+        }
       } catch (e) {
         // If the server rejected on preflight AND we didn't force, surface the preflight report inline.
         const detail = e.data?.preflight
@@ -4717,6 +4727,12 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}) 
           : '';
         $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--danger);">Push failed: ${e.message}${detail}</div>`;
         toast(e.message, 'err', { title: 'Push failed' });
+        const q = analytics.bulkQueue;
+        if (q) {
+          const cur = q.skus[q.index];
+          if (cur && !q.failed.includes(cur.sku)) q.failed.push(cur.sku);
+          // Never auto-advance on failure. User decides: fix + retry, skip, or end.
+        }
       } finally { btn.disabled = false; btn.textContent = 'Push to Shopify now'; }
     });
   });
@@ -4782,6 +4798,117 @@ function extractShopifyJson(raw) {
   return { ok: false, error: 'no valid JSON object found (Claude should emit a ```json { … } ``` block)' };
 }
 $('anShopifyBtn')?.addEventListener('click', openShopifyModal);
+
+// ─────────── Bulk Shopify update: walk every SKU in the batch ───────────
+//
+// State on `analytics.bulkQueue`. `null` when no bulk run is active. When
+// active, the Shopify modal renders a queue header at the top showing
+// progress + Skip / Next / End-bulk controls, and a successful push
+// auto-advances to the next SKU (unless the user unchecks auto-advance).
+//
+// SKUs are enumerated from the current batch's loaded keyword rows,
+// filtered to entries whose product_url looks like a Shopify /products/
+// URL — the same guard as the single-SKU flow. SKUs already 'done' or
+// 'skipped' in the current queue are visually dimmed in the header.
+async function startBulkShopifyRun() {
+  if (!analytics.batchId) { toast('Pick a batch first.', 'warn'); return; }
+  if (!analytics.allRows?.length) { toast('No keywords loaded for this batch yet.', 'warn'); return; }
+  // Distinct SKUs in insertion order — matches the left-rail SKU tree
+  // ordering. Filter to Shopify-shaped product_urls; other SKUs (Amazon,
+  // dropy-only, etc.) can't be Shopify-updated so exclude them from the
+  // queue entirely rather than surprising the user with mid-run skips.
+  const seen = new Set(), skus = [];
+  for (const r of analytics.allRows) {
+    const key = r.sku || r.product_url;
+    if (!key || seen.has(key)) continue;
+    if (!/\/products\//i.test(String(r.product_url || ''))) continue;
+    seen.add(key);
+    skus.push({ sku: key, productUrl: r.product_url, productName: r.product_name || key });
+  }
+  if (skus.length === 0) {
+    toast('No Shopify SKUs in this batch. (Only URLs matching /products/<handle> are eligible.)', 'warn', { title: 'Nothing to bulk-update' });
+    return;
+  }
+  analytics.bulkQueue = { skus, index: 0, done: [], skipped: [], failed: [], autoAdvance: true };
+  await advanceBulkQueue(0);
+}
+
+// Position the queue at `index` (or advance to the next unprocessed SKU
+// from there). Sets analytics.sku + opens the Shopify modal for it. If
+// past the end, closes the modal and shows a summary toast.
+async function advanceBulkQueue(index) {
+  const q = analytics.bulkQueue;
+  if (!q) return;
+  q.index = index;
+  if (q.index >= q.skus.length) {
+    toast(`Bulk run complete: ${q.done.length} pushed · ${q.skipped.length} skipped · ${q.failed.length} failed`, 'ok', { title: '🛍 Bulk update complete' });
+    $('shopifyModal').style.display = 'none';
+    analytics.bulkQueue = null;
+    return;
+  }
+  const cur = q.skus[q.index];
+  analytics.sku = cur.sku;
+  await openShopifyModal();
+}
+
+// Renders the queue header at the top of the modal body. Called by
+// openShopifyModal after body innerHTML is set, so it prepends into the
+// modal body. Wires Skip / Next / End-bulk + auto-advance checkbox.
+function renderBulkQueueHeader() {
+  const q = analytics.bulkQueue;
+  if (!q) return;
+  const cur = q.skus[q.index];
+  const total = q.skus.length;
+  // Progress dots — done=✓, skipped=◌, failed=✗, current=●, pending=·.
+  const dots = q.skus.map((s, i) => {
+    if (q.done.includes(s.sku))    return '<span style="color:var(--success);">✓</span>';
+    if (q.skipped.includes(s.sku)) return '<span style="color:var(--text-3);">◌</span>';
+    if (q.failed.includes(s.sku))  return '<span style="color:var(--danger);">✗</span>';
+    if (i === q.index)             return '<span style="color:var(--accent);">●</span>';
+    return '<span style="color:var(--text-3); opacity:0.4;">·</span>';
+  }).join('');
+  const header = document.createElement('div');
+  header.id = 'shopifyBulkHeader';
+  header.style.cssText = 'padding:10px 12px; background:var(--bg-2); border:1px solid var(--line-2); border-radius:6px; margin-bottom:12px;';
+  header.innerHTML = `
+    <div class="row" style="align-items:center; gap:10px;">
+      <strong>🛍 Bulk run</strong>
+      <span class="hint">SKU ${q.index + 1} of ${total}</span>
+      <span class="hint" style="color:var(--success);">${q.done.length} pushed</span>
+      <span class="hint" style="color:var(--text-3);">${q.skipped.length} skipped</span>
+      ${q.failed.length ? `<span class="hint" style="color:var(--danger);">${q.failed.length} failed</span>` : ''}
+      <span class="spacer" style="flex:1;"></span>
+      <label style="display:inline-flex; gap:6px; align-items:center; font-size:12px;">
+        <input type="checkbox" id="shopifyBulkAutoAdv" ${q.autoAdvance ? 'checked' : ''} />
+        Auto-advance on push
+      </label>
+      <button class="small secondary" id="shopifyBulkSkipBtn" title="Mark this SKU as skipped and jump to the next one.">◌ Skip</button>
+      <button class="small" id="shopifyBulkNextBtn" title="Go to the next SKU without recording an outcome for this one.">▶ Next</button>
+      <button class="small danger" id="shopifyBulkEndBtn" title="End the bulk run. Progress so far is not restored.">× End bulk</button>
+    </div>
+    <div style="margin-top:8px; font-family:var(--mono); font-size:11px; letter-spacing:2px; line-height:1;">${dots}</div>
+  `;
+  const modalBody = $('shopifyModalBody');
+  modalBody.insertBefore(header, modalBody.firstChild);
+  $('shopifyBulkAutoAdv')?.addEventListener('change', e => { if (analytics.bulkQueue) analytics.bulkQueue.autoAdvance = e.target.checked; });
+  $('shopifyBulkSkipBtn')?.addEventListener('click', () => {
+    if (!analytics.bulkQueue) return;
+    analytics.bulkQueue.skipped.push(cur.sku);
+    advanceBulkQueue(analytics.bulkQueue.index + 1);
+  });
+  $('shopifyBulkNextBtn')?.addEventListener('click', () => {
+    if (!analytics.bulkQueue) return;
+    advanceBulkQueue(analytics.bulkQueue.index + 1);
+  });
+  $('shopifyBulkEndBtn')?.addEventListener('click', () => {
+    if (!confirm('End the bulk run? Progress so far is discarded.')) return;
+    analytics.bulkQueue = null;
+    $('shopifyModal').style.display = 'none';
+    toast('Bulk run ended.', 'info');
+  });
+}
+
+$('anShopifyBulkBtn')?.addEventListener('click', startBulkShopifyRun);
 
 // Copy top-N keywords (scored, deduped, one per line). N = 25 by default —
 // enough to seed an ad group or meta-keywords block without dumping the
@@ -5270,6 +5397,11 @@ function filterAndRenderAnalytics() {
   // fetching from Shopify by handle needs a specific product URL.
   const shopBtn = $('anShopifyBtn');
   if (shopBtn) shopBtn.disabled = !(analytics.sku && source.length > 0);
+  // Bulk shopify button — enabled whenever a batch is loaded, since it
+  // walks every SKU in the batch on its own (single-SKU selection not
+  // required). Disabled only when there's literally nothing to iterate.
+  const shopBulkBtn = $('anShopifyBulkBtn');
+  if (shopBulkBtn) shopBulkBtn.disabled = !(analytics.allRows?.length > 0);
   // Action-bar hint tracks selection state.
   const hint = $('anActionHint');
   if (hint) {
@@ -5791,8 +5923,27 @@ function renderAnalyticsHero(rows) {
     ${nameHtml}
     ${sku ? `<span class="an-hp-sku">${esc(sku)}</span>` : ''}
     <span class="an-hp-badge" style="background:${grade.c}20; color:${grade.c}; border-color:${grade.c};" title="Data quality: ${esc(grade.t)}">DQ ${grade.l}</span>
+    ${productUrl ? `<button class="an-hp-link" id="anRequeueSkuBtn" data-batch="${esc(analytics.batchId)}" data-url="${esc(productUrl)}" title="Send this SKU back to the worker queue for another discovery attempt. Use when coverage was thin (e.g. 1-2 keywords) and you want the KP round to run again on a live worker.">🔄 Re-queue SKU</button>` : ''}
     ${productUrl ? `<a href="${esc(productUrl)}" target="_blank" rel="noopener" class="an-hp-link">Open product ↗</a>` : ''}
   `;
+  // Wire re-queue click — server accepts {batchId, productUrl} and looks up
+  // the job id itself, so we don't need to plumb the job id through the
+  // analytics rows.
+  document.getElementById('anRequeueSkuBtn')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const bId = btn.dataset.batch, pUrl = btn.dataset.url;
+    if (!confirm(`Re-queue this SKU for another discovery run?\n\n${productName}\n${pUrl}\n\nThe existing keyword rows stay in place; a worker will run KP + SERP + Amazon again and any NEW rows are added on top.`)) return;
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = '🔄 Re-queueing…';
+    try {
+      const r = await api.jobsRequeueByUrl(bId, pUrl);
+      if (r.ok) toast(`Re-queued. A worker will pick it up on the next claim tick.`, 'ok', { title: '🔄 Re-queued' });
+      else toast(r.error || 'Server did not re-queue (job may already be pending).', 'warn');
+    } catch (err) {
+      toast(err.message || 'Re-queue failed.', 'err');
+    } finally { btn.disabled = false; btn.textContent = original; }
+  });
 
   // Data-quality banner — prominent, actionable warnings for the specific
   // issues we can diagnose from the data itself. Only one banner shows at

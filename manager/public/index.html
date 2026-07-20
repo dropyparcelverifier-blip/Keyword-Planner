@@ -389,6 +389,7 @@
             <span class="spacer" style="flex:1;"></span>
             <button class="small" id="anClaudeBtn" disabled title="Assemble a Claude prompt from this SKU's keyword research (title, subtitle, description, ingredients, how-to-use, FAQs, SEO, ad copy).">Claude brief</button>
             <button class="small" id="anShopifyBtn" disabled title="Fetch this SKU's current Shopify listing, merge with keyword research, generate a Claude prompt, then push Claude's structured JSON back to Shopify (price/weight/location stripped server-side).">🛍 Shopify update</button>
+            <button class="small" id="anShopifyBulkBtn" disabled title="Walk every SKU in the current batch through the Shopify-update flow one at a time. Same prompt-per-SKU as the single button; adds Skip / Next / End-bulk controls + progress bar.">🛍 Bulk update batch</button>
             <button class="small secondary" id="anCopyKwBtn" disabled title="Copy top-25 keywords by opportunity score to clipboard (one per line).">Copy top keywords</button>
             <button class="small secondary" id="anExportBtn" disabled>Export CSV</button>
           </div>

@@ -58,6 +58,7 @@ export const api = {
   jobsActiveWorkers: (batchId)         => _fetch(`/api/jobs/active-workers?batchId=${encodeURIComponent(batchId)}`),
   jobsActiveBatch:   ()                => _fetch('/api/jobs/active-batch'),
   jobsRequeue:       (jobId)           => _fetch('/api/jobs/requeue', { method: 'POST', body: { jobId } }),
+  jobsRequeueByUrl:  (batchId, productUrl) => _fetch('/api/jobs/requeue', { method: 'POST', body: { batchId, productUrl } }),
   jobsReleaseStale:  (staleMinutes)    => _fetch('/api/jobs/release-stale', { method: 'POST', body: { staleMinutes } }),
   jobsReleaseByWorker: (workerId)      => _fetch('/api/jobs/release-by-worker', { method: 'POST', body: { workerId } }),
   jobsList:            (batchId)       => _fetch(`/api/jobs/list?batchId=${encodeURIComponent(batchId)}`),
