@@ -96,7 +96,10 @@ export const api = {
   shopifyGetProduct:   (productUrl)    => _fetch(`/api/shopify/get-product?url=${encodeURIComponent(productUrl)}`),
   // Server-cached (10min TTL) — cheap to call every prompt build.
   shopifyGetPolicies:  ()              => _fetch('/api/shopify/get-policies'),
-  shopifyUpdateProduct:(productId, patch, opts = {}) => _fetch('/api/shopify/update-product', { method: 'POST', body: { confirm: 'PUSH', productId, patch, force: !!opts.force, validationContext: opts.validationContext || undefined } }),
+  // Push history + revert — safety net for 'the new copy is worse than the old'.
+  shopifyPushHistory:  (productId)     => _fetch(`/api/shopify/push-history?productId=${encodeURIComponent(productId)}`),
+  shopifyRevert:       (historyId)     => _fetch('/api/shopify/revert', { method: 'POST', body: { historyId, confirm: 'REVERT' } }),
+  shopifyUpdateProduct:(productId, patch, opts = {}) => _fetch('/api/shopify/update-product', { method: 'POST', body: { confirm: 'PUSH', productId, patch, force: !!opts.force, validationContext: opts.validationContext || undefined, sku: opts.sku || null, productUrl: opts.productUrl || null, batchId: opts.batchId || null } }),
   jobsUploadBySku:     (batchId, skus, resolve, dryRun) => _fetch('/api/jobs/upload-by-sku', { method: 'POST', body: { batchId, skus, resolve, dryRun } }),
   jobsBulkUpdate:      (jobIds, patch, force) => _fetch('/api/jobs/bulk-update', { method: 'POST', body: { jobIds, patch, force: !!force } }),
   jobsBulkDelete:      (jobIds, force) => _fetch('/api/jobs/bulk-delete', { method: 'POST', body: { jobIds, force: !!force } }),
