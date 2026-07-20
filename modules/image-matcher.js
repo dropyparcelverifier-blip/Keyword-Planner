@@ -80,12 +80,23 @@ export async function getEmbedding(imageUrl) {
 //
 // References are still Float32Array-shaped at the array level (length/iter
 // still work) for back-compat with callers that ignore the extra fields.
+// Module-level: last error from getReferenceEmbeddings, exposed so the
+// engine can include it in the 'CLIP init failed?' activity log entry.
+// Previously the catch{ return [] } silently swallowed the reason and
+// operators had to guess (WebGL disabled? Model CDN blocked? Quota?).
+let _lastRefEmbedError = null;
+export function getLastRefEmbedError() { return _lastRefEmbedError; }
+
 export async function getReferenceEmbeddings(imageUrls) {
   if (!Array.isArray(imageUrls) || imageUrls.length === 0) return [];
+  _lastRefEmbedError = null;
   try {
     await initMatcher();
     const resp = await sendToOffscreen('embedReferences', { urls: imageUrls });
-    if (!resp?.embeddings) return [];
+    if (!resp?.embeddings) {
+      _lastRefEmbedError = 'offscreen returned no embeddings (possible model-load or WebGL failure — check the offscreen document console)';
+      return [];
+    }
     return resp.embeddings.map(e => {
       // New format: { embedding: [...], dhash: {hi, lo} | null,
       //                colors: [{r,g,b}, ...] }
@@ -100,7 +111,8 @@ export async function getReferenceEmbeddings(imageUrls) {
       // Old format: just [float...]
       return new Float32Array(e);
     });
-  } catch {
+  } catch (e) {
+    _lastRefEmbedError = e?.message || String(e);
     return [];
   }
 }

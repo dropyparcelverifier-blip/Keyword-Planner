@@ -54,6 +54,7 @@ import {
 import {
   initMatcher,
   getReferenceEmbeddings,
+  getLastRefEmbedError,
   matchImages,
   cosineSimilarity,
 } from './image-matcher.js';
@@ -2779,9 +2780,15 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         : [];
 
       if (productImages.length > 0 && referenceEmbeddings.length === 0) {
+        // Surface the specific reason. Common failure modes:
+        //   · 'WebGL not available' — Chrome sandbox disabled / GPU driver
+        //   · 'Failed to fetch' — huggingface.co / CDN network blocked
+        //   · 'quota' — IndexedDB full or private-mode
+        //   · null-response — offscreen document crashed
+        const why = getLastRefEmbedError() || 'no error captured';
         onProgress?.({
           currentProduct: productName,
-          currentAction: `Could not embed any product image (CLIP init failed?). image_count will be 0 for all keywords.`,
+          currentAction: `Could not embed any product image (CLIP init failed). image_count will be 0 for all keywords. Reason: ${String(why).slice(0, 200)}`,
           logKind: 'err',
         });
       } else if (referenceEmbeddings.length > 0) {

@@ -2426,6 +2426,18 @@ async function run() {
   assert(appJs.body.includes("addEventListener('visibilitychange'"), 'AUTOPASTE.4 fires on tab regaining focus');
   assert(appJs.body.includes('_shopifyLastAllowlist'),          'AUTOPASTE.5 allowlist stashed for the global listener');
   assert(appJs.body.includes('_shopifyAutopasteArmed = false'), 'AUTOPASTE.6 disarms on modal close (idempotency)');
+  // KP: direct URL nav fallback before manual-user-click waiting.
+  const kpJs = readFileSync(resolve(REPO, 'kp.js'), 'utf-8');
+  assert(kpJs.includes('URL-navigation fallback'),            'KP-FIX.1 URL-nav fallback added to openDiscoverKeywords');
+  assert(kpJs.includes('/aw/keywordplanner/ideas/new'),       'KP-FIX.2 hits the direct ideas-new URL');
+  assert(kpJs.includes('KP shell re-hydration after direct nav'), 'KP-FIX.3 waits for shell rehydration after nav');
+  // CLIP: surface the ACTUAL init/embed failure reason instead of '?'.
+  const imMatcher = readFileSync(resolve(REPO, 'modules/image-matcher.js'), 'utf-8');
+  const kwDisc = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+  assert(imMatcher.includes('_lastRefEmbedError'),            'CLIP-DIAG.1 last-error captured module-level');
+  assert(imMatcher.includes('getLastRefEmbedError'),          'CLIP-DIAG.2 getter exported');
+  assert(kwDisc.includes('getLastRefEmbedError'),             'CLIP-DIAG.3 engine imports the getter');
+  assert(kwDisc.includes('Reason: ${String(why)'),            'CLIP-DIAG.4 engine surfaces reason in activity log');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
