@@ -2438,6 +2438,16 @@ async function run() {
   assert(imMatcher.includes('getLastRefEmbedError'),          'CLIP-DIAG.2 getter exported');
   assert(kwDisc.includes('getLastRefEmbedError'),             'CLIP-DIAG.3 engine imports the getter');
   assert(kwDisc.includes('Reason: ${String(why)'),            'CLIP-DIAG.4 engine surfaces reason in activity log');
+  // Watchdog auto-update: polls hash + downloads changed files + broadcasts hard_reset.
+  const wdTmpl = readFileSync(resolve(REPO, 'scripts/chrome-watchdog-template.ps1'), 'utf-8');
+  assert(wdTmpl.includes('.adbrain-bundle-hash'),             'AUTO-UPDATE.1 watchdog stores local hash file');
+  assert(wdTmpl.includes('/api/worker/version-hash'),         'AUTO-UPDATE.2 watchdog polls manager hash');
+  assert(wdTmpl.includes('/worker-files.json'),               'AUTO-UPDATE.3 watchdog fetches file manifest');
+  assert(wdTmpl.includes('hard_reset'),                       'AUTO-UPDATE.4 watchdog broadcasts hard_reset after update');
+  assert(wdTmpl.includes('watchdog-auto-update'),             'AUTO-UPDATE.5 hard_reset attributed to watchdog for audit');
+  assert(wdTmpl.includes('__TOKEN__'),                        'AUTO-UPDATE.6 token placeholder in template');
+  assert(srvFull.includes("$wdBody -replace '__TOKEN__'"),    'AUTO-UPDATE.7 installer substitutes token placeholder');
+  assert(srvFull.includes('.adbrain-bundle-hash'),            'AUTO-UPDATE.8 installer seeds initial hash so first run does not false-positive');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
