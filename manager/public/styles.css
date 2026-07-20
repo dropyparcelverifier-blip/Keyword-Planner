@@ -180,6 +180,9 @@ body { min-height: 100vh; display: flex; flex-direction: column; }
   background: var(--danger-soft); color: var(--danger); border-color: var(--danger);
   animation: version-pill-pulse 2.5s ease-in-out infinite;
 }
+.topbar #wakeLockPill.wake-lock-active {
+  background: var(--accent-soft); color: var(--accent); border-color: var(--accent);
+}
 @keyframes version-pill-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }
