@@ -2416,6 +2416,16 @@ async function run() {
   assert(appJs.body.includes("'In progress'"),                  'REQUEUE-STATE.3 button label reflects claimed state');
   assert(appJs.body.includes("data-status="),                   'REQUEUE-STATE.4 button carries status data attr');
   assert(appJs.body.includes("hit.status = 'pending'"),         'REQUEUE-STATE.5 cache mutated in-place after success');
+  // Shopify auto-paste helper: when user returns to the manager tab with
+  // Claude's response on clipboard and the paste-back textarea is empty,
+  // fill it + click Preview automatically. Heuristic filter prevents
+  // pasting random clipboard content.
+  assert(appJs.body.includes('_shopifyAutopasteArmed'),         'AUTOPASTE.1 arm flag declared');
+  assert(appJs.body.includes('_looksLikeShopifyClaudeResponse'), 'AUTOPASTE.2 heuristic helper defined');
+  assert(appJs.body.includes('navigator.clipboard.readText'),   'AUTOPASTE.3 reads from browser clipboard');
+  assert(appJs.body.includes("addEventListener('visibilitychange'"), 'AUTOPASTE.4 fires on tab regaining focus');
+  assert(appJs.body.includes('_shopifyLastAllowlist'),          'AUTOPASTE.5 allowlist stashed for the global listener');
+  assert(appJs.body.includes('_shopifyAutopasteArmed = false'), 'AUTOPASTE.6 disarms on modal close (idempotency)');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
