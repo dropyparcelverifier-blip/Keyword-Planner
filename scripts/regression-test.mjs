@@ -2381,6 +2381,23 @@ async function run() {
   assert(appJs.body.includes('STORE POLICY LANGUAGE'),         'POLICY.6 prompt section header');
   assert(appJs.body.includes('echo, do not invent'),           'POLICY.7 anti-invention directive present');
   assert(/policies\s*=\s*\[\]/.test(appJs.body),               'POLICY.8 buildShopifyClaudePrompt defaults policies=[]');
+  // Analytics rail search: matches by SKU/ASIN, not just batch label.
+  // Batches whose SKUs match the query are force-expanded + non-matching
+  // SKUs hide inside the expanded batch.
+  assert(appJs.body.includes('_batchContainsSkuMatching'),     'SEARCH.1 SKU-match helper defined');
+  assert(appJs.body.includes('forceExpandForQuery'),           'SEARCH.2 force-expand set for matching batches');
+  assert(/expanded\.has\(it\.id\)\s*\|\|\s*forceExpandForQuery/.test(appJs.body),
+    'SEARCH.3 tree-batch expands when its SKUs match the query');
+  assert(/_renderTreeSkusCached\(it\.id,\s*q\)/.test(appJs.body),
+    'SEARCH.4 query threaded into SKU renderer');
+  assert(appJs.body.includes('No SKUs match — check spelling'), 'SEARCH.5 empty-match state has a helpful message');
+  // Dashboard tab has its own SKU search — same substring rules, hits
+  // panel is clickable and jumps to Analytics for that batch/SKU.
+  assert(idx.body.includes('id="dashSkuSearch"'),              'DASH-SEARCH.1 dashboard search input');
+  assert(idx.body.includes('id="dashSearchHits"'),             'DASH-SEARCH.2 hits panel');
+  assert(appJs.body.includes('renderDashSearchHits'),          'DASH-SEARCH.3 hits renderer defined');
+  assert(appJs.body.includes('data-jump-batch'),               'DASH-SEARCH.4 hit-click switches to Analytics');
+  assert(appJs.body.includes("adbrainSwitchTab?.('analytics')"), 'DASH-SEARCH.5 jump calls the tab switcher');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.

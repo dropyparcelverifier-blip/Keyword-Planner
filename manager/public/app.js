@@ -3614,11 +3614,33 @@ async function renderAnalyticsTree() {
     el.innerHTML = `<div class="tree-empty">No batches yet.<br>Upload some products to get started.</div>`;
     return;
   }
-  // Apply search filter (case-insensitive, matches label + id).
+  // Apply search filter (case-insensitive). Match rules:
+  //   1. Batch label/id contains the query — the whole batch survives
+  //   2. Any SKU name/key/URL inside the batch contains the query — the
+  //      batch survives AND is force-expanded so users see the match
+  //      without an extra caret click. Matching SKUs are highlighted +
+  //      non-matching SKUs are hidden inside the expanded batch.
+  // Rule 2 covers the 'search by ASIN' case: 'B002OTT3US' now finds any
+  // batch whose loaded rows or cached jobs carry that ASIN in sku/URL.
   const q = ($('anRailSearch')?.value || '').toLowerCase().trim();
-  const displayed = q ? items.filter(it => batchLabel(it.id).toLowerCase().includes(q) || it.id.toLowerCase().includes(q)) : items;
+  // Force-expand set for this render pass only; doesn't persist to storage
+  // so the user's manual expand state stays intact when the search clears.
+  const forceExpandForQuery = new Set();
+  let displayed;
+  if (q) {
+    displayed = items.filter(it => {
+      if (batchLabel(it.id).toLowerCase().includes(q) || it.id.toLowerCase().includes(q)) return true;
+      if (_batchContainsSkuMatching(it.id, q)) {
+        forceExpandForQuery.add(it.id);
+        return true;
+      }
+      return false;
+    });
+  } else {
+    displayed = items;
+  }
   el.innerHTML = displayed.map(it => {
-    const isExp    = expanded.has(it.id);
+    const isExp    = expanded.has(it.id) || forceExpandForQuery.has(it.id);
     const isActive = it.id === analytics.batchId;
     const label    = batchLabel(it.id).split('  (')[0];  // strip "(id-tail)" if named
     const suffix   = it.kind === 'orphan' ? ' (orphan)' : '';
@@ -3629,7 +3651,7 @@ async function renderAnalyticsTree() {
         <span class="tree-count">${it.total}</span>
       </div>
       <div class="tree-skus" data-skus-for="${esc(it.id)}">
-        ${isExp ? _renderTreeSkusCached(it.id) : ''}
+        ${isExp ? _renderTreeSkusCached(it.id, q) : ''}
       </div>`;
   }).join('');
   // Wire batch clicks — toggle expand + select as active batch.
@@ -3681,13 +3703,39 @@ async function renderAnalyticsTree() {
 // by the tree renderer to show zero-kw SKUs alongside kw-rich ones.
 const _treeJobCache = new Map();
 
-function _renderTreeSkusCached(batchId) {
+// Does any SKU inside this batch match `q` (lowercased)? Checks loaded
+// keyword rows first (fast — already in analytics.allRows for the
+// currently-loaded batch), then the per-batch job cache which holds
+// zero-kw SKUs too. Query is matched against sku string, product name,
+// AND product_url — so 'B002OTT3US' matches URLs like
+// dropy.in/products/dropy-b002ott3us as well as the raw SKU string.
+function _batchContainsSkuMatching(batchId, q) {
+  if (!q) return false;
+  // Loaded rows: only present for the currently-selected batch.
+  if (analytics.batchId === batchId) {
+    for (const r of analytics.allRows) {
+      if (String(r.sku || '').toLowerCase().includes(q)) return true;
+      if (String(r.product_name || '').toLowerCase().includes(q)) return true;
+      if (String(r.product_url || '').toLowerCase().includes(q)) return true;
+    }
+  }
+  const jobs = _treeJobCache.get(batchId) || [];
+  for (const j of jobs) {
+    if (String(j.sku || '').toLowerCase().includes(q)) return true;
+    if (String(j.product_name || '').toLowerCase().includes(q)) return true;
+    if (String(j.product_url || '').toLowerCase().includes(q)) return true;
+  }
+  return false;
+}
+
+function _renderTreeSkusCached(batchId, q = '') {
   // Only render SKUs if we've loaded them into analytics.allRows already.
   // Otherwise return a placeholder — loadAnalyticsBatch() populates it,
   // and the next renderAnalyticsTree() call picks it up.
   if (analytics.batchId !== batchId || !analytics.allRows.length) {
     return `<div class="tree-empty" style="padding: 6px 8px; font-size: 10px;">Select this batch to load its SKUs.</div>`;
   }
+  const query = String(q || '').toLowerCase();
   // Group allRows by SKU key — these are SKUs that produced keywords.
   const bySku = new Map();
   for (const r of analytics.allRows) {
@@ -3711,8 +3759,19 @@ function _renderTreeSkusCached(batchId) {
       if (!rec.status || rec.status === 'done') rec.status = j.status || rec.status;
     }
   }
-  const skus = Array.from(bySku.values()).sort((a, b) => b.count - a.count);
-  if (skus.length === 0) return `<div class="tree-empty" style="padding:6px 8px; font-size:10px;">No SKUs.</div>`;
+  let skus = Array.from(bySku.values()).sort((a, b) => b.count - a.count);
+  // When a rail-search query is active, hide non-matching SKUs so the
+  // matched one(s) don't get lost in a long list. Match against key
+  // (sku string) AND name AND product_url — same rule as _batchContainsSkuMatching.
+  if (query) {
+    skus = skus.filter(s => {
+      if (String(s.key || '').toLowerCase().includes(query)) return true;
+      if (String(s.name || '').toLowerCase().includes(query)) return true;
+      // s.key is usually the sku or product_url — checking key covers most cases.
+      return false;
+    });
+  }
+  if (skus.length === 0) return `<div class="tree-empty" style="padding:6px 8px; font-size:10px;">${query ? 'No SKUs match — check spelling.' : 'No SKUs.'}</div>`;
   return skus.map(s => {
     const isActive = s.key === analytics.sku;
     const display = s.name || s.key;
@@ -3758,7 +3817,103 @@ async function refreshAnalyticsTab() {
 // Rail search — re-render tree on every keystroke.
 document.addEventListener('DOMContentLoaded', () => {
   $('anRailSearch')?.addEventListener('input', renderAnalyticsTree);
+  // Dashboard-tab SKU search — mirrors the Analytics rail search but sits
+  // above the Batches / Failed cards. Matches across ALL cached batches
+  // (not just the currently-loaded one). Accepts any of:
+  //   'DROPY-B0019LWV92' · 'Dropy-B0019LWV92' · 'B0019LWV92' · a name/title
+  // Case-insensitive substring match — 'B0019' matches 'Dropy-B0019LWV92'.
+  const dashInput = $('dashSkuSearch');
+  if (dashInput) {
+    dashInput.addEventListener('input', renderDashSearchHits);
+    dashInput.addEventListener('keydown', e => { if (e.key === 'Escape') { dashInput.value = ''; renderDashSearchHits(); } });
+  }
 });
+
+// Search across every batch we know about — the summary card (which
+// only carries {batch_id, counts}) PLUS any batch we've loaded into
+// _treeJobCache (carries per-SKU rows). Then render hits with a click
+// handler that switches to Analytics with the SKU pre-selected.
+function renderDashSearchHits() {
+  const box = $('dashSearchHits');
+  if (!box) return;
+  const q = ($('dashSkuSearch')?.value || '').toLowerCase().trim();
+  if (!q) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.style.display = '';
+  const batchHits = [];
+  const skuHits = [];   // [{batchId, sku, name, productUrl, count}]
+  // Batch-id / name matches from the summary.
+  for (const b of (state.batches || [])) {
+    if (String(b.batch_id).toLowerCase().includes(q) || batchLabel(b.batch_id).toLowerCase().includes(q)) {
+      batchHits.push(b);
+    }
+  }
+  // SKU matches from any loaded batch's cached jobs. Prevents needing
+  // to open Analytics first; users can find a SKU straight from Dashboard.
+  for (const [batchId, jobs] of _treeJobCache.entries()) {
+    for (const j of jobs) {
+      const sku = j.sku || '';
+      const name = j.product_name || '';
+      const url = j.product_url || '';
+      if (sku.toLowerCase().includes(q) || name.toLowerCase().includes(q) || url.toLowerCase().includes(q)) {
+        skuHits.push({ batchId, sku, name, productUrl: url, status: j.status });
+      }
+    }
+  }
+  // Also pick up SKUs from the CURRENTLY-loaded analytics batch (allRows
+  // is keyword rows, not jobs — so a SKU with 0 kw won't be here, but a
+  // SKU that produced rows and isn't yet in _treeJobCache would be).
+  if (analytics.batchId && analytics.allRows?.length) {
+    const seenInThisBatch = new Set(skuHits.filter(h => h.batchId === analytics.batchId).map(h => h.sku));
+    for (const r of analytics.allRows) {
+      const sku = r.sku || '';
+      const name = r.product_name || '';
+      const url = r.product_url || '';
+      if (!(sku.toLowerCase().includes(q) || name.toLowerCase().includes(q) || url.toLowerCase().includes(q))) continue;
+      if (seenInThisBatch.has(sku)) continue;
+      seenInThisBatch.add(sku);
+      skuHits.push({ batchId: analytics.batchId, sku, name, productUrl: url, status: 'done' });
+    }
+  }
+  // Cap SKU hits — a broad query like 'dropy' would match hundreds.
+  const skuCap = 25;
+  const skuOverflow = Math.max(0, skuHits.length - skuCap);
+  const skuShow = skuHits.slice(0, skuCap);
+  if (batchHits.length === 0 && skuShow.length === 0) {
+    box.innerHTML = `<div class="hint">No matches for <code>${esc(q)}</code>. Try a shorter fragment (e.g. just the ASIN).</div>`;
+    return;
+  }
+  const bHtml = batchHits.length
+    ? `<div style="margin-bottom:8px;"><strong>Batches (${batchHits.length}):</strong> ${batchHits.map(b => `<button class="small ghost" data-jump-batch="${esc(b.batch_id)}" style="margin: 2px 4px;">${esc(batchLabel(b.batch_id))} <span class="hint">· ${b.total_jobs} SKUs</span></button>`).join('')}</div>`
+    : '';
+  const sHtml = skuShow.length
+    ? `<div><strong>SKUs (${skuHits.length}${skuOverflow ? ' — showing 25' : ''}):</strong>
+        <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:4px;">${skuShow.map(h =>
+          `<button class="small ghost" data-jump-batch="${esc(h.batchId)}" data-jump-sku="${esc(h.sku)}" title="${esc(h.name || h.sku)} · batch ${esc(h.batchId)}" style="text-align:left; max-width:100%;">
+             <span style="font-family:var(--mono); font-size:11px;">${esc(h.sku)}</span>
+             ${h.name ? `<span class="hint" style="margin-left:6px;">${esc(h.name.slice(0, 40))}${h.name.length > 40 ? '…' : ''}</span>` : ''}
+           </button>`
+        ).join('')}</div></div>`
+    : '';
+  box.innerHTML = bHtml + sHtml;
+  // Click a batch hit → switch to Analytics tab with that batch pre-loaded.
+  box.querySelectorAll('[data-jump-batch]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const bid = btn.dataset.jumpBatch;
+      const sku = btn.dataset.jumpSku || '';
+      if (bid !== analytics.batchId) {
+        analytics.batchId = bid;
+        analytics.sku = sku;
+        if ($('anBatchSelect')) $('anBatchSelect').value = bid;
+        await loadAnalyticsBatch(bid);
+      } else if (sku) {
+        analytics.sku = sku;
+      }
+      window.adbrainSwitchTab?.('analytics');
+      // Give the tab switch a beat to activate, then re-render + scroll.
+      setTimeout(() => { renderAnalyticsTree(); filterAndRenderAnalytics(); }, 100);
+    });
+  });
+}
 
 // Picker hint updater — keeps the "N batches available" label live.
 // Previously we had two more preview blocks here (batch-stats preview +
