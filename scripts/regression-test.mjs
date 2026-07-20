@@ -2408,6 +2408,14 @@ async function run() {
   assert(appJs.body.includes('needs_restart'),                  'RESTART.5 client reads needs_restart flag');
   assert(appJs.body.includes('⚠ RESTART'),                     'RESTART.6 topbar shows RESTART badge');
   assert(appJs.body.includes('version-pill-restart'),           'RESTART.7 CSS class for restart-styled pill');
+  // Re-queue button now reflects current job status (pending / claimed /
+  // done / failed) — dimmed + relabeled when the job is already busy so
+  // clicking it doesn't imply meaningful state change.
+  assert(appJs.body.includes('anJobStatusPill'),                'REQUEUE-STATE.1 status pill element rendered');
+  assert(appJs.body.includes("'Already queued'"),               'REQUEUE-STATE.2 button label reflects pending state');
+  assert(appJs.body.includes("'In progress'"),                  'REQUEUE-STATE.3 button label reflects claimed state');
+  assert(appJs.body.includes("data-status="),                   'REQUEUE-STATE.4 button carries status data attr');
+  assert(appJs.body.includes("hit.status = 'pending'"),         'REQUEUE-STATE.5 cache mutated in-place after success');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.

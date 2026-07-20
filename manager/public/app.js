@@ -6139,20 +6139,45 @@ function renderAnalyticsHero(rows) {
   const nameHtml = productUrl
     ? `<a class="an-hp-name" href="${esc(productUrl)}" target="_blank" rel="noopener" title="Open ${esc(productName)} on dropy.in ↗">${esc(productName)}</a>`
     : `<div class="an-hp-name" title="${esc(productName)}">${esc(productName)}</div>`;
+  // Find this SKU's current job status from the tree-job cache the batch
+  // loader populates. Determines whether re-queue is a no-op (already
+  // pending / already being worked on) so we can dim the button + label it
+  // truthfully instead of implying every click meaningfully changes state.
+  const currentJob = (_treeJobCache.get(analytics.batchId) || [])
+    .find(j => j.product_url === productUrl || j.sku === sku);
+  const jobStatus = currentJob?.status || 'unknown';
+  const statusColor = jobStatus === 'done'    ? 'var(--success)'
+                    : jobStatus === 'failed'  ? 'var(--danger)'
+                    : jobStatus === 'claimed' ? 'var(--accent)'
+                    : jobStatus === 'pending' ? 'var(--warn)'
+                    : 'var(--text-3)';
+  const isBusy = jobStatus === 'pending' || jobStatus === 'claimed';
+  const requeueLabel = jobStatus === 'pending' ? 'Already queued'
+                     : jobStatus === 'claimed' ? 'In progress'
+                     : '🔄 Re-queue SKU';
+  const requeueTitle = isBusy
+    ? `Job status is '${jobStatus}' — a worker either already has it or is about to claim it. Clicking will still reset it to pending (idempotent) but usually not needed.`
+    : `Send this SKU back to the worker queue for another discovery attempt. Use when coverage was thin (e.g. 1-2 keywords) and you want the KP round to run again on a live worker.`;
   prod.innerHTML = `
     ${nameHtml}
     ${sku ? `<span class="an-hp-sku">${esc(sku)}</span>` : ''}
     <span class="an-hp-badge" style="background:${grade.c}20; color:${grade.c}; border-color:${grade.c};" title="Data quality: ${esc(grade.t)}">DQ ${grade.l}</span>
-    ${productUrl ? `<button class="an-hp-link" id="anRequeueSkuBtn" data-batch="${esc(analytics.batchId)}" data-url="${esc(productUrl)}" title="Send this SKU back to the worker queue for another discovery attempt. Use when coverage was thin (e.g. 1-2 keywords) and you want the KP round to run again on a live worker.">🔄 Re-queue SKU</button>` : ''}
+    ${productUrl ? `<span id="anJobStatusPill" style="padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600; background:${statusColor}20; color:${statusColor}; border:1px solid ${statusColor};" title="Current job status for this SKU (from the manager's jobs table).">${esc(jobStatus)}</span>` : ''}
+    ${productUrl ? `<button class="an-hp-link" id="anRequeueSkuBtn" data-batch="${esc(analytics.batchId)}" data-url="${esc(productUrl)}" data-status="${esc(jobStatus)}" ${isBusy ? 'style="opacity:0.55;"' : ''} title="${esc(requeueTitle)}">${requeueLabel}</button>` : ''}
     ${productUrl ? `<a href="${esc(productUrl)}" target="_blank" rel="noopener" class="an-hp-link">Open product ↗</a>` : ''}
   `;
   // Wire re-queue click — server accepts {batchId, productUrl} and looks up
-  // the job id itself, so we don't need to plumb the job id through the
-  // analytics rows.
+  // the job id itself. On success, mutate the tree-cache entry + re-render
+  // the header so the status pill + button label reflect the new state
+  // without waiting for the next full batch refresh.
   document.getElementById('anRequeueSkuBtn')?.addEventListener('click', async (e) => {
     const btn = e.currentTarget;
     const bId = btn.dataset.batch, pUrl = btn.dataset.url;
-    if (!confirm(`Re-queue this SKU for another discovery run?\n\n${productName}\n${pUrl}\n\nThe existing keyword rows stay in place; a worker will run KP + SERP + Amazon again and any NEW rows are added on top.`)) return;
+    const wasBusy = ['pending', 'claimed'].includes(btn.dataset.status);
+    const prompt = wasBusy
+      ? `This SKU's job is already '${btn.dataset.status}' — a worker either has it or is about to claim it. Re-queue anyway?\n\n${productName}\n${pUrl}`
+      : `Re-queue this SKU for another discovery run?\n\n${productName}\n${pUrl}\n\nThe existing keyword rows stay in place; a worker will run KP + SERP + Amazon again and any NEW rows are added on top.`;
+    if (!confirm(prompt)) return;
     btn.disabled = true;
     const original = btn.textContent;
     btn.textContent = '🔄 Re-queueing…';
@@ -6163,12 +6188,31 @@ function renderAnalyticsHero(rows) {
           ? `Job was already pending — no change needed. A worker will claim it on the next tick.`
           : `Re-queued (was: ${r.prior_status || 'unknown'} → pending). A worker will pick it up on the next claim tick.`;
         toast(msg, 'ok', { title: '🔄 Re-queued' });
+        // Mutate the tree-cache so the next filterAndRenderAnalytics()
+        // sees the new status; then flip the status pill + button label
+        // in place so the user sees the outcome immediately.
+        const cached = _treeJobCache.get(analytics.batchId) || [];
+        const hit = cached.find(j => j.product_url === pUrl || j.sku === sku);
+        if (hit) hit.status = 'pending';
+        const pill = document.getElementById('anJobStatusPill');
+        if (pill) {
+          pill.textContent = 'pending';
+          pill.style.background = 'rgba(255,204,0,0.12)';
+          pill.style.color = 'var(--warn)';
+          pill.style.borderColor = 'var(--warn)';
+        }
+        btn.dataset.status = 'pending';
+        btn.textContent = 'Already queued';
+        btn.style.opacity = '0.55';
+        btn.title = `Job status is 'pending' — a worker will claim it on the next tick. Clicking again is a no-op.`;
       } else {
         toast(r.error || 'Server did not re-queue.', 'warn');
+        btn.textContent = original;
       }
     } catch (err) {
       toast(err.message || 'Re-queue failed.', 'err');
-    } finally { btn.disabled = false; btn.textContent = original; }
+      btn.textContent = original;
+    } finally { btn.disabled = false; }
   });
 
   // Data-quality banner — prominent, actionable warnings for the specific
