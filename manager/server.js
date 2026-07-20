@@ -1688,17 +1688,35 @@ const server = http.createServer(async (req, res) => {
       //                                          'Re-queue this SKU' button
       //                                          on Analytics, which knows
       //                                          the URL but not the job id
-      let info;
+      let info, jobId, priorStatus = null;
       if (b.jobId) {
-        info = Q.requeue.run(Number(b.jobId));
+        jobId = Number(b.jobId);
+        const cur = db.prepare(`SELECT status FROM jobs WHERE id=?`).get(jobId);
+        priorStatus = cur?.status || null;
+        info = Q.requeue.run(jobId);
       } else if (b.batchId && b.productUrl) {
-        const row = db.prepare(`SELECT id FROM jobs WHERE batch_id=? AND product_url=? LIMIT 1`).get(String(b.batchId), String(b.productUrl));
+        const row = db.prepare(`SELECT id, status FROM jobs WHERE batch_id=? AND product_url=? LIMIT 1`).get(String(b.batchId), String(b.productUrl));
         if (!row) return send(res, 404, { ok: false, error: 'no job found for that batchId + productUrl' });
-        info = Q.requeue.run(row.id);
+        jobId = Number(row.id);            // guard against BigInt in newer node:sqlite
+        priorStatus = row.status;
+        info = Q.requeue.run(jobId);
       } else {
         return send(res, 400, { ok: false, error: 'send {jobId} or {batchId, productUrl}' });
       }
-      return send(res, 200, { ok: info.changes > 0, updated: info.changes });
+      // changes == 0 with a valid id shouldn't happen in normal SQLite — UPDATE
+      // matches by WHERE regardless of value delta. Treat it as OK for the
+      // client (the job is now pending either way) but include diagnostics so
+      // any future 0-changes surface with real info instead of a misleading
+      // 'may already be pending' guess. Prior status is echoed so the UI can
+      // say 'reset from failed → pending' etc.
+      const changes = Number(info.changes);
+      return send(res, 200, {
+        ok: true,
+        updated: changes,
+        job_id: jobId,
+        prior_status: priorStatus,
+        was_already_pending: priorStatus === 'pending',
+      });
     }
     if (m === 'GET' && p === '/api/jobs/active-batch') {
       // Manager-pinned batch (if it still has pending work), else newest pending batch.
