@@ -4420,7 +4420,7 @@ async function openShopifyModal() {
       competitorBrands,
       hasReviewData: !!(cur.reviews?.hasReviews),
     };
-    wireShopifyModalHandlers(cur.id, allowlist, validationContext);
+    wireShopifyModalHandlers(cur.id, allowlist, validationContext, cur);
   } catch (e) {
     body.innerHTML = `<div class="hint" style="color: var(--danger); padding: 20px 0;">
       Failed to load: ${e.message}<br><br>
@@ -4789,17 +4789,16 @@ function renderShopifyModalBody({ currentProduct, productUrl, prompt, impactRows
     </div>`
   ).join('');
   return `
-    <!-- Quick-nav strip: 3-step flow always visible even when the modal
-         content is long or the user has expanded the reference sections.
-         Fixes 'where is the paste-back textarea?' by giving direct anchors
-         to the two textareas + the preview button. -->
-    <div class="row" style="margin-bottom: 12px; gap: 8px; padding: 8px 10px; background: var(--bg-3); border-radius: 6px; font-size: 12px;">
+    <!-- Sticky 3-step flow strip. Each button now DOES its step end-to-end,
+         not just scrolls — the sticky positioning keeps it visible even when
+         the user scrolls through the reference sections below. -->
+    <div class="row" id="shopifyFlowBar" style="position: sticky; top: -14px; z-index: 5; margin: -14px -14px 12px -14px; padding: 10px 14px; background: var(--bg-2); border-bottom: 1px solid var(--line-2); gap: 8px; font-size: 12px;">
       <strong>Flow:</strong>
-      <button class="small ghost" onclick="document.getElementById('shopifyPromptText')?.scrollIntoView({behavior:'smooth', block:'center'})">1️⃣ Prompt to copy</button>
+      <button class="small" id="shopifyStep1Btn" title="Copies the prompt to your clipboard AND opens claude.ai in a new tab. Paste it there with Ctrl+V.">1️⃣ Copy prompt + open Claude</button>
       <span class="hint">→</span>
-      <button class="small ghost" onclick="document.getElementById('shopifyJsonInput')?.scrollIntoView({behavior:'smooth', block:'center'}); document.getElementById('shopifyJsonInput')?.focus();">2️⃣ Paste Claude's response</button>
+      <button class="small" id="shopifyStep2Btn" title="Scrolls to + focuses the paste-back textarea. Also tries to auto-paste from your clipboard if you've already copied Claude's response.">2️⃣ Paste response</button>
       <span class="hint">→</span>
-      <button class="small ghost" onclick="document.getElementById('shopifyPreviewBtn')?.scrollIntoView({behavior:'smooth', block:'center'})">3️⃣ Preview + Push</button>
+      <button class="small" id="shopifyStep3Btn" title="Parses your pasted JSON, shows the before/after diff against your current Shopify listing + preflight rubric. Push button appears if preflight passes.">3️⃣ Preview diff</button>
     </div>
     <div class="hint" style="margin-bottom: 12px; padding: 10px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 6px;">
       <strong style="color: var(--warn);">Safety guarantee:</strong>
@@ -4913,12 +4912,46 @@ if (typeof document !== 'undefined' && !window._shopifyAutopasteListenerInstalle
   });
 }
 
-function wireShopifyModalHandlers(productId, allowlist, validationContext = {}) {
+function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, currentProduct = {}) {
   // Arm auto-paste for THIS modal open. Stash the allowlist globally
   // so the visibilitychange listener (installed once above) can consult
   // it without needing the modal-scoped closure.
   _shopifyAutopasteArmed = true;
   window._shopifyLastAllowlist = allowlist;
+
+  // Sticky flow-bar handlers: each button does its step end-to-end.
+  $('shopifyStep1Btn')?.addEventListener('click', async () => {
+    const t = $('shopifyPromptText')?.value || '';
+    const ok = await copyToClipboard(t);
+    toast(ok ? 'Prompt copied. Opening Claude — paste with Ctrl+V there.' : 'Copy failed — text selected, press Ctrl+C manually.', ok ? 'ok' : 'warn', { title: '1️⃣ Prompt copied' });
+    // Anchor-click so session cookies survive (same pattern as shopifyOpenClaudeBtn).
+    const a = document.createElement('a');
+    a.href = 'https://claude.ai/new'; a.target = '_blank'; a.rel = 'noreferrer';
+    document.body.appendChild(a); a.click(); a.remove();
+  });
+  $('shopifyStep2Btn')?.addEventListener('click', async () => {
+    const ta = $('shopifyJsonInput');
+    ta?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    ta?.focus();
+    // If the user already copied a Claude response, try to auto-fill.
+    if (ta && !ta.value.trim()) {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text && _looksLikeShopifyClaudeResponse(text, allowlist)) {
+          ta.value = text;
+          toast('Detected Claude response on clipboard — filled the textarea. Click 3️⃣ to preview.', 'ok', { title: '📋 Auto-pasted' });
+        }
+      } catch {
+        // Permission denied — user can still Ctrl+V manually.
+      }
+    }
+  });
+  $('shopifyStep3Btn')?.addEventListener('click', () => {
+    const box = $('shopifyPreviewBox');
+    box?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    $('shopifyPreviewBtn')?.click();
+  });
+
   $('shopifyCopyPromptBtn')?.addEventListener('click', async () => {
     const t = $('shopifyPromptText').value;
     if (await copyToClipboard(t)) toast('Prompt copied — paste into Claude.', 'ok', { title: 'Copied' });
@@ -4951,20 +4984,83 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}) 
     }
     const keptEntries = Object.entries(kept);
     const stripEntries = Object.entries(stripped);
+    // Diff renderer: for every field Claude wants to push, look up the
+    // CURRENT value on the Shopify listing and show a before/after
+    // comparison so the user can see EXACTLY what's changing. Field
+    // classification:
+    //   NEW      — current was blank / null → proposed adds content
+    //   CHANGED  — current + proposed both non-empty but differ
+    //   SAME     — proposed matches current (harmless, will re-PUT)
+    // For text fields we also show a char-count delta so the user can
+    // spot suspiciously short bodies (e.g. Claude truncated) at a glance.
+    const currentValueOf = (field) => {
+      // Map allowlisted field names to their location on the current
+      // Shopify product (fetched by /api/shopify/get-product).
+      switch (field) {
+        case 'title':          return currentProduct.title || '';
+        case 'body_html':      return currentProduct.body_html || '';
+        case 'tags':           return currentProduct.tags || '';
+        case 'product_type':   return currentProduct.product_type || '';
+        case 'vendor':         return currentProduct.vendor || '';
+        case 'handle':         return currentProduct.handle || '';
+        case 'seo_title':      return currentProduct.seo_title || '';
+        case 'seo_description':return currentProduct.seo_description || '';
+        case 'product_category':return currentProduct.product_category?.id || '';
+        // metafields_global_*_tag are legacy alternates for seo — no direct
+        // current-value mirror on the product, so treat as NEW.
+        default:               return '';
+      }
+    };
     const renderKeptField = ([k, v]) => {
-      const preview = typeof v === 'string' ? v.slice(0, 500) : JSON.stringify(v);
-      return `<div style="padding: 8px 0; border-bottom: 1px dashed var(--line-1);">
-        <div style="display: flex; gap: 8px; align-items: baseline;">
-          <code style="color: var(--success);">${k}</code>
-          <span class="hint">(${typeof v === 'string' ? v.length + ' chars' : typeof v})</span>
+      const current = currentValueOf(k);
+      const currentStr = typeof current === 'string' ? current : JSON.stringify(current);
+      const proposedStr = typeof v === 'string' ? v : JSON.stringify(v);
+      const isSame = currentStr === proposedStr;
+      const isNew  = !isSame && currentStr.trim().length === 0;
+      const label = isSame ? { text: 'SAME', color: 'var(--text-3)', bg: 'transparent' }
+                  : isNew  ? { text: 'NEW',  color: 'var(--success)', bg: 'var(--success-soft)' }
+                  :          { text: 'CHANGED', color: 'var(--warn)', bg: 'var(--warn-soft)' };
+      const proposedPreview = proposedStr.slice(0, 500);
+      const currentPreview  = currentStr.slice(0, 500);
+      // Char-count delta for text fields — makes suspiciously short outputs pop.
+      const delta = (typeof v === 'string' && typeof current === 'string')
+        ? (() => {
+            const d = v.length - current.length;
+            const sign = d > 0 ? '+' : '';
+            return ` <span class="hint" style="color:${d < 0 ? 'var(--warn)' : 'var(--text-3)'}">(${current.length} → ${v.length} chars, ${sign}${d})</span>`;
+          })()
+        : ` <span class="hint">(${typeof v})</span>`;
+      return `<div style="padding: 10px 0; border-bottom: 1px dashed var(--line-1);">
+        <div style="display: flex; gap: 8px; align-items: baseline; margin-bottom: 6px;">
+          <span style="padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; background:${label.bg}; color:${label.color}; border: 1px solid ${label.color};">${label.text}</span>
+          <code style="color: var(--text-1);">${k}</code>
+          ${delta}
         </div>
-        <div class="hint" style="margin-top: 4px; white-space: pre-wrap; font-family: var(--mono); font-size: 11px;">${preview.replace(/</g, '&lt;')}${(typeof v === 'string' && v.length > 500) ? '…' : ''}</div>
+        ${!isNew && !isSame ? `
+          <div class="hint" style="margin-top: 2px;"><strong style="color: var(--text-3);">before:</strong></div>
+          <div class="hint" style="white-space: pre-wrap; font-family: var(--mono); font-size: 11px; padding: 6px 8px; background: var(--bg-3); border-left: 3px solid var(--text-3); border-radius: 0 4px 4px 0; opacity: 0.75;">${currentPreview.replace(/</g, '&lt;') || '<em>(empty)</em>'}${currentStr.length > 500 ? '…' : ''}</div>
+          <div class="hint" style="margin-top: 4px;"><strong style="color: var(--warn);">after:</strong></div>
+        ` : ''}
+        <div class="hint" style="white-space: pre-wrap; font-family: var(--mono); font-size: 11px; padding: 6px 8px; background: ${isNew ? 'var(--success-soft)' : isSame ? 'var(--bg-3)' : 'var(--warn-soft)'}; border-left: 3px solid ${label.color}; border-radius: 0 4px 4px 0;">${proposedPreview.replace(/</g, '&lt;')}${proposedStr.length > 500 ? '…' : ''}</div>
       </div>`;
     };
+    // Diff summary — count NEW / CHANGED / SAME across kept fields.
+    // Same classification rule as renderKeptField uses inside the row.
+    let newCount = 0, changedCount = 0, sameCount = 0;
+    for (const [k, v] of keptEntries) {
+      const curStr = String(currentValueOf(k) ?? '');
+      const propStr = typeof v === 'string' ? v : JSON.stringify(v);
+      if (curStr === propStr) sameCount++;
+      else if (curStr.trim() === '') newCount++;
+      else changedCount++;
+    }
     box.innerHTML = `
       <div style="padding: 10px; background: ${keptEntries.length > 0 ? 'var(--success-soft)' : 'var(--warn-soft)'}; border: 1px solid ${keptEntries.length > 0 ? 'var(--success)' : 'var(--warn)'}; border-radius: 6px;">
-        <div style="display: flex; align-items: baseline; gap: 12px;">
+        <div style="display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;">
           <strong style="color: ${keptEntries.length > 0 ? 'var(--success)' : 'var(--warn)'};">${keptEntries.length} field(s) will be pushed to Shopify</strong>
+          ${newCount > 0     ? `<span class="hint" style="padding:2px 8px; border-radius:4px; background:var(--success-soft); color:var(--success); border:1px solid var(--success); font-weight:700;">${newCount} NEW</span>` : ''}
+          ${changedCount > 0 ? `<span class="hint" style="padding:2px 8px; border-radius:4px; background:var(--warn-soft); color:var(--warn); border:1px solid var(--warn); font-weight:700;">${changedCount} CHANGED</span>` : ''}
+          ${sameCount > 0    ? `<span class="hint" style="padding:2px 8px; border-radius:4px; color:var(--text-3); border:1px solid var(--line-2); font-weight:700;">${sameCount} SAME</span>` : ''}
           ${stripEntries.length > 0 ? `<span class="hint" style="color: var(--danger);">${stripEntries.length} stripped by allowlist</span>` : ''}
         </div>
         <div style="margin-top: 8px;">${keptEntries.map(renderKeptField).join('') || '<div class="hint">nothing to send</div>'}</div>
