@@ -520,6 +520,33 @@
       kpLog('interactive Discover card did not appear within 45s', 'warn');
     }
 
+    // ----- URL-navigation fallback (added after recurring Auto-click failures) -----
+    // If the interactive card never appeared OR every click was ignored,
+    // navigate DIRECTLY to /ideas/new. Google Ads / KP URL structure has
+    // been stable: /aw/keywordplanner/ideas/new is the Discover Keywords
+    // pane. Bypasses the click-through hub entirely and works even when
+    // Google restructures the intermediate cards. Only skipped if we're
+    // already on that path (in which case direct navigation wouldn't help).
+    if (!/\/ideas\/new(\/|$|\?)/.test(location.pathname + location.search)) {
+      try {
+        const target = `${location.origin}/aw/keywordplanner/ideas/new${location.search}`;
+        kpLog(`click strategies failed — navigating directly to ${target.slice(0, 100)}`, 'warn');
+        location.href = target;
+        // Wait for the fresh page to hydrate + re-check.
+        await sleep(3500);
+        await waitFor(() => document.querySelectorAll('button, [role="button"]').length > 5,
+          { timeoutMs: 20000, name: 'KP shell re-hydration after direct nav' });
+        await humanPause(800);
+        if (isOnIdeasPage()) {
+          kpLog('Discover Keywords pane opened via direct URL navigation', 'ok');
+          return;
+        }
+        kpLog('direct URL navigation loaded but seed input still not visible — falling through to manual', 'warn');
+      } catch (e) {
+        kpLog(`direct URL navigation failed: ${e.message}`, 'warn');
+      }
+    }
+
     // ----- Manual fallback -----
     // Synthetic clicks may be ignored by Material's isTrusted checks. Activate
     // the KP tab so the user can click the card themselves; we wait for them.
