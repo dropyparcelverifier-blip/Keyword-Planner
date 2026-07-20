@@ -2513,6 +2513,14 @@ async function run() {
   // Client preview handles nested metafields as separate diff rows.
   assert(appJs.body.includes('metafield:'),                    'MF-WRITE.12 client tags metafield entries in diff');
   assert(appJs.body.includes('METAFIELD_ALLOWLIST'),           'MF-WRITE.13 client-side allowlist for preview');
+  // Push History UI — persistent panel + per-row revert (not just the
+  // inline post-push button).
+  assert(appJs.body.includes('shopifyHistoryBtn'),             'HIST-UI.1 history button rendered in flow bar');
+  assert(appJs.body.includes('shopifyHistoryPanel'),           'HIST-UI.2 history panel element');
+  assert(appJs.body.includes('api.shopifyPushHistory'),        'HIST-UI.3 history handler calls the API');
+  assert(appJs.body.includes('data-revert-history-id'),        'HIST-UI.4 per-row revert buttons wired');
+  assert(appJs.body.includes("no snapshot — can't revert"), 'HIST-UI.5 explains rows without snapshots');
+  assert(appJs.body.includes('REVERTED'),                      'HIST-UI.6 already-reverted rows show status chip');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
