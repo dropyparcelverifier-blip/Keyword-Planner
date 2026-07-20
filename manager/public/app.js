@@ -4412,6 +4412,27 @@ async function openShopifyModal() {
       allowlist,
     });
     renderBulkQueueHeader();
+    // Problem-tag warning banner: no-google / no-index tags block Google
+    // Merchant Center + organic Shopping sync. Push will succeed but the
+    // SEO improvements are wasted. Surfaced ONCE at the top of the modal
+    // body so operators can decide: remove the tag first, or acknowledge.
+    if (Array.isArray(cur.problem_tags) && cur.problem_tags.length > 0) {
+      const banner = document.createElement('div');
+      banner.style.cssText = 'padding: 12px 14px; background: var(--danger-soft); border: 1px solid var(--danger); border-radius: 6px; margin-bottom: 12px; font-size: 12px;';
+      banner.innerHTML = `
+        <div style="display:flex; align-items:baseline; gap:10px;">
+          <strong style="color: var(--danger);">⚠ Search/index-blocking tag detected</strong>
+          <span class="hint">on this product: ${cur.problem_tags.map(t => `<code>${esc(t)}</code>`).join(', ')}</span>
+        </div>
+        <div class="hint" style="margin-top: 6px;">
+          <strong>Impact:</strong> The <code>${esc(cur.problem_tags[0])}</code> tag typically instructs feed/SEO apps to <strong>exclude this product from Google Merchant Center + organic Google Shopping</strong>. Your Claude update will improve the on-page SEO but the product may still not appear in Google's shopping index while the tag is set. Bulk-edit apps sometimes set it accidentally.
+        </div>
+        <div class="hint" style="margin-top: 6px;">
+          <strong>Fix:</strong> Open the product in Shopify Admin (<a href="${esc(productUrl)}" target="_blank" rel="noopener">${esc(productUrl)}</a>), scroll to <strong>Tags</strong> in the right rail, and remove <code>${esc(cur.problem_tags[0])}</code>. Save. Then come back and push here.
+        </div>
+      `;
+      body.insertBefore(banner, body.firstChild);
+    }
     // Build validationContext for the preflight checker. Same signals the
     // prompt builder used, extracted from the SKU's research rows:
     //   · primaryKeyword — highest opportunity_score keyword (if computed)
@@ -4712,9 +4733,43 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   if (currentProduct.variants_readonly?.length) {
     L.push('**READ-ONLY variant data** (for context — DO NOT include; also useful for accurate pack-size mentions in body):');
     for (const v of currentProduct.variants_readonly.slice(0, 8)) {
-      L.push(`  · variant \`${v.sku || v.id}\` — ${v.title || '(no title)'} · ₹${v.price} · ${v.weight || 0}${v.weight_unit || 'g'} · inv ${v.inventory_quantity ?? '—'}`);
+      const barcodeStr = v.barcode ? ` · barcode/GTIN: **${v.barcode}**` : '';
+      L.push(`  · variant \`${v.sku || v.id}\` — ${v.title || '(no title)'} · ₹${v.price} · ${v.weight || 0}${v.weight_unit || 'g'} · inv ${v.inventory_quantity ?? '—'}${barcodeStr}`);
+    }
+    // Extract the first non-empty barcode and callout as a MUST-INCLUDE
+    // for Product JSON-LD. Big Google Merchant / rich-result signal.
+    const firstBarcode = currentProduct.variants_readonly.find(v => v.barcode)?.barcode;
+    if (firstBarcode) {
+      L.push('');
+      L.push(`**GTIN present** (\`${firstBarcode}\`): **MUST** include \`"gtin13":"${firstBarcode}"\` in the Product JSON-LD schema. This unlocks Google Merchant Center matching + product rich-results.`);
     }
     L.push('');
+  }
+  // Curated custom metafields — these render on the product page via the
+  // store's theme (e.g. Bullet Points, Ingredients, How To Use, F&Q, custom
+  // Description). Claude sees them so it can:
+  //   1. Echo factual content verbatim (never paraphrase ingredients / dosage
+  //      / F&Q answers — drift is a compliance + accuracy risk).
+  //   2. NOT duplicate the same content in body_html — the theme is
+  //      already rendering these fields, duplicating creates SEO
+  //      duplicate-content signal + bloats the page.
+  if (currentProduct.curated_metafields?.length) {
+    L.push('## EXISTING STORE METAFIELDS (rendered on the product page by the theme)');
+    L.push('These fields ALREADY appear on the product page via the store\'s Shopify theme (Description, Ingredients, How To Use, F&Q, Bullet Points, etc.). Two rules for `body_html`:');
+    L.push('- **DO NOT duplicate** — if content is here, the theme is already showing it. Duplicate content in body_html hurts SEO (Google detects it) AND bloats page weight.');
+    L.push('- **Preserve factual accuracy** — for ingredients, dosage, disclaimers, direct-quote FAQ answers: echo VERBATIM if you reference them, never paraphrase.');
+    L.push('');
+    L.push('body_html should COMPLEMENT these metafields with: ranking-focused opening paragraph, featured-snippet block, comparison table, buying guide, regional use-cases, related-collections links, Shipping & returns. Skip: ingredient breakdown, how-to-use, standard FAQ (those metafields already cover them).');
+    L.push('');
+    for (const mf of currentProduct.curated_metafields) {
+      const label = `${mf.namespace}.${mf.key}`;
+      const preview = mf.value.length > 800 ? mf.value.slice(0, 800) + '…' : mf.value;
+      L.push(`### \`${label}\` (${mf.type})`);
+      L.push('```');
+      L.push(preview);
+      L.push('```');
+      L.push('');
+    }
   }
   if (currentProduct.images?.length) {
     L.push(`**Images** (${currentProduct.images.length} — READ-ONLY, do NOT include):`);
