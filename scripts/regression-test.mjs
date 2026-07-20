@@ -2361,6 +2361,15 @@ async function run() {
   assert(apiFull.includes('jobsRequeueByUrl'),                'REQUEUE.2 client wrapper defined');
   assert(appJs.body.includes('id="anRequeueSkuBtn"'),          'REQUEUE.3 per-SKU re-queue button in analytics header');
   assert(appJs.body.includes('jobsRequeueByUrl'),             'REQUEUE.4 button handler calls the client wrapper');
+  // Prompt: competitive review landscape from amazon_rating + amazon_reviews.
+  assert(appJs.body.includes('COMPETITIVE REVIEW LANDSCAPE'), 'PROMPT-REV.1 review-landscape header in prompt');
+  assert(appJs.body.includes('Average competitor rating'),    'PROMPT-REV.2 avg competitor rating line');
+  assert(appJs.body.includes('Median competitor review count'), 'PROMPT-REV.3 median review count line');
+  assert(appJs.body.includes('Top-review competitor'),        'PROMPT-REV.4 top-review competitor line');
+  assert(appJs.body.includes('social-proof bar'),             'PROMPT-REV.5 explains how Claude should use the numbers');
+  // Guard: section only appears when we have ≥3 rows of Amazon data — no
+  // empty section for SKUs where Amazon scrape failed / never ran.
+  assert(/amzRows\.length\s*>=\s*3/.test(appJs.body),         'PROMPT-REV.6 guard: needs ≥3 Amazon rows to render');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
