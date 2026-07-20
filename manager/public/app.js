@@ -4658,7 +4658,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('');
   L.push('## HARD CONSTRAINTS');
   L.push('- **NEVER produce**: `price`, `weight`, `weight_unit`, `location`, `inventory_quantity`, `variants`, `images`, `sku`. The manager strips them server-side; wasted output tokens.');
-  L.push('- **ONLY produce keys** from this allowlist: ' + allowlist.map(f => `\`${f}\``).join(', ') + '.');
+  L.push('- **ONLY produce keys** from this allowlist: ' + allowlist.map(f => `\`${f}\``).join(', ') + `, AND a nested \`metafields\` object with any of: \`custom.how_to_use\`, \`custom.ingredients\`, \`custom.faq_q_1\`, \`custom.faq_a_1\`, \`custom.bullet_points\`. Anything else is stripped server-side.`);
   L.push('- **Return format**: reasoning paragraph, then ONE fenced ```json``` block. No other JSON. No commentary after.');
   L.push('- **India-first**. Currency ₹ and `INR` in schema. Pan-India context. Every trust signal India-specific.');
   L.push('- **No invented claims** — do not add "clinically proven", "dermatologist tested", certifications, awards, specific test results unless they appear in the research data.');
@@ -4844,9 +4844,13 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('- [ ] `seo_description` AND `metafields_global_description_tag` are BOTH set to the same 150-160 char string; primary keyword in first 60 chars, includes a CTA verb + a trust signal.');
   L.push('- [ ] `product_category` is set to a `gid://shopify/ProductTaxonomyNode/N` id IF you can pick a category with high confidence; omit the key entirely otherwise (a wrong id is worse than none — Shopify Google Merchant sync will fail).');
   L.push('- [ ] `AggregateRating` in Product JSON-LD: present ONLY if real review data was provided above; if none was provided, the key is absent from Product schema (never fabricate).');
-  L.push('- [ ] `body_html` between 1200-2000 words. Zero copy-pasted sentences from research context; every sentence rewritten (Tier 1 · unique content).');
-  L.push('- [ ] `body_html` payload target 12-18 KB, HARD CAP 25 KB (Tier 1 · page speed — every extra KB drops Lighthouse Performance measurably on mobile).');
-  L.push('- [ ] `body_html` has ≤ 15 total `<a>` tags AND ≤ 10 `<h2>` sections AND ≤ 8 FAQ entries (page-speed guardrails).');
+  L.push('- [ ] `body_html` between 800-1200 words (DESCRIPTION tab content only — How To Use / Ingredients / FAQ moved to metafields). Zero copy-pasted sentences from research context; every sentence rewritten (Tier 1 · unique content).');
+  L.push('- [ ] `body_html` payload target 8-15 KB, HARD CAP 20 KB (Tier 1 · page speed — every extra KB drops Lighthouse Performance measurably on mobile). Smaller than before because metafields carry the tab content.');
+  L.push('- [ ] `body_html` has ≤ 10 total `<a>` tags AND ≤ 8 `<h2>` sections (page-speed guardrails). NO FAQ `<details>` blocks — FAQ lives in `metafields.custom.faq_q_1` / `faq_a_1`.');
+  L.push('- [ ] `metafields.custom.how_to_use` populated with numbered steps + frequency + side effects + storage (theme renders in the "How To Use" tab).');
+  L.push('- [ ] `metafields.custom.ingredients` populated — echo verbatim from source metafield if provided, never paraphrase actives / dosage (theme renders in the "Ingredients" tab).');
+  L.push('- [ ] `metafields.custom.bullet_points` populated with 5-6 Amazon-style CAPITAL-PREFIX bullets, one per line.');
+  L.push('- [ ] `metafields.custom.faq_q_1` + `faq_a_1` populated with the highest-value buyer question + a 60-100 word answer (theme renders in the FAQ block).');
   L.push('- [ ] Every external `<a>` (dermnetnz.org / aad.org / pubmed.* / mailto:*) has `rel="nofollow noopener"` (Lighthouse Best Practices).');
   L.push('- [ ] Product JSON-LD includes: name, description, sku, brand, image, offers {price, priceCurrency:INR, availability, url, priceValidUntil}, dateModified. GTIN if research data has one. AggregateRating ONLY if real review data provided.');
   L.push('**Tier 2**');
@@ -4933,9 +4937,10 @@ function renderShopifyModalBody({ currentProduct, productUrl, prompt, impactRows
     <div style="margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--line-1);">
       <div class="hint" style="margin-bottom: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3);">Reference</div>
       <details style="margin-bottom: 8px;">
-        <summary style="cursor: pointer; padding: 8px; background: var(--bg-3); border-radius: 6px;"><strong>Safety guarantee</strong> — ${allowlist.length} allowlisted fields only</summary>
+        <summary style="cursor: pointer; padding: 8px; background: var(--bg-3); border-radius: 6px;"><strong>Safety guarantee</strong> — ${allowlist.length} core fields + 5 metafields, everything else stripped</summary>
         <div class="hint" style="padding: 10px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 6px; margin-top: 4px;">
-          The manager only PUTs these ${allowlist.length} fields to Shopify: ${allowlist.map(f => `<code>${f}</code>`).join(', ')}.
+          The manager only writes these <strong>${allowlist.length} core fields</strong>: ${allowlist.map(f => `<code>${f}</code>`).join(', ')}<br>
+          Plus these <strong>5 metafields</strong> (theme uses them for the How To Use / Ingredients / FAQ tabs): <code>custom.how_to_use</code>, <code>custom.ingredients</code>, <code>custom.faq_q_1</code>, <code>custom.faq_a_1</code>, <code>custom.bullet_points</code>.<br>
           Anything else in Claude's JSON — including price, weight, location, inventory, variants — is stripped server-side before the request leaves this process.
         </div>
       </details>
