@@ -1676,7 +1676,24 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, updated: n, active_batch_id: activeHb });
     }
     if (m === 'POST' && p === '/api/jobs/requeue') {
-      const b = await readJson(req); const info = Q.requeue.run(Number(b.jobId));
+      const b = await readJson(req);
+      // Two lookup modes:
+      //   { jobId: N }                         — canonical, used by the
+      //                                          Failed-jobs card row-click
+      //   { batchId: '...', productUrl: '...'} — used by the per-SKU
+      //                                          'Re-queue this SKU' button
+      //                                          on Analytics, which knows
+      //                                          the URL but not the job id
+      let info;
+      if (b.jobId) {
+        info = Q.requeue.run(Number(b.jobId));
+      } else if (b.batchId && b.productUrl) {
+        const row = db.prepare(`SELECT id FROM jobs WHERE batch_id=? AND product_url=? LIMIT 1`).get(String(b.batchId), String(b.productUrl));
+        if (!row) return send(res, 404, { ok: false, error: 'no job found for that batchId + productUrl' });
+        info = Q.requeue.run(row.id);
+      } else {
+        return send(res, 400, { ok: false, error: 'send {jobId} or {batchId, productUrl}' });
+      }
       return send(res, 200, { ok: info.changes > 0, updated: info.changes });
     }
     if (m === 'GET' && p === '/api/jobs/active-batch') {

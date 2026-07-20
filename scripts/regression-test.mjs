@@ -2343,6 +2343,24 @@ async function run() {
   assert(!serverJsRaw.includes("m === 'GET' && p === '/api/health'"), 'ROUTER.7 legacy /api/health if-branch removed');
   assert(!serverJsRaw.includes("m === 'POST' && p === '/api/reset-all'"), 'ROUTER.8 legacy /api/reset-all if-branch removed');
   assert(!serverJsRaw.includes("m === 'GET' && p === '/api/config'"), 'ROUTER.9 legacy /api/config if-branch removed');
+  // Bulk Shopify update — walks every SKU in a batch through the modal.
+  assert(idx.body.includes('id="anShopifyBulkBtn"'),           'BULK.1 bulk button element');
+  assert(appJs.body.includes('startBulkShopifyRun'),           'BULK.2 bulk start handler defined');
+  assert(appJs.body.includes('analytics.bulkQueue'),           'BULK.3 queue state on analytics');
+  assert(appJs.body.includes('advanceBulkQueue'),              'BULK.4 advance helper defined');
+  assert(appJs.body.includes('renderBulkQueueHeader'),         'BULK.5 queue-header renderer defined');
+  assert(appJs.body.includes('shopifyBulkSkipBtn'),            'BULK.6 skip control wired');
+  assert(appJs.body.includes('shopifyBulkNextBtn'),            'BULK.7 next control wired');
+  assert(appJs.body.includes('shopifyBulkEndBtn'),             'BULK.8 end-bulk control wired');
+  assert(appJs.body.includes('autoAdvance'),                   'BULK.9 auto-advance flag on queue');
+  assert(/q\.done\.push\(cur\.sku\)/.test(appJs.body),        'BULK.10 push-success records SKU as done');
+  assert(/q\.failed\.push\(cur\.sku\)/.test(appJs.body),      'BULK.11 push-failure records SKU as failed');
+  // Per-SKU 'Re-queue' button on Analytics — server accepts {batchId, productUrl}
+  // as an alternative to numeric jobId so the client doesn't need to know it.
+  assert(srvFull.includes('batchId && b.productUrl'),         'REQUEUE.1 server accepts batchId+productUrl for /api/jobs/requeue');
+  assert(apiFull.includes('jobsRequeueByUrl'),                'REQUEUE.2 client wrapper defined');
+  assert(appJs.body.includes('id="anRequeueSkuBtn"'),          'REQUEUE.3 per-SKU re-queue button in analytics header');
+  assert(appJs.body.includes('jobsRequeueByUrl'),             'REQUEUE.4 button handler calls the client wrapper');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
