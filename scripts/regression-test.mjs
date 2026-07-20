@@ -2558,6 +2558,13 @@ async function run() {
   const bgJs = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
   assert(bgJs.includes("chrome.power?.requestKeepAwake?.('display')"), 'WAKE.6 worker requests keep-awake during runs');
   assert(bgJs.includes('chrome.power?.releaseKeepAwake?.()'),  'WAKE.7 worker releases keep-awake in finally');
+  // Metafield-definitions diagnostic — 'why are tabs still blank' one-click.
+  assert(srvFull.includes("'/api/shopify/metafield-definitions'"), 'MF-DIAG.1 diagnostic endpoint registered');
+  assert(srvFull.includes('alias_resolution'),                  'MF-DIAG.2 endpoint reports resolver decisions per alias');
+  assert(apiFull.includes('shopifyMetafieldDefinitions'),       'MF-DIAG.3 client wrapper');
+  assert(appJs.body.includes('shopifyDefsBtn'),                 'MF-DIAG.4 inspector button in flow bar');
+  assert(appJs.body.includes('would_write_to'),                 'MF-DIAG.5 panel renders would_write_to per alias');
+  assert(appJs.body.includes("alias(es) can't find a matching definition"), 'MF-DIAG.6 panel warns loud when aliases unresolved');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.

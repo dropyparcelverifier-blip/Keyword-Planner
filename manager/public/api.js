@@ -96,6 +96,7 @@ export const api = {
   shopifyGetProduct:   (productUrl)    => _fetch(`/api/shopify/get-product?url=${encodeURIComponent(productUrl)}`),
   // Server-cached (10min TTL) — cheap to call every prompt build.
   shopifyGetPolicies:  ()              => _fetch('/api/shopify/get-policies'),
+  shopifyMetafieldDefinitions: ()      => _fetch('/api/shopify/metafield-definitions'),
   // Push history + revert — safety net for 'the new copy is worse than the old'.
   shopifyPushHistory:  (productId)     => _fetch(`/api/shopify/push-history?productId=${encodeURIComponent(productId)}`),
   shopifyRevert:       (historyId)     => _fetch('/api/shopify/revert', { method: 'POST', body: { historyId, confirm: 'REVERT' } }),
