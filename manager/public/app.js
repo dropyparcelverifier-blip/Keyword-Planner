@@ -4900,7 +4900,10 @@ function renderShopifyModalBody({ currentProduct, productUrl, prompt, impactRows
       <button class="small" id="shopifyStep2Btn" title="Scrolls to + focuses the paste-back textarea. Also tries to auto-paste from your clipboard if you've already copied Claude's response.">2️⃣ Paste response</button>
       <span class="hint">→</span>
       <button class="small" id="shopifyStep3Btn" title="Parses your pasted JSON, shows the before/after diff against your current Shopify listing + preflight rubric. Push button appears if preflight passes.">3️⃣ Preview diff</button>
+      <span class="spacer" style="flex:1;"></span>
+      <button class="small secondary" id="shopifyHistoryBtn" title="Show every previous push to this product with a Revert button per row. Only pushes made AFTER snapshot support was deployed can be reverted.">🕘 Push history</button>
     </div>
+    <div id="shopifyHistoryPanel" style="display:none; margin-bottom: 12px; padding: 10px 14px; background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 6px;"></div>
     <!-- Working area FIRST — prompt textarea, paste-back textarea, preview
          button. Reference sections (safety guarantee / current listing /
          field-impact) are moved BELOW so users never scroll past their
@@ -5077,6 +5080,80 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
     const box = $('shopifyPreviewBox');
     box?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     $('shopifyPreviewBtn')?.click();
+  });
+  // Push-history panel — lists every prior push to this product with a
+  // Revert-per-row button. Only pushes made AFTER snapshot support landed
+  // (11af892) can be reverted; older ones have empty snapshots and show
+  // 'no snapshot' instead of a button.
+  $('shopifyHistoryBtn')?.addEventListener('click', async () => {
+    const panel = $('shopifyHistoryPanel');
+    if (!panel) return;
+    if (panel.style.display !== 'none' && panel.dataset.loaded === String(productId)) {
+      panel.style.display = 'none';   // toggle off
+      return;
+    }
+    panel.style.display = '';
+    panel.innerHTML = '<div class="hint">Loading push history…</div>';
+    try {
+      const r = await api.shopifyPushHistory(productId);
+      const rows = r.history || [];
+      if (rows.length === 0) {
+        panel.innerHTML = `<div class="hint">No push history recorded for this product yet. Pushes made BEFORE the snapshot feature landed aren't listed here (there was no snapshot capture then).</div>`;
+        return;
+      }
+      const fmtDate = ts => new Date(ts).toLocaleString();
+      const rowsHtml = rows.map(row => {
+        const patchKeys = Object.keys(row.patch || {}).filter(k => k !== 'metafields');
+        const mfKeys = row.patch?.metafields ? Object.keys(row.patch.metafields) : [];
+        const canRevert = row.can_revert && !row.reverted_at;
+        const statusChip = row.reverted_at
+          ? `<span style="padding:2px 8px; border-radius:4px; background:var(--warn-soft); color:var(--warn); border:1px solid var(--warn); font-size:10px; font-weight:700;">REVERTED ${fmtDate(row.reverted_at)}</span>`
+          : canRevert
+          ? `<button class="small danger" data-revert-history-id="${row.id}">↶ Revert this push</button>`
+          : `<span class="hint" style="color:var(--warn);">no snapshot — can't revert</span>`;
+        return `
+          <div style="padding: 10px 0; border-bottom: 1px dashed var(--line-1);">
+            <div style="display:flex; gap:10px; align-items:baseline; flex-wrap:wrap;">
+              <strong>${fmtDate(row.pushed_at)}</strong>
+              <span class="hint">by ${esc(row.pushed_by || 'unknown')}</span>
+              ${row.batch_id ? `<span class="hint">· batch ${esc(row.batch_id)}</span>` : ''}
+              <span class="spacer" style="flex:1;"></span>
+              ${statusChip}
+            </div>
+            <div class="hint" style="margin-top:4px;">
+              Sent: ${patchKeys.map(k => `<code>${esc(k)}</code>`).join(', ') || '(none)'}
+              ${mfKeys.length ? ` · Metafields: ${mfKeys.map(k => `<code>${esc(k)}</code>`).join(', ')}` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+      panel.innerHTML = `
+        <div style="display:flex; align-items:baseline; gap:10px; margin-bottom: 8px;">
+          <strong>🕘 Push history</strong>
+          <span class="hint">${rows.length} push(es) recorded for this product · most recent first</span>
+          <span class="spacer" style="flex:1;"></span>
+          <button class="small ghost" id="shopifyHistoryCloseBtn">Close</button>
+        </div>
+        ${rowsHtml}
+      `;
+      panel.dataset.loaded = String(productId);
+      $('shopifyHistoryCloseBtn')?.addEventListener('click', () => { panel.style.display = 'none'; });
+      panel.querySelectorAll('[data-revert-history-id]').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          const hid = Number(e.currentTarget.dataset.revertHistoryId);
+          if (!hid || !confirm(`Revert push #${hid}?\n\nThe title / body_html / SEO fields / metafields will be restored to what they were BEFORE this push. Any hand-edits made in Shopify Admin AFTER this push will be lost.`)) return;
+          e.currentTarget.disabled = true; e.currentTarget.textContent = '↶ Reverting…';
+          try {
+            const rv = await api.shopifyRevert(hid);
+            toast(`Reverted push #${hid}. Restored: ${(rv.restoredFields || []).join(', ')}${rv.restoredMetafields?.length ? ` · Metafields: ${rv.restoredMetafields.map(m => m.key).join(', ')}` : ''}`, 'ok', { title: '↶ Revert done' });
+            // Refresh the panel so the row shows as REVERTED.
+            $('shopifyHistoryBtn')?.click(); $('shopifyHistoryBtn')?.click();
+          } catch (err) { toast(err.message || 'Revert failed.', 'err'); e.currentTarget.disabled = false; e.currentTarget.textContent = '↶ Revert this push'; }
+        });
+      });
+    } catch (e) {
+      panel.innerHTML = `<div class="hint" style="color: var(--danger);">Failed to load push history: ${esc(e.message)}. Check that the manager is running the current server code (⚠ RESTART pill?).</div>`;
+    }
   });
 
   $('shopifyCopyPromptBtn')?.addEventListener('click', async () => {
