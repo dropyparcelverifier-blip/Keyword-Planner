@@ -2497,6 +2497,22 @@ async function run() {
   assert(appJs.body.includes('GTIN present'),                  'META.6 prompt requires gtin13 when barcode present');
   assert(appJs.body.includes('problem_tags'),                  'META.7 client renders problem-tag banner');
   assert(appJs.body.includes('Search/index-blocking tag'),     'META.8 banner text present');
+  // Metafield WRITE pipeline: server allowlist + client-side split + preview.
+  assert(srvFull.includes('SHOPIFY_METAFIELD_ALLOWLIST'),      'MF-WRITE.1 server metafield allowlist declared');
+  assert(srvFull.includes("'custom.how_to_use'"),              'MF-WRITE.2 how_to_use in server allowlist');
+  assert(srvFull.includes("'custom.ingredients'"),             'MF-WRITE.3 ingredients in server allowlist');
+  assert(srvFull.includes('metafieldsToWrite'),                'MF-WRITE.4 server writes metafields via /metafields.json');
+  assert(srvFull.includes('POST', srvFull.indexOf('metafieldsToWrite')), 'MF-WRITE.5 POST used for metafield upsert');
+  assert(srvFull.includes('snapshot.metafields'),              'MF-WRITE.6 snapshot includes metafields for revert');
+  assert(srvFull.includes('restoredMetafields'),               'MF-WRITE.7 revert restores metafields');
+  // Prompt guides Claude to split content between body_html and metafields.
+  assert(appJs.body.includes('DESCRIPTION tab only'),          'MF-WRITE.8 prompt scopes body_html to Description tab');
+  assert(appJs.body.includes('custom.how_to_use'),             'MF-WRITE.9 prompt output spec includes how_to_use');
+  assert(appJs.body.includes('custom.ingredients'),            'MF-WRITE.10 prompt output spec includes ingredients');
+  assert(appJs.body.includes('custom.bullet_points'),          'MF-WRITE.11 prompt output spec includes bullet_points');
+  // Client preview handles nested metafields as separate diff rows.
+  assert(appJs.body.includes('metafield:'),                    'MF-WRITE.12 client tags metafield entries in diff');
+  assert(appJs.body.includes('METAFIELD_ALLOWLIST'),           'MF-WRITE.13 client-side allowlist for preview');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.

@@ -4640,17 +4640,14 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('2. **Handle** — kebab-case slug MUST contain the primary keyword. If the current handle is generic (e.g. `product-1234`), replace it. If it already contains the primary keyword, KEEP IT (changing loses backlinks + existing SEO).');
   L.push('3. **Meta title** — 55-60 chars. Different phrasing than title. Include the #1 buying-intent keyword + one benefit hook + `| dropy.in` at the end for brand-trust CTR.');
   L.push('4. **Meta description** — 150-160 chars. Include primary keyword in first 60 chars. Include a CTA verb ("Shop", "Order", "Get"). Include a trust signal ("Pan-India delivery" / "COD available" / "Free shipping"). Never truncated — count chars.');
-  L.push('5. **Body HTML** — 1200-2000 words, structured for scannability AND for Google. Required sections IN THIS ORDER:');
+  L.push('5. **Body HTML (DESCRIPTION tab only)** — 800-1200 words for this tab. THREE sections go to METAFIELDS not here: How To Use, Ingredients, FAQs (see OUTPUT SPEC below). Required sections for body_html IN THIS ORDER:');
   L.push('   - `<p>` opening — 2-3 sentences, primary keyword in the first sentence, benefit in the second. This is the ranking anchor.');
   L.push('   - `<h2>` FEATURED-SNIPPET TARGET — 40-60 word direct answer to the highest-volume question-shaped query.');
   L.push('   - `<h2>` Why it works — bullet list of 4-6 benefits, each with a **bold benefit** + supporting sentence.');
-  L.push('   - `<h2>` Ingredient / key-actives breakdown — for each key ingredient (or key spec, for non-cosmetic products), a `<h3>` with the ingredient name + one paragraph explaining what it does, at what strength, and what claims it supports. Cite dermatology sources by name in prose (AAD, DermNet NZ, PubMed) — link only to `dermnetnz.org`, `aad.org`, or `pubmed.ncbi.nlm.nih.gov` (do NOT invent URLs — use `https://dermnetnz.org/search?q=<term>` style search URLs which are always valid).');
-  L.push('   - `<h2>` How to use — numbered `<ol>` with 3-5 steps + a `<p>` for frequency, side effects, storage. Feeds the HowTo schema below.');
   L.push('   - `<h2>` Specifications — a `<table>` with 4-8 rows (weight, dimensions, key claim, country of origin, etc). Structured data helps rank. Include `<td>` for any GTIN/UPC/EAN if the research data has it.');
   L.push('   - `<h2>` How it compares — a `<table>` comparing THIS product against 2-3 NEUTRAL alternatives in the same category (e.g. "4% vs 10% strength", "creamy vs foaming", "size options"). Compare **objective features** (concentration, price band, pack size, use frequency) — NOT competitor brand names. This IS a comparison article for on-page purposes; keeps users on the page and signals topical depth.');
   L.push('   - `<h2>` Buying guide — a `<h3>` "How to choose the right variant for your need" block with 3-5 short scenarios matching the buying-intent keywords from research. This is the mini-buying-guide that captures "best X for Y" queries directly on the PDP.');
   L.push('   - `<h2>` Who it\'s for — India-specific use cases (cold Delhi winter, Bengaluru AC skin, Mumbai humidity, Chennai heat). Rank on regional queries.');
-  L.push('   - `<h2>` FAQs — 6-10 `<details><summary>Q</summary>A</details>` blocks. Use the question-shaped queries below verbatim (People-Also-Ask style), each answer 40-80 words. Include at least one "Can I use this every day?", one "How long does it take to work?", one price/availability question, one safety question, one usage-specifics question.');
   L.push('   - `<h2>` Related on dropy.in — 3-6 `<a>` INTERNAL LINKS with keyword-rich anchor text. Target patterns (dropy uses standard Shopify URLs): `/collections/<category-slug>` for category (e.g. `/collections/acne-face-wash`), `/collections/<brand-slug>` for brand siblings, `/collections/<use-case-slug>` for concern (e.g. `/collections/body-acne`). Pick collections from the top themes below. Only invent slugs if they clearly match a research theme — a dead link is worse than no link.');
   L.push('   - `<h2>` Shipping & returns — India-first: pan-India delivery, COD, GST invoice, return policy days, customer-support contact. Trust signals. Link to `/policies/shipping-policy`, `/policies/refund-policy`, `/pages/contact` (these paths exist on every Shopify store by default).');
   L.push('   - `<p class="hint">` Last updated: `<time datetime="YYYY-MM-DD">Month YYYY</time>` — freshness signal. Use today\'s date.');
@@ -4807,7 +4804,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('```json');
   L.push('{');
   L.push('  "title": "…",');
-  L.push('  "body_html": "…full HTML with all sections + JSON-LD…",');
+  L.push('  "body_html": "…HTML for the DESCRIPTION tab only — DO NOT include How To Use, Ingredients, or FAQ sections here (those go in metafields below). Include: opening paragraph, featured-snippet block, why-it-works bullets, comparison table, buying guide, who-it\'s-for regional block, related-collections links, shipping & returns, freshness line, JSON-LD schema…",');
   L.push('  "tags": "tag1, tag2, tag3",');
   L.push('  "product_type": "…",');
   L.push('  "vendor": "…",');
@@ -4816,9 +4813,26 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('  "seo_description": "SEO <meta description> (150-160 chars, with CTA)",');
   L.push('  "metafields_global_title_tag": "same as seo_title — legacy metafield for REST compatibility",');
   L.push('  "metafields_global_description_tag": "same as seo_description — legacy metafield for REST compatibility",');
-  L.push('  "product_category": "gid://shopify/ProductTaxonomyNode/N — Standard Product Taxonomy node id, only if you can pick with high confidence; omit if unsure"');
+  L.push('  "product_category": "gid://shopify/ProductTaxonomyNode/N — Standard Product Taxonomy node id, only if you can pick with high confidence; omit if unsure",');
+  L.push('  "metafields": {');
+  L.push('    "custom.how_to_use":    "Step-by-step usage guide. Numbered list style, ONE paragraph or short-line-per-step. This is what the store\'s theme renders in the \'How To Use\' TAB on the product page. Do NOT wrap in <ol> or <ul> — plain text with numbered lines works (theme handles formatting).",');
+  L.push('    "custom.ingredients":   "Full ingredient / composition list — echo VERBATIM from the existing metafield if provided in \'EXISTING STORE METAFIELDS\' above (never paraphrase actives/dosage — compliance risk). Renders in the \'Ingredients\' TAB. Plain text; theme formats it.",');
+  L.push('    "custom.faq_q_1":       "The single most important buyer question for this product (short phrase, matches a question-shaped query from the research). Renders in the FAQ block. Populate ONLY if you have a strong Q1 candidate — omit if the FAQs already fit best in body_html.",');
+  L.push('    "custom.faq_a_1":       "Answer to faq_q_1 — 60-100 words, plain text, factual. Feeds the theme\'s FAQ section on the product page.",');
+  L.push('    "custom.bullet_points": "5-6 Amazon-style feature bullets, one per line, capital-letter benefit tag prefix (e.g. \'GENTLE DAILY EXFOLIATION: …\'). Used by the theme for a bullet block AND by any Amazon feed apps. Plain text, no HTML."');
+  L.push('  }');
   L.push('}');
   L.push('```');
+  L.push('');
+  L.push('**CRITICAL — where content goes:**');
+  L.push('The theme renders THREE tabs on the product page: **Description**, **How To Use**, **Ingredients**, plus a **FAQ block**.');
+  L.push('- **body_html** = the DESCRIPTION tab. Marketing copy + ranking sections. DO NOT put ingredients / how-to-use / FAQ content here (theme has dedicated tabs for those which pull from metafields).');
+  L.push('- **metafields.custom.how_to_use** = the HOW TO USE tab.');
+  L.push('- **metafields.custom.ingredients** = the INGREDIENTS tab.');
+  L.push('- **metafields.custom.faq_q_1** / **faq_a_1** = the FAQ block.');
+  L.push('- **metafields.custom.bullet_points** = feature bullets used by theme + Amazon feed apps.');
+  L.push('');
+  L.push('If you duplicate content (e.g. put ingredients in BOTH body_html AND custom.ingredients), Google detects it as duplicate content on the same page and the page ranks worse. Split cleanly.');
   L.push('');
   L.push('**Field routing note**: the server writes REST fields via `products.json` PUT and GraphQL-only fields (`seo_title`, `seo_description`, `product_category`) via `productUpdate`. You always emit them as flat keys — the server routes correctly. Emit BOTH the modern `seo_*` AND the legacy `metafields_global_*_tag` with the SAME string values for maximum coverage across Shopify API versions.');
   L.push('');
@@ -5092,8 +5106,23 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
       return;
     }
     const kept = {}, stripped = {};
+    // Metafield allowlist mirrors the server-side SHOPIFY_METAFIELD_ALLOWLIST.
+    // Keep in sync — this is a client-side preview so it doesn't have to be
+    // 100% accurate (server strips again on push) but the diff should mostly
+    // match what the operator will see after Push.
+    const METAFIELD_ALLOWLIST = ['custom.how_to_use', 'custom.ingredients', 'custom.faq_q_1', 'custom.faq_a_1', 'custom.bullet_points'];
     for (const [k, v] of Object.entries(parsed.data)) {
-      if (allowlist.includes(k)) kept[k] = v; else stripped[k] = v;
+      if (k === 'metafields' && v && typeof v === 'object' && !Array.isArray(v)) {
+        // Nested metafields: hoist allowlisted ones as `metafield:<key>` in kept.
+        for (const [mkey, mval] of Object.entries(v)) {
+          if (METAFIELD_ALLOWLIST.includes(mkey)) kept[`metafield:${mkey}`] = mval;
+          else stripped[`metafield:${mkey}`] = mval;
+        }
+      } else if (allowlist.includes(k)) {
+        kept[k] = v;
+      } else {
+        stripped[k] = v;
+      }
     }
     const keptEntries = Object.entries(kept);
     const stripEntries = Object.entries(stripped);
@@ -5119,10 +5148,16 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
         case 'seo_title':      return currentProduct.seo_title || '';
         case 'seo_description':return currentProduct.seo_description || '';
         case 'product_category':return currentProduct.product_category?.id || '';
-        // metafields_global_*_tag are legacy alternates for seo — no direct
-        // current-value mirror on the product, so treat as NEW.
-        default:               return '';
       }
+      // Metafields — 'metafield:custom.how_to_use' etc. Look up current value
+      // from curated_metafields (populated by the server's get-product).
+      if (field.startsWith('metafield:')) {
+        const mkey = field.slice('metafield:'.length);
+        const [ns, key] = mkey.split('.');
+        const found = (currentProduct.curated_metafields || []).find(mf => mf.namespace === ns && mf.key === key);
+        return found?.value || '';
+      }
+      return '';
     };
     const renderKeptField = ([k, v]) => {
       const current = currentValueOf(k);
@@ -5231,7 +5266,18 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
         const snapshotNote = r.snapshot_captured
           ? ` <span class="hint">· <button class="small ghost" id="shopifyRevertLastBtn" data-history-id="${r.history_id}" title="If the new copy is worse than the old one, click to restore the exact fields that were on this listing before the push. Only works while this push is the most recent one.">↶ Revert this push</button></span>`
           : ` <span class="hint" style="color:var(--warn);">· pre-push snapshot failed — revert not available for this push</span>`;
-        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${Object.keys(r.sent || {}).map(k => `<code>${k}</code>`).join(', ') || '(none)'}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}${snapshotNote}</div>`;
+        // Break down what got sent: main fields (title/body/etc) vs metafields.
+        const sentKeys = Object.keys(r.sent || {}).filter(k => k !== 'metafields');
+        const sentMetafields = r.sent?.metafields ? Object.keys(r.sent.metafields) : [];
+        const mfResults = Array.isArray(r.results?.metafields) ? r.results.metafields : [];
+        const mfFailed = mfResults.filter(m => !m.ok);
+        const mfNote = sentMetafields.length > 0
+          ? ` · Metafields: ${sentMetafields.map(k => {
+              const failure = mfFailed.find(f => f.key === k);
+              return failure ? `<code style="color:var(--danger);" title="${esc(JSON.stringify(failure.error))}">${k} ✗</code>` : `<code style="color:var(--success);">${k} ✓</code>`;
+            }).join(', ')}`
+          : '';
+        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${sentKeys.map(k => `<code>${k}</code>`).join(', ') || '(none)'}${mfNote}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}${snapshotNote}</div>`;
         toast('Shopify listing updated. Revert button available below if needed.', 'ok', { title: 'Pushed' });
         // Wire the just-pushed revert button.
         document.getElementById('shopifyRevertLastBtn')?.addEventListener('click', async (e) => {
