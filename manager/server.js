@@ -848,6 +848,18 @@ let _managerVersionCache = { at: 0, data: null };
 // modal open for the 'echo store shipping/return language' prompt block.
 // TTL 10 min; resets on server restart.
 let _policyCache = { at: 0, data: null };
+// Git commit this process was booted with. Captured ONCE at module load
+// — never refreshed. The dashboard compares this against the current
+// git HEAD (which /api/manager/version fetches live) so it can detect
+// 'server code on disk changed but the process wasn't restarted' and
+// prompt the user to restart. Without this we have no way to distinguish
+// deployed-code from running-code and users get stale-behavior confusion
+// (a fix landed in git but the running server still returns old shape).
+let _bootCommit = null;
+try {
+  const { execSync } = require('child_process');
+  _bootCommit = execSync('git rev-parse --short HEAD', { cwd: path.join(__dirname, '..'), encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+} catch { /* not a git repo — leave null; dashboard treats null as 'unknown' and doesn't alarm */ }
 function currentManagerVersion() {
   const now = Date.now();
   if (now - _managerVersionCache.at < 30000 && _managerVersionCache.data) return _managerVersionCache.data;
@@ -1209,6 +1221,7 @@ const routerCtx = {
   db, Q,
   send, readJson, now,
   currentManagerVersion,
+  bootCommit: _bootCommit,
   runBackup, listBackups,
   BACKUP_KEEP_N, BACKUP_DIR,
 };

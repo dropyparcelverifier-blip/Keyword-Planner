@@ -2398,6 +2398,16 @@ async function run() {
   assert(appJs.body.includes('renderDashSearchHits'),          'DASH-SEARCH.3 hits renderer defined');
   assert(appJs.body.includes('data-jump-batch'),               'DASH-SEARCH.4 hit-click switches to Analytics');
   assert(appJs.body.includes("adbrainSwitchTab?.('analytics')"), 'DASH-SEARCH.5 jump calls the tab switcher');
+  // Restart-required indicator: server captures its boot commit ONCE at
+  // module load; the /api/manager/version endpoint compares it to the
+  // current git HEAD; dashboard shows a ⚠ RESTART flag in the topbar.
+  assert(srvFull.includes('_bootCommit'),                       'RESTART.1 boot-commit captured at module load');
+  assert(srvFull.includes('bootCommit: _bootCommit'),           'RESTART.2 bootCommit exposed on router ctx');
+  assert(srvFull.includes('boot_commit'),                       'RESTART.3 boot_commit field returned by version endpoint');
+  assert(srvFull.includes('needs_restart'),                     'RESTART.4 needs_restart boolean computed server-side');
+  assert(appJs.body.includes('needs_restart'),                  'RESTART.5 client reads needs_restart flag');
+  assert(appJs.body.includes('⚠ RESTART'),                     'RESTART.6 topbar shows RESTART badge');
+  assert(appJs.body.includes('version-pill-restart'),           'RESTART.7 CSS class for restart-styled pill');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
