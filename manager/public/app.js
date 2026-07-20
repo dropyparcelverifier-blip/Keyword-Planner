@@ -4789,6 +4789,18 @@ function renderShopifyModalBody({ currentProduct, productUrl, prompt, impactRows
     </div>`
   ).join('');
   return `
+    <!-- Quick-nav strip: 3-step flow always visible even when the modal
+         content is long or the user has expanded the reference sections.
+         Fixes 'where is the paste-back textarea?' by giving direct anchors
+         to the two textareas + the preview button. -->
+    <div class="row" style="margin-bottom: 12px; gap: 8px; padding: 8px 10px; background: var(--bg-3); border-radius: 6px; font-size: 12px;">
+      <strong>Flow:</strong>
+      <button class="small ghost" onclick="document.getElementById('shopifyPromptText')?.scrollIntoView({behavior:'smooth', block:'center'})">1️⃣ Prompt to copy</button>
+      <span class="hint">→</span>
+      <button class="small ghost" onclick="document.getElementById('shopifyJsonInput')?.scrollIntoView({behavior:'smooth', block:'center'}); document.getElementById('shopifyJsonInput')?.focus();">2️⃣ Paste Claude's response</button>
+      <span class="hint">→</span>
+      <button class="small ghost" onclick="document.getElementById('shopifyPreviewBtn')?.scrollIntoView({behavior:'smooth', block:'center'})">3️⃣ Preview + Push</button>
+    </div>
     <div class="hint" style="margin-bottom: 12px; padding: 10px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 6px;">
       <strong style="color: var(--warn);">Safety guarantee:</strong>
       The manager only PUTs these ${allowlist.length} fields to Shopify: ${allowlist.map(f => `<code>${f}</code>`).join(', ')}.
