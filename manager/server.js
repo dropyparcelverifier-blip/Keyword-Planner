@@ -2648,7 +2648,34 @@ const server = http.createServer(async (req, res) => {
             id: v.id, sku: v.sku, title: v.title,
             price: v.price, weight: v.weight, weight_unit: v.weight_unit,
             inventory_quantity: v.inventory_quantity, inventory_management: v.inventory_management,
+            // GTIN13/UPC/EAN — critical for Google Merchant matching. Product
+            // schema JSON-LD MUST include gtin13:"<barcode>" when present.
+            barcode: v.barcode || null,
           })),
+          // Curated custom metafields — the store's theme renders these on
+          // the product page (e.g. Bullet Points, Ingredients, How To Use,
+          // F&Q). Claude sees them as SOURCE MATERIAL so it can (a) echo
+          // factual content verbatim (ingredients list, dosage) rather than
+          // paraphrase, and (b) NOT duplicate them in body_html (theme
+          // already renders them). We include the full metafield row —
+          // namespace + key + value + type — so the prompt can format them.
+          // Filtered to a reasonable size cap per field to keep prompt lean.
+          curated_metafields: metafields
+            .filter(mf => mf && mf.namespace && !['judgeme', 'loox', 'yotpo', 'stamped'].includes(String(mf.namespace).toLowerCase())) // exclude review-app metafields (already surfaced in `reviews`)
+            .filter(mf => typeof mf.value === 'string' && mf.value.trim().length > 0)
+            .map(mf => ({
+              namespace: mf.namespace,
+              key: mf.key,
+              type: mf.type || 'string',
+              value: String(mf.value).slice(0, 3000),   // cap per-field; long descriptions get truncated
+              truncated: String(mf.value).length > 3000,
+            })),
+          // Problem-tag detection so the client can show a red banner in
+          // the modal. no-google / no-index / no-search blocks Google
+          // Merchant Center + organic Shopping placement; users often set
+          // these accidentally via bulk-edit apps.
+          problem_tags: (String(prod.tags || '').split(/\s*,\s*/).filter(Boolean))
+            .filter(t => /^(no-google|noindex|no-index|no-search|nosearch|no_google|hidden)$/i.test(t)),
         },
       });
     }

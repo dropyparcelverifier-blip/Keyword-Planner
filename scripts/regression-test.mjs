@@ -2488,6 +2488,15 @@ async function run() {
   assert(srvFull.includes('body_too_many_sections'),           'PERF-PROMPT.6 preflight warns on > 12 h2');
   assert(srvFull.includes('body_too_many_links'),              'PERF-PROMPT.7 preflight warns on > 20 anchors');
   assert(srvFull.includes('body_external_no_rel'),             'PERF-PROMPT.8 preflight warns on external links without rel');
+  // Metafields + barcode + problem-tag detection in get-product.
+  assert(srvFull.includes('curated_metafields'),               'META.1 server returns curated_metafields');
+  assert(srvFull.includes('problem_tags'),                     'META.2 server flags no-google / no-index tags');
+  assert(/barcode:\s*v\.barcode/.test(srvFull),                'META.3 server surfaces variant barcode');
+  assert(appJs.body.includes('EXISTING STORE METAFIELDS'),     'META.4 prompt includes source-material metafields');
+  assert(appJs.body.includes('DO NOT duplicate'),              'META.5 prompt instructs no metafield-duplication in body_html');
+  assert(appJs.body.includes('GTIN present'),                  'META.6 prompt requires gtin13 when barcode present');
+  assert(appJs.body.includes('problem_tags'),                  'META.7 client renders problem-tag banner');
+  assert(appJs.body.includes('Search/index-blocking tag'),     'META.8 banner text present');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
