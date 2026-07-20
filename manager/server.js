@@ -844,6 +844,10 @@ const WORKER_FILES = [
 // their own loaded hash on heartbeat; when they diverge, the operator
 // gets a badge saying 'update available'.
 let _managerVersionCache = { at: 0, data: null };
+// Shopify shop-policies cache — /policies.json is hit on every Shopify-update
+// modal open for the 'echo store shipping/return language' prompt block.
+// TTL 10 min; resets on server restart.
+let _policyCache = { at: 0, data: null };
 function currentManagerVersion() {
   const now = Date.now();
   if (now - _managerVersionCache.at < 30000 && _managerVersionCache.data) return _managerVersionCache.data;
@@ -2440,6 +2444,48 @@ const server = http.createServer(async (req, res) => {
     }
     if (m === 'GET' && p === '/api/shopify/field-impact') {
       return send(res, 200, { ok: true, fields: SHOPIFY_FIELD_IMPACT, allowlist: [...SHOPIFY_ALLOWED_FIELDS] });
+    }
+    // Fetch the store's shop-level policy pages (shipping, refund, privacy,
+    // TOS) via Shopify Admin API. Returns strippped-plain-text body so the
+    // Claude prompt can echo the store's ACTUAL policy language verbatim
+    // instead of Claude inventing generic 'pan-India shipping' phrasing
+    // that may contradict what's on /policies/shipping-policy.
+    //
+    // Results are cached in-memory for 10 minutes — policies rarely change
+    // + this endpoint is hit on every Shopify-update modal open.
+    if (m === 'GET' && p === '/api/shopify/get-policies') {
+      // Module-level cache (declared near top of file). Cheap + resets on
+      // restart. Prevents hitting Shopify's /policies.json every modal open.
+      if (now() - _policyCache.at < 10 * 60 * 1000 && _policyCache.data) return send(res, 200, _policyCache.data);
+      const cfgRow = Q.getConfig.get();
+      const cfg = cfgRow?.config ? JSON.parse(cfgRow.config) : {};
+      const shop = cfg.shopify || {};
+      const apiVer = shop.apiVersion || '2024-10';
+      const r = await shopifyRequest({
+        shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+        method: 'GET', apiPath: `/admin/api/${apiVer}/policies.json`,
+      }).catch(e => ({ ok: false, error: e.message }));
+      if (!r.ok) return send(res, r.status || 502, { ok: false, error: `Shopify policies API: ${JSON.stringify(r.error)}` });
+      // Strip HTML → readable plain text. Rough but good enough for a prompt.
+      const strip = html => String(html || '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+      const policies = (r.data?.policies || []).map(p => ({
+        title: p.title || '',
+        handle: p.handle || '',            // shipping-policy / refund-policy / privacy-policy / terms-of-service
+        url: p.url || '',
+        body: strip(p.body || '').slice(0, 6000),  // cap at 6KB per policy to keep prompt tight
+        updated_at: p.updated_at || null,
+      }));
+      const data = { ok: true, policies, fetched_at: now() };
+      _policyCache.at = now();
+      _policyCache.data = data;
+      return send(res, 200, data);
     }
     // GET current product from Shopify by URL. Extracts the handle, calls
     // /admin/api/2024-10/products.json?handle=… . Returns the current

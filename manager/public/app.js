@@ -4194,13 +4194,18 @@ async function openShopifyModal() {
   body.innerHTML = `<div class="empty">Loading current product from Shopify…<br><span class="hint" style="margin-top:8px; display:block;">${productUrl}</span></div>`;
   $('shopifyModal').style.display = 'flex';
   try {
-    const [prodR, impactR] = await Promise.all([
+    // Fetch product + field impact + shop policies in parallel. Policies
+    // are server-cached (10min TTL) so this is cheap on the 2nd+ open.
+    // Policies fetch is soft-fail: prompt still builds without them.
+    const [prodR, impactR, policiesR] = await Promise.all([
       api.shopifyGetProduct(productUrl),
       api.shopifyFieldImpact(),
+      api.shopifyGetPolicies().catch(() => ({ ok: false, policies: [] })),
     ]);
     const cur = prodR.product;
     const impactRows = impactR.fields || [];
     const allowlist = impactR.allowlist || [];
+    const policies = policiesR.ok ? (policiesR.policies || []) : [];
     // Build the prompt.
     const prompt = buildShopifyClaudePrompt({
       keywordRows: rows,
@@ -4208,6 +4213,7 @@ async function openShopifyModal() {
       currentProduct: cur,
       impactRows,
       allowlist,
+      policies,
     });
     sub.textContent = `${ctxRow.sku || analytics.sku} · id ${cur.id} · ${rows.length} keyword(s)`;
     body.innerHTML = renderShopifyModalBody({
@@ -4263,7 +4269,7 @@ async function openShopifyModal() {
     sub.textContent = '— fetch failed';
   }
 }
-function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, impactRows, allowlist }) {
+function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, impactRows, allowlist, policies = [] }) {
   const rows = keywordRows.slice();
   const scored = rows.map(r => ({ ...r, _score: opportunityScore(r) })).sort((a, b) => b._score - a._score);
   const top50 = scored.slice(0, 50);
@@ -4392,6 +4398,33 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
     L.push(`- If our real review count is well below the median, the copy's job is to **compensate**: richer content, deeper FAQ, more ingredient depth, more India-specific detail. Users bounce to Amazon primarily on missing trust signals — thin content is one of them.`);
     L.push(`- If our real review count is at or above the median, lean into it: the \`AggregateRating\` in schema will earn stars in the SERP snippet and beat competitors on CTR even at lower positions.`);
     L.push('');
+  }
+  // ── Actual store-policy language, fetched from Shopify's /policies.json.
+  // Shown to Claude so the 'Shipping & returns' section in body_html echoes
+  // the store's REAL delivery timeline / return window / COD terms instead
+  // of Claude inventing generic 'pan-India shipping' phrasing that might
+  // contradict the /policies/shipping-policy page users click through to.
+  // Only shipping + refund shown — TOS + privacy aren't useful for prompt.
+  const shipPol = policies.find(p => /ship/i.test(p.handle));
+  const retPol  = policies.find(p => /refund|return/i.test(p.handle));
+  if (shipPol?.body || retPol?.body) {
+    L.push('## STORE POLICY LANGUAGE (echo, do not invent)');
+    L.push('Below is the ACTUAL text from the store\'s policy pages. When you write the `Shipping & returns` section inside `body_html`, use the specific numbers (delivery days, return window, COD threshold, geographic scope) from these — do NOT invent generic phrasing that might contradict what users see on `/policies/shipping-policy`.');
+    L.push('');
+    if (shipPol?.body) {
+      L.push('### Shipping policy (as published)');
+      L.push('```');
+      L.push(shipPol.body.slice(0, 2500));
+      L.push('```');
+      L.push('');
+    }
+    if (retPol?.body) {
+      L.push('### Refund / return policy (as published)');
+      L.push('```');
+      L.push(retPol.body.slice(0, 2500));
+      L.push('```');
+      L.push('');
+    }
   }
   L.push('## RANKING PLAYBOOK (apply to every field)');
   L.push('1. **Title (highest signal)** — primary keyword literally in the first 3 words. Then descriptor + benefit. e.g. `Aquaphor Lip Repair Balm 10g — Cracked Lip Overnight Fix, Ships Pan-India`. 60-70 chars. NOT `Buy Aquaphor Balm` (weak, generic).');

@@ -2370,6 +2370,17 @@ async function run() {
   // Guard: section only appears when we have ≥3 rows of Amazon data — no
   // empty section for SKUs where Amazon scrape failed / never ran.
   assert(/amzRows\.length\s*>=\s*3/.test(appJs.body),         'PROMPT-REV.6 guard: needs ≥3 Amazon rows to render');
+  // Store policy language — fetches /policies.json server-side and injects
+  // the actual shipping + refund text into the Claude prompt so the store's
+  // real timelines / COD terms / return window are echoed, not invented.
+  assert(srvFull.includes("'/api/shopify/get-policies'"),      'POLICY.1 policies endpoint registered');
+  assert(srvFull.includes('_policyCache'),                     'POLICY.2 in-memory cache to avoid hammering Shopify');
+  assert(srvFull.includes('/policies.json'),                   'POLICY.3 hits the Shopify policies API');
+  assert(apiFull.includes('shopifyGetPolicies'),               'POLICY.4 client wrapper defined');
+  assert(appJs.body.includes('shopifyGetPolicies()'),          'POLICY.5 modal opens with policy fetch in parallel');
+  assert(appJs.body.includes('STORE POLICY LANGUAGE'),         'POLICY.6 prompt section header');
+  assert(appJs.body.includes('echo, do not invent'),           'POLICY.7 anti-invention directive present');
+  assert(/policies\s*=\s*\[\]/.test(appJs.body),               'POLICY.8 buildShopifyClaudePrompt defaults policies=[]');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
