@@ -4371,15 +4371,39 @@ async function openShopifyModal() {
     const allowlist = impactR.allowlist || [];
     const policies = policiesR.ok ? (policiesR.policies || []) : [];
     // Build the prompt.
-    const prompt = buildShopifyClaudePrompt({
-      keywordRows: rows,
-      contextRow: ctxRow,
-      currentProduct: cur,
-      impactRows,
-      allowlist,
-      policies,
+    let prompt;
+    try {
+      prompt = buildShopifyClaudePrompt({
+        keywordRows: rows,
+        contextRow: ctxRow,
+        currentProduct: cur,
+        impactRows,
+        allowlist,
+        policies,
+      });
+    } catch (buildErr) {
+      // Surface prompt-build failures loudly instead of letting them
+      // silently produce an empty textarea. Was seeing '0 chars' toasts
+      // with no explanation because the outer catch caught + generic-
+      // ised errors from inside the prompt builder.
+      console.error('[shopify-modal] buildShopifyClaudePrompt threw:', buildErr);
+      console.error('[shopify-modal] inputs:', { rows: rows.length, cur, impactRows: impactRows.length, allowlist: allowlist.length, policies: policies.length });
+      prompt = '';
+      toast(`Prompt build failed: ${buildErr.message}. Open browser DevTools (F12) → Console for full stack + inputs.`, 'err', { title: 'Prompt build error' });
+    }
+    // Explicit diagnostic — log prompt length + which sections were fed.
+    // Users see this in F12 → Console when reporting 'empty prompt' issues.
+    console.log('[shopify-modal] prompt built:', {
+      chars: prompt.length,
+      rows: rows.length,
+      hasCurrentProduct: !!cur,
+      impactRowsCount: impactRows.length,
+      allowlistCount: allowlist.length,
+      policiesCount: policies.length,
+      hasReviews: !!cur?.reviews?.hasReviews,
+      variantCount: cur?.variants_readonly?.length || 0,
     });
-    sub.textContent = `${ctxRow.sku || analytics.sku} · id ${cur.id} · ${rows.length} keyword(s)`;
+    sub.textContent = `${ctxRow.sku || analytics.sku} · id ${cur.id} · ${rows.length} keyword(s) · prompt ${(prompt.length/1024).toFixed(1)} KB`;
     body.innerHTML = renderShopifyModalBody({
       currentProduct: cur,
       productUrl,
