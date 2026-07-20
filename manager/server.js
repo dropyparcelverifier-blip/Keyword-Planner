@@ -90,20 +90,40 @@ const SHOPIFY_GRAPHQL_ONLY_FIELDS = new Set(['seo_title', 'seo_description', 'pr
 const SHOPIFY_METAFIELD_ALIASES = {
   'custom.how_to_use':    { displayNames: ['how to use', 'how-to-use', 'how_to_use', 'usage'],           type: 'multi_line_text_field' },
   'custom.ingredients':   { displayNames: ['ingredients', 'ingredient list', 'composition'],              type: 'multi_line_text_field' },
-  'custom.faq_q_1':       { displayNames: ['f&q question 1', 'faq question 1', 'faq_q_1', 'faq q 1'],   type: 'single_line_text_field' },
-  'custom.faq_a_1':       { displayNames: ['f&q answer 1', 'faq answer 1', 'faq_a_1', 'faq a 1'],       type: 'multi_line_text_field' },
-  'custom.bullet_points': { displayNames: ['bullet points', 'bullet_points', 'bullets', 'key features'], type: 'multi_line_text_field' },
+  'custom.bullet_points': { displayNames: ['bullet points', 'bullet_points', 'bullets', 'key features'], type: 'rich_text_field' },
+  'custom.department':    { displayNames: ['department', 'category'],                                     type: 'single_line_text_field' },
+  'custom.highlight_1':   { displayNames: ['highlight 1', 'highlight1'],                                  type: 'single_line_text_field' },
+  'custom.highlight_2':   { displayNames: ['highlight 2', 'highlight2'],                                  type: 'single_line_text_field' },
+  'custom.highlight_3':   { displayNames: ['highlight 3', 'highlight3'],                                  type: 'single_line_text_field' },
 };
+// FAQ Q/A pairs — 1 through 10. The store defines all 10; we write 1-5
+// (Google truncates FAQPage rich results at ~5 anyway; writing 6-10 wastes
+// output tokens). Loop-generated so adding more later is one number change.
+for (let i = 1; i <= 5; i++) {
+  SHOPIFY_METAFIELD_ALIASES[`custom.faq_q_${i}`] = {
+    displayNames: [`f&q question ${i}`, `faq question ${i}`, `faq_q_${i}`, `faq q ${i}`, `question ${i}`],
+    type: 'single_line_text_field',
+  };
+  SHOPIFY_METAFIELD_ALIASES[`custom.faq_a_${i}`] = {
+    displayNames: [`f&q answer ${i}`, `faq answer ${i}`, `faq_a_${i}`, `faq a ${i}`, `answer ${i}`],
+    type: 'multi_line_text_field',
+  };
+}
 // Legacy shape kept for the client-side allowlist echo (unchanged public API).
 const SHOPIFY_METAFIELD_ALLOWLIST = Object.fromEntries(
   Object.entries(SHOPIFY_METAFIELD_ALIASES).map(([k, v]) => [k, { type: v.type }])
 );
 // Resolver: given an alias and the fetched definitions list, return the
-// {namespace, key, type} to actually POST to. Definition-based match wins.
+// {namespace, key, type} to actually POST to — OR null if we can't
+// confidently resolve. NULL is the important case: if the store has no
+// matching definition, writing to custom.* would create an orphan metafield
+// the theme never reads (that's exactly what dumped everything into
+// Description in the earlier push). Refuse the write instead — the client
+// surfaces the miss so the operator can either define the metafield in
+// Shopify or drop it from the output.
 function resolveMetafieldTarget(alias, definitions = []) {
   const spec = SHOPIFY_METAFIELD_ALIASES[alias];
   if (!spec) return null;
-  const [defaultNs, defaultKey] = alias.split('.');
   const norm = s => String(s || '').toLowerCase().replace(/[\s_-]+/g, ' ').trim();
   // 1. Exact namespace.key match against definitions.
   const exact = definitions.find(d => `${d.namespace}.${d.key}` === alias);
@@ -111,8 +131,10 @@ function resolveMetafieldTarget(alias, definitions = []) {
   // 2. Display name match.
   const byName = definitions.find(d => spec.displayNames.some(n => norm(d.name) === norm(n)));
   if (byName) return { namespace: byName.namespace, key: byName.key, type: byName.type || spec.type, resolvedVia: 'display-name' };
-  // 3. Fallback to hardcoded custom.* (previous behavior).
-  return { namespace: defaultNs, key: defaultKey, type: spec.type, resolvedVia: 'fallback-custom' };
+  // 3. NO MATCH — refuse the write. This is a change from the previous
+  //    'fallback-custom' behavior which created orphan metafields. Loud
+  //    failure is better than a silent 'wrote but theme ignored'.
+  return null;
 }
 // Field-impact hierarchy (surfaces to the UI + prompt). Ordered by ranking/
 // visibility impact — Claude is told to spend the most effort on the top
@@ -239,6 +261,22 @@ function validateShopifyPatch(patch, context = {}) {
     const externalAnchorsWithoutRel = (bodyHtml.match(/<a\b[^>]*href=["']https?:\/\/(?!(?:[a-z0-9-]+\.)?dropy\.in)[^"']+["'][^>]*>/gi) || [])
       .filter(tag => !/rel=["'][^"']*(nofollow|noopener)/i.test(tag)).length;
     if (externalAnchorsWithoutRel > 0) pushWarn('body_external_no_rel', `body_html has ${externalAnchorsWithoutRel} external <a> tag(s) missing rel="nofollow noopener" — Lighthouse Best Practices flag`);
+    // Content leak detection: body_html should NOT contain sections that
+    // belong in metafields (How To Use, Ingredients, FAQ blocks). If Claude
+    // put them here anyway, they'll duplicate the theme's tab content and
+    // hurt SEO. Warn (not critical) so operator can force-push after review.
+    if (/<h2[^>]*>[^<]{0,60}(how to use|usage instructions|directions?)/i.test(bodyHtml)) {
+      pushWarn('body_leaked_how_to_use', 'body_html contains a "How to use" <h2> — this content should be in metafields.custom.how_to_use so it renders in the theme\'s dedicated tab. Duplicate content in both places hurts SEO.');
+    }
+    if (/<h2[^>]*>[^<]{0,60}(ingredients|composition|actives)/i.test(bodyHtml) &&
+        !/<h2[^>]*>[^<]{0,60}(ingredient breakdown|key.*active)/i.test(bodyHtml)) {
+      // Allow "Ingredient breakdown" (a body-html-appropriate deep-dive) but flag bare "Ingredients"
+      pushWarn('body_leaked_ingredients', 'body_html contains an "Ingredients" <h2> — the raw ingredient list should be in metafields.custom.ingredients (theme renders it in the Ingredients tab). Body_html can discuss key actives but the list belongs in the metafield.');
+    }
+    const detailsCount = (bodyHtml.match(/<details\b/gi) || []).length;
+    if (detailsCount >= 3) {
+      pushWarn('body_leaked_faq', `body_html contains ${detailsCount} <details> blocks — FAQ content belongs in metafields.custom.faq_q_1..5 / faq_a_1..5 so the theme's FAQ section populates. Duplicate FAQ content in both hurts SEO.`);
+    }
     // Page-speed guardrails
     const scriptMatches = bodyHtml.match(/<script\b[^>]*>/gi) || [];
     const jsonLdCount = scriptMatches.filter(s => /application\/ld\+json/i.test(s)).length;
@@ -2751,6 +2789,52 @@ const server = http.createServer(async (req, res) => {
           // these accidentally via bulk-edit apps.
           problem_tags: (String(prod.tags || '').split(/\s*,\s*/).filter(Boolean))
             .filter(t => /^(no-google|noindex|no-index|no-search|nosearch|no_google|hidden)$/i.test(t)),
+          // READ-ONLY signal metafields — values Claude uses as INPUT (not
+          // to write). Matched loosely by display name against ALL metafields
+          // on the product. If populated, unlock real behavior in the prompt:
+          //   · rating + rating_count → real AggregateRating in JSON-LD
+          //   · bought_past_month     → mention social proof in copy
+          //   · best_seller flag      → mention it, add 'best seller' to tags
+          //   · SEO No-index true     → red banner (blocks Google indexing)
+          //   · highlights            → preserve; don't overwrite
+          signals: (() => {
+            const norm = s => String(s || '').toLowerCase().replace(/[\s_-]+/g, ' ').trim();
+            const findMf = (nameCandidates) => {
+              const targets = nameCandidates.map(norm);
+              // Look up by matching display name via definitions, OR by
+              // trying key patterns as a fallback.
+              const def = metafieldDefinitions.find(d => targets.includes(norm(d.name)));
+              if (def) return metafields.find(mf => mf.namespace === def.namespace && mf.key === def.key);
+              return metafields.find(mf => targets.includes(norm(mf.key)));
+            };
+            const numOrNull = v => (v == null || v === '') ? null : (Number.isFinite(Number(v)) ? Number(v) : v);
+            const rating = findMf(['product rating']);
+            const ratingCount = findMf(['product rating count']);
+            const bought = findMf(['bought past month']);
+            const bestSeller = findMf(['best seller']);
+            const noIndex = findMf(['seo no-index']);
+            const keepIndexed = findMf(['seo keep indexed']);
+            const dept = findMf(['department']);
+            const h1 = findMf(['highlight 1']);
+            const h2 = findMf(['highlight 2']);
+            const h3 = findMf(['highlight 3']);
+            const brandColl = findMf(['brand collection']);
+            const similarColl = findMf(['similar products collection']);
+            const relatedProds = findMf(['related products']);
+            return {
+              rating:              numOrNull(rating?.value),
+              rating_count:        numOrNull(ratingCount?.value),
+              bought_past_month:   numOrNull(bought?.value),
+              best_seller:         bestSeller?.value ? String(bestSeller.value) : null,
+              no_index_metafield:  noIndex?.value === 'true' || noIndex?.value === true,
+              keep_indexed:        keepIndexed?.value === 'true' || keepIndexed?.value === true,
+              department:          dept?.value || null,
+              current_highlights:  [h1, h2, h3].map(m => m?.value).filter(Boolean),
+              brand_collection:    brandColl?.value || null,
+              similar_collection:  similarColl?.value || null,
+              related_products:    relatedProds?.value || null,
+            };
+          })(),
           // ALL metafield definitions on this store, with the display name
           // used to map from Claude's aliases (e.g. 'How To Use') to the
           // actual namespace/key the theme reads. Without this, previous
@@ -2942,7 +3026,14 @@ const server = http.createServer(async (req, res) => {
         for (const [alias, mval] of Object.entries(metafieldsToWrite)) {
           const target = resolveMetafieldTarget(alias, definitionsPush);
           if (!target) {
-            mfResults.push({ alias, ok: false, error: 'no resolver for alias', resolved_via: null });
+            // No definition on this store for this alias — refuse the
+            // write. Would otherwise create an orphan at custom.* the
+            // theme never reads (root cause of the earlier 'dumped into
+            // Description' issue).
+            mfResults.push({
+              alias, ok: false, skipped: true, resolved_via: 'no-definition',
+              error: `Skipped: no metafield definition on this store matches alias "${alias}". Either define it in Shopify Admin → Settings → Custom data → Products, or drop this key from Claude's output. Writing to custom.* would create an orphan the theme never reads.`,
+            });
             continue;
           }
           const r = await shopifyRequest({

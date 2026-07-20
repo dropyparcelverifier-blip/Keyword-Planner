@@ -2528,7 +2528,26 @@ async function run() {
   assert(srvFull.includes('metafieldDefinitions(first: 200, ownerType: PRODUCT)'), 'MF-RESOLVE.3 fetches definitions via GraphQL');
   assert(srvFull.includes('resolved_via'),                     'MF-RESOLVE.4 response reports how each metafield was resolved');
   assert(srvFull.includes('metafield_definitions'),            'MF-RESOLVE.5 exposes definitions in get-product for prompt');
-  assert(appJs.body.includes('FALLBACK — no matching definition'), 'MF-RESOLVE.6 client shows fallback warning when no definition matches');
+  assert(appJs.body.includes('NO DEFINITION'), 'MF-RESOLVE.6 client shows no-definition skip warning when no matching definition');
+  // Metafield allowlist expanded: FAQ 1-5 + department + highlights.
+  assert(srvFull.includes("SHOPIFY_METAFIELD_ALIASES[`custom.faq_q_${i}`]"), 'MF-EXPAND.1 FAQ 1-5 aliases generated in loop');
+  assert(srvFull.includes("'custom.department'"),               'MF-EXPAND.2 department alias present');
+  assert(srvFull.includes("'custom.highlight_1'"),              'MF-EXPAND.3 highlight aliases present');
+  // Server surfaces store signals (rating, bought past month, best seller, etc.) for prompt context.
+  assert(srvFull.includes("signals: (() => {"),                 'MF-EXPAND.4 signals object built in get-product');
+  assert(srvFull.includes("no_index_metafield"),                'MF-EXPAND.5 signals detects SEO No-index metafield');
+  assert(srvFull.includes("bought_past_month"),                 'MF-EXPAND.6 signals detects bought-past-month');
+  // Prompt consumes signals + expanded output spec.
+  assert(appJs.body.includes('Store signals'),                  'MF-EXPAND.7 prompt has store-signals context section');
+  assert(appJs.body.includes('hasStoreRating'),                 'MF-EXPAND.8 prompt uses store rating for AggregateRating');
+  assert(appJs.body.includes('"custom.faq_q_5"'),               'MF-EXPAND.9 output spec includes faq_q_5');
+  assert(appJs.body.includes('"custom.highlight_1"'),           'MF-EXPAND.10 output spec includes highlight_1');
+  // Preflight: body_html leak detection.
+  assert(srvFull.includes('body_leaked_how_to_use'),            'MF-EXPAND.11 preflight warns if How-To-Use leaked into body_html');
+  assert(srvFull.includes('body_leaked_ingredients'),           'MF-EXPAND.12 preflight warns if Ingredients leaked into body_html');
+  assert(srvFull.includes('body_leaked_faq'),                   'MF-EXPAND.13 preflight warns if FAQ <details> leaked into body_html');
+  // Skipped-metafield warning banner in push toast.
+  assert(appJs.body.includes('skippedNote'),                    'MF-EXPAND.14 client shows skipped-metafield banner after push');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
