@@ -4728,7 +4728,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('');
   L.push('## HARD CONSTRAINTS');
   L.push('- **NEVER produce**: `price`, `weight`, `weight_unit`, `location`, `inventory_quantity`, `variants`, `images`, `sku`. The manager strips them server-side; wasted output tokens.');
-  L.push('- **ONLY produce keys** from this allowlist: ' + allowlist.map(f => `\`${f}\``).join(', ') + `, AND a nested \`metafields\` object with any of: \`custom.how_to_use\`, \`custom.ingredients\`, \`custom.faq_q_1\`, \`custom.faq_a_1\`, \`custom.bullet_points\`. Anything else is stripped server-side.`);
+  L.push('- **ONLY produce keys** from this allowlist: ' + allowlist.map(f => `\`${f}\``).join(', ') + `, AND a nested \`metafields\` object with any of these 17 keys (theme-writable): \`custom.how_to_use\`, \`custom.ingredients\`, \`custom.bullet_points\`, \`custom.department\`, \`custom.highlight_1\`, \`custom.highlight_2\`, \`custom.highlight_3\`, \`custom.faq_q_1\`, \`custom.faq_a_1\`, \`custom.faq_q_2\`, \`custom.faq_a_2\`, \`custom.faq_q_3\`, \`custom.faq_a_3\`, \`custom.faq_q_4\`, \`custom.faq_a_4\`, \`custom.faq_q_5\`, \`custom.faq_a_5\`. Anything else is stripped server-side. Only OMIT a key if you truly don't have content for it — do not skip populating an eligible metafield.`);
   L.push('- **Return format**: reasoning paragraph, then ONE fenced ```json``` block. No other JSON. No commentary after.');
   L.push('- **India-first**. Currency ₹ and `INR` in schema. Pan-India context. Every trust signal India-specific.');
   L.push('- **No invented claims** — do not add "clinically proven", "dermatologist tested", certifications, awards, specific test results unless they appear in the research data.');
