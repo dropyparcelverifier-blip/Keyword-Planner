@@ -935,6 +935,7 @@ function serveWorkerInstaller(req, res, url) {
 
 $ErrorActionPreference = 'Continue'
 $mgr    = '${managerBase}'
+$mgrTok = '${psEscape(currentToken)}'   # empty when manager has no token; watchdog auto-update uses this
 $root   = Join-Path $env:LOCALAPPDATA 'AdBrainWorker'
 $extDir = Join-Path $root 'extension'
 $prof   = Join-Path $root 'profile'
@@ -1078,7 +1079,22 @@ try {
   $wdBody = $wdBody -replace '__CHROME__',  ($chrome -replace "'","''")
   $wdBody = $wdBody -replace '__LOG__',     ($logPathVar -replace "'","''")
   $wdBody = $wdBody -replace '__MGR__',     ($mgr    -replace "'","''")
+  $wdBody = $wdBody -replace '__TOKEN__',   ($mgrTok -replace "'","''")
   Set-Content -Path $watchdogPath -Value $wdBody -Encoding UTF8
+
+  # Seed the local bundle-hash file with the manager's CURRENT hash so
+  # the very next watchdog run doesn't false-positive 'update needed'
+  # and re-download every file we just fetched during install. Written
+  # to \$prof so it lives alongside profile data (not extension files).
+  try {
+    $hashFileInit = Join-Path $prof '.adbrain-bundle-hash'
+    $hashResp = Invoke-WebRequest -UseBasicParsing -Uri "$mgr/api/worker/version-hash" -TimeoutSec 4 -ErrorAction Stop
+    $hashJson = $hashResp.Content | ConvertFrom-Json
+    if ($hashJson.hash) {
+      if (-not (Test-Path $prof)) { New-Item -ItemType Directory -Path $prof -Force | Out-Null }
+      Set-Content -Path $hashFileInit -Value $hashJson.hash -Encoding UTF8
+    }
+  } catch { }
 
   $taskName = 'AdBrain Chrome Watchdog'
   Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null

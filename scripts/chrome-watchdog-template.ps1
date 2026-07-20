@@ -7,12 +7,19 @@
 #        Chrome. This keeps the worker PC quiet + resource-idle whenever the
 #        manager is off (no point running Chrome if nothing can pull work).
 #      * If manager is UP: continue to step 2.
-#   2. If AdBrain Chrome (identified by --user-data-dir matching our isolated
-#      profile) is already running: exit silently.
-#   3. Otherwise: launch Chrome minimized with the AdBrain profile + extension.
+#   2. NEW: Compare local bundle-hash to manager's /api/worker/version-hash.
+#      If different, download the current WORKER_FILES from the manager,
+#      overwrite our local extension dir, save the new hash, then POST a
+#      broadcast 'hard_reset' command to the manager's command bus. Every
+#      running worker picks up hard_reset within ~30s and self-reloads,
+#      loading the freshly-updated files. Skips silently if either
+#      endpoint is unreachable OR if we're on the same hash already.
+#   3. If AdBrain Chrome (identified by --user-data-dir matching our isolated
+#      profile) is already running: exit silently (after any update above).
+#   4. Otherwise: launch Chrome minimized with the AdBrain profile + extension.
 #
-# Placeholders __PROFILE__ / __EXTDIR__ / __CHROME__ / __LOG__ / __MGR__ are
-# substituted by the installer at install-time.
+# Placeholders __PROFILE__ / __EXTDIR__ / __CHROME__ / __LOG__ / __MGR__
+# / __TOKEN__ are substituted by the installer at install-time.
 
 $ErrorActionPreference = 'SilentlyContinue'
 $profileDir = '__PROFILE__'
@@ -20,9 +27,57 @@ $extDir     = '__EXTDIR__'
 $chromeExe  = '__CHROME__'
 $logFile    = '__LOG__'
 $managerUrl = '__MGR__'
+$token      = '__TOKEN__'    # optional; empty = no header sent
 
 function Add-Log($msg) {
     Add-Content -Path $logFile -Value ((Get-Date).ToString('s') + '  ' + $msg)
+}
+
+function Mgr-Get($path) {
+    # Returns response text on 200, $null on any failure. Uses raw
+    # WebRequest so we don't need Invoke-WebRequest's cmdlet baggage.
+    try {
+        $req = [System.Net.WebRequest]::Create($managerUrl + $path)
+        $req.Method = 'GET'
+        $req.Timeout = 4000
+        if ($token -and $token -ne '__TOKEN__') { $req.Headers.Add('X-Manager-Token', $token) }
+        $resp = $req.GetResponse()
+        $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        $body = $sr.ReadToEnd()
+        $sr.Close(); $resp.Close()
+        return $body
+    } catch { return $null }
+}
+
+function Mgr-Post($path, $bodyText) {
+    try {
+        $req = [System.Net.WebRequest]::Create($managerUrl + $path)
+        $req.Method = 'POST'
+        $req.ContentType = 'application/json'
+        $req.Timeout = 4000
+        if ($token -and $token -ne '__TOKEN__') { $req.Headers.Add('X-Manager-Token', $token) }
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($bodyText)
+        $req.ContentLength = $bytes.Length
+        $s = $req.GetRequestStream(); $s.Write($bytes, 0, $bytes.Length); $s.Close()
+        $resp = $req.GetResponse(); $resp.Close()
+        return $true
+    } catch { return $false }
+}
+
+function Download-To($url, $destPath) {
+    try {
+        $req = [System.Net.WebRequest]::Create($managerUrl + $url)
+        $req.Method = 'GET'
+        $req.Timeout = 15000
+        $resp = $req.GetResponse()
+        $stream = $resp.GetResponseStream()
+        $destDir = Split-Path -Parent $destPath
+        if ($destDir -and -not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+        $fs = [System.IO.File]::Create($destPath)
+        $stream.CopyTo($fs)
+        $fs.Close(); $stream.Close(); $resp.Close()
+        return $true
+    } catch { return $false }
 }
 
 # 1) Manager reachability check. Skip Chrome relaunch if manager is off.
@@ -39,12 +94,56 @@ try {
     }
 } catch {
     # Silent exit on unreachable manager - this is the whole point.
-    # Uncomment the next line if you want a log entry per failed ping:
-    # Add-Log ('[skip] manager unreachable: ' + $_.Exception.Message)
     exit 0
 }
 
-# 2) AdBrain Chrome already running? Then nothing to do.
+# 2) Auto-update check. Compares local bundle hash to manager's; if
+# different, downloads new files + broadcasts hard_reset so running
+# workers pick up the update within ~30s. Fully silent on no-change
+# (which is the common case).
+try {
+    $hashFile = Join-Path $profileDir '.adbrain-bundle-hash'
+    $localHash = ''
+    if (Test-Path $hashFile) { $localHash = (Get-Content $hashFile -Raw).Trim() }
+    $remoteBody = Mgr-Get '/api/worker/version-hash'
+    if ($remoteBody) {
+        $remote = $remoteBody | ConvertFrom-Json
+        $remoteHash = $remote.hash
+        if ($remoteHash -and $remoteHash -ne $localHash) {
+            Add-Log ('[update] local=' + $localHash.Substring(0, [Math]::Min(8, $localHash.Length)) + ' remote=' + $remoteHash.Substring(0, [Math]::Min(8, $remoteHash.Length)) + ' - downloading ' + $remote.file_count + ' file(s)')
+            $filesBody = Mgr-Get '/worker-files.json'
+            if ($filesBody) {
+                $files = ($filesBody | ConvertFrom-Json).files
+                $okCount = 0; $failCount = 0
+                foreach ($rel in $files) {
+                    $dest = Join-Path $extDir $rel
+                    if (Download-To ('/worker/' + $rel) $dest) { $okCount++ } else { $failCount++ }
+                }
+                if ($failCount -eq 0) {
+                    Set-Content -Path $hashFile -Value $remoteHash -Encoding utf8
+                    # Broadcast hard_reset so every running worker
+                    # picks up the new files. Workers reload via
+                    # chrome.runtime.reload() which re-reads the JS
+                    # from the (now-updated) extension dir. State
+                    # (workerId, buffered pushes, claimed jobs) all
+                    # survive via chrome.storage.
+                    $cmdBody = '{"command":"hard_reset","createdBy":"watchdog-auto-update"}'
+                    if (Mgr-Post '/api/commands' $cmdBody) {
+                        Add-Log ('[update] ' + $okCount + ' file(s) written; hard_reset broadcast - workers reload within ~30s')
+                    } else {
+                        Add-Log ('[update] ' + $okCount + ' file(s) written but hard_reset POST failed; workers need manual reload')
+                    }
+                } else {
+                    Add-Log ('[update] download failed: ' + $failCount + ' of ' + $files.Count + ' files errored - not switching hash')
+                }
+            }
+        }
+    }
+} catch {
+    Add-Log ('[update] auto-update check failed: ' + $_.Exception.Message)
+}
+
+# 3) AdBrain Chrome already running? Then nothing to do.
 try {
     $needle = '--user-data-dir=' + $profileDir
     $running = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" |
@@ -54,7 +153,7 @@ try {
         exit 0
     }
 
-    # 3) Not running - launch it.
+    # 4) Not running - launch it.
     $launchArgs = '--user-data-dir="' + $profileDir + '" --load-extension="' + $extDir + '" --new-window "chrome://newtab"'
     Start-Process -FilePath $chromeExe -ArgumentList $launchArgs -WindowStyle Minimized
     Add-Log ('[relaunched] ' + $chromeExe)
