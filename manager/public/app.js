@@ -5159,9 +5159,28 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
       const force = $('shopifyForceOverride')?.checked;
       btn.disabled = true; btn.textContent = 'Pushing…';
       try {
-        const r = await api.shopifyUpdateProduct(productId, kept, { force, validationContext });
-        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${Object.keys(r.sent || {}).map(k => `<code>${k}</code>`).join(', ') || '(none)'}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}</div>`;
-        toast('Shopify listing updated.', 'ok', { title: 'Pushed' });
+        const r = await api.shopifyUpdateProduct(productId, kept, {
+          force, validationContext,
+          sku: currentProduct?.id ? (analytics.sku || null) : null,
+          productUrl: currentProduct?.handle ? `${location.origin.includes('myshopify') ? location.origin : ''}${currentProduct.handle}` : null,
+          batchId: analytics.batchId || null,
+        });
+        const snapshotNote = r.snapshot_captured
+          ? ` <span class="hint">· <button class="small ghost" id="shopifyRevertLastBtn" data-history-id="${r.history_id}" title="If the new copy is worse than the old one, click to restore the exact fields that were on this listing before the push. Only works while this push is the most recent one.">↶ Revert this push</button></span>`
+          : ` <span class="hint" style="color:var(--warn);">· pre-push snapshot failed — revert not available for this push</span>`;
+        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${Object.keys(r.sent || {}).map(k => `<code>${k}</code>`).join(', ') || '(none)'}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}${snapshotNote}</div>`;
+        toast('Shopify listing updated. Revert button available below if needed.', 'ok', { title: 'Pushed' });
+        // Wire the just-pushed revert button.
+        document.getElementById('shopifyRevertLastBtn')?.addEventListener('click', async (e) => {
+          const hid = Number(e.currentTarget.dataset.historyId);
+          if (!hid || !confirm('Revert this push? The previous title / body_html / SEO fields will be restored to Shopify. Any hand-edits made in the Shopify Admin AFTER this push will be lost.')) return;
+          e.currentTarget.disabled = true; e.currentTarget.textContent = '↶ Reverting…';
+          try {
+            const rv = await api.shopifyRevert(hid);
+            toast(`Reverted. Restored: ${(rv.restoredFields || []).join(', ')}`, 'ok', { title: '↶ Revert done' });
+            e.currentTarget.textContent = '↶ Reverted ✓'; e.currentTarget.disabled = true;
+          } catch (err) { toast(err.message || 'Revert failed.', 'err'); e.currentTarget.disabled = false; e.currentTarget.textContent = '↶ Revert this push'; }
+        });
         // Bulk-run: record the win + auto-advance to the next SKU. If the
         // user unchecked auto-advance, just record the outcome — the next
         // SKU waits on their explicit '▶ Next' click.

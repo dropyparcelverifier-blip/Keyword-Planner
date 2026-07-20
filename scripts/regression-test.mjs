@@ -2467,6 +2467,17 @@ async function run() {
   assert(appJs.body.includes('newCount'),                     'DIFF.5 diff summary counts NEW');
   assert(appJs.body.includes('changedCount'),                 'DIFF.6 diff summary counts CHANGED');
   assert(appJs.body.includes('chars, ${sign}'),               'DIFF.7 char-count delta shown per field');
+  // Snapshot + revert: safety net when a Claude update tanks the listing.
+  assert(srvFull.includes('CREATE TABLE IF NOT EXISTS shopify_push_history'), 'REVERT.1 push-history table declared');
+  assert(srvFull.includes('snapshot_json'),                    'REVERT.2 snapshot_json column captured');
+  assert(srvFull.includes("'/api/shopify/push-history'"),      'REVERT.3 history endpoint registered');
+  assert(srvFull.includes("'/api/shopify/revert'"),            'REVERT.4 revert endpoint registered');
+  assert(srvFull.includes("b.confirm !== 'REVERT'"),           'REVERT.5 revert requires confirm token');
+  assert(srvFull.includes('reverted_at = ?'),                  'REVERT.6 sets reverted_at to prevent double-revert');
+  assert(apiFull.includes('shopifyPushHistory'),               'REVERT.7 client wrapper for history');
+  assert(apiFull.includes('shopifyRevert'),                    'REVERT.8 client wrapper for revert');
+  assert(appJs.body.includes('shopifyRevertLastBtn'),          'REVERT.9 revert button rendered after successful push');
+  assert(appJs.body.includes('snapshot_captured'),             'REVERT.10 UI reads snapshot_captured flag from response');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
