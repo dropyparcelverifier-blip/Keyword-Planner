@@ -4824,33 +4824,15 @@ function renderShopifyModalBody({ currentProduct, productUrl, prompt, impactRows
       <span class="hint">→</span>
       <button class="small" id="shopifyStep3Btn" title="Parses your pasted JSON, shows the before/after diff against your current Shopify listing + preflight rubric. Push button appears if preflight passes.">3️⃣ Preview diff</button>
     </div>
-    <div class="hint" style="margin-bottom: 12px; padding: 10px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 6px;">
-      <strong style="color: var(--warn);">Safety guarantee:</strong>
-      The manager only PUTs these ${allowlist.length} fields to Shopify: ${allowlist.map(f => `<code>${f}</code>`).join(', ')}.
-      Anything else in Claude's JSON — including price, weight, location, inventory, variants — is stripped server-side before the request leaves this process.
-      The read-only variant data below is shown only so you (and Claude) can SEE what's being excluded.
-    </div>
+    <!-- Working area FIRST — prompt textarea, paste-back textarea, preview
+         button. Reference sections (safety guarantee / current listing /
+         field-impact) are moved BELOW so users never scroll past their
+         work to find them. Was hitting 'where is the paste-back textarea'
+         because those reference blocks pushed Step 1/2/3 off-screen at
+         narrow viewports (DevTools open, laptop screens). -->
 
-    <details style="margin-bottom: 10px;">
-      <summary style="cursor: pointer; padding: 8px; background: var(--bg-3); border-radius: 6px;"><strong>Current Shopify listing</strong> · id <code>${currentProduct.id}</code> · <a href="${productUrl}" target="_blank" rel="noopener">open in browser →</a></summary>
-      <div style="padding: 10px; background: var(--bg-3); margin-top: 4px; border-radius: 6px;">
-        <div class="hint"><strong>Title:</strong> ${currentProduct.title || '(blank)'}</div>
-        <div class="hint"><strong>Handle:</strong> <code>${currentProduct.handle}</code></div>
-        <div class="hint"><strong>Vendor:</strong> ${currentProduct.vendor || '(blank)'} · <strong>Type:</strong> ${currentProduct.product_type || '(blank)'}</div>
-        <div class="hint"><strong>Tags:</strong> ${currentProduct.tags || '(none)'}</div>
-        <div class="hint"><strong>Status:</strong> ${currentProduct.status}</div>
-        <div class="hint" style="margin-top: 6px;"><strong>Read-only variants</strong> (price/weight/inventory — WILL NOT be updated):</div>
-        ${readOnlyVariants || '<div class="hint">(no variants)</div>'}
-      </div>
-    </details>
-
-    <details style="margin-bottom: 10px;">
-      <summary style="cursor: pointer; padding: 8px; background: var(--bg-3); border-radius: 6px;"><strong>Field-impact hierarchy</strong> — Claude is told to prioritize the top items</summary>
-      <div style="padding: 10px; background: var(--bg-3); margin-top: 4px; border-radius: 6px;">${impactHtml}</div>
-    </details>
-
-    <div class="hint" style="margin: 12px 0 6px 0;"><strong>Step 1 —</strong> Copy the prompt below and paste into Claude.</div>
-    <textarea id="shopifyPromptText" spellcheck="false" style="width:100%; min-height: 240px; font-family: var(--mono); font-size: 11px; padding: 10px; background: var(--bg-input); color: var(--text-1); border: 1px solid var(--line-2); border-radius: 6px; resize: vertical;">${prompt.replace(/</g, '&lt;')}</textarea>
+    <div class="hint" style="margin: 4px 0 6px 0;"><strong>Step 1 —</strong> Copy the prompt below and paste into Claude.</div>
+    <textarea id="shopifyPromptText" spellcheck="false" style="width:100%; min-height: 200px; font-family: var(--mono); font-size: 11px; padding: 10px; background: var(--bg-input); color: var(--text-1); border: 1px solid var(--line-2); border-radius: 6px; resize: vertical;">${prompt.replace(/</g, '&lt;')}</textarea>
     <div class="row" style="margin-top: 8px;">
       <button id="shopifyCopyPromptBtn">📋 Copy prompt</button>
       <button class="secondary" id="shopifyOpenClaudeBtn">🚀 Open in Claude</button>
@@ -4858,14 +4840,44 @@ function renderShopifyModalBody({ currentProduct, productUrl, prompt, impactRows
       <span class="hint">${(prompt.length / 1024).toFixed(1)} KB</span>
     </div>
 
-    <div class="hint" style="margin: 16px 0 6px 0;"><strong>Step 2 —</strong> Paste Claude's JSON response below. The manager will parse out the \`\`\`json block, filter against the allowlist, and show a preview of exactly what will be sent.</div>
-    <textarea id="shopifyJsonInput" spellcheck="false" placeholder='Paste Claude&#39;s full response OR just the JSON block. Both work.' style="width:100%; min-height: 160px; font-family: var(--mono); font-size: 11px; padding: 10px; background: var(--bg-input); color: var(--text-1); border: 1px solid var(--line-2); border-radius: 6px; resize: vertical;"></textarea>
+    <div class="hint" style="margin: 16px 0 6px 0;"><strong>Step 2 —</strong> Paste Claude's JSON response below.</div>
+    <textarea id="shopifyJsonInput" spellcheck="false" placeholder='Paste Claude&#39;s full response OR just the JSON block. Both work.' style="width:100%; min-height: 140px; font-family: var(--mono); font-size: 11px; padding: 10px; background: var(--bg-input); color: var(--text-1); border: 1px solid var(--line-2); border-radius: 6px; resize: vertical;"></textarea>
     <div class="row" style="margin-top: 8px;">
       <button id="shopifyPreviewBtn">👁 Preview what will be pushed</button>
       <span class="spacer" style="flex:1;"></span>
     </div>
 
     <div id="shopifyPreviewBox" style="margin-top: 12px;"></div>
+
+    <!-- Reference sections at the bottom — collapsed by default. -->
+    <div style="margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--line-1);">
+      <div class="hint" style="margin-bottom: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3);">Reference</div>
+      <details style="margin-bottom: 8px;">
+        <summary style="cursor: pointer; padding: 8px; background: var(--bg-3); border-radius: 6px;"><strong>Safety guarantee</strong> — ${allowlist.length} allowlisted fields only</summary>
+        <div class="hint" style="padding: 10px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 6px; margin-top: 4px;">
+          The manager only PUTs these ${allowlist.length} fields to Shopify: ${allowlist.map(f => `<code>${f}</code>`).join(', ')}.
+          Anything else in Claude's JSON — including price, weight, location, inventory, variants — is stripped server-side before the request leaves this process.
+        </div>
+      </details>
+
+      <details style="margin-bottom: 8px;">
+        <summary style="cursor: pointer; padding: 8px; background: var(--bg-3); border-radius: 6px;"><strong>Current Shopify listing</strong> · id <code>${currentProduct.id}</code> · <a href="${productUrl}" target="_blank" rel="noopener">open in browser →</a></summary>
+        <div style="padding: 10px; background: var(--bg-3); margin-top: 4px; border-radius: 6px;">
+          <div class="hint"><strong>Title:</strong> ${currentProduct.title || '(blank)'}</div>
+          <div class="hint"><strong>Handle:</strong> <code>${currentProduct.handle}</code></div>
+          <div class="hint"><strong>Vendor:</strong> ${currentProduct.vendor || '(blank)'} · <strong>Type:</strong> ${currentProduct.product_type || '(blank)'}</div>
+          <div class="hint"><strong>Tags:</strong> ${currentProduct.tags || '(none)'}</div>
+          <div class="hint"><strong>Status:</strong> ${currentProduct.status}</div>
+          <div class="hint" style="margin-top: 6px;"><strong>Read-only variants</strong> (price/weight/inventory — WILL NOT be updated):</div>
+          ${readOnlyVariants || '<div class="hint">(no variants)</div>'}
+        </div>
+      </details>
+
+      <details style="margin-bottom: 8px;">
+        <summary style="cursor: pointer; padding: 8px; background: var(--bg-3); border-radius: 6px;"><strong>Field-impact hierarchy</strong> — Claude is told to prioritize the top items</summary>
+        <div style="padding: 10px; background: var(--bg-3); margin-top: 4px; border-radius: 6px;">${impactHtml}</div>
+      </details>
+    </div>
   `;
 }
 // Global-ish flag: the modal is currently open + waiting for Claude's
