@@ -2448,6 +2448,13 @@ async function run() {
   assert(wdTmpl.includes('__TOKEN__'),                        'AUTO-UPDATE.6 token placeholder in template');
   assert(srvFull.includes("$wdBody -replace '__TOKEN__'"),    'AUTO-UPDATE.7 installer substitutes token placeholder');
   assert(srvFull.includes('.adbrain-bundle-hash'),            'AUTO-UPDATE.8 installer seeds initial hash so first run does not false-positive');
+  // Shopify modal: 3-step quick-nav strip at top of modal body so users
+  // don't get lost hunting for the paste-back textarea after expanding
+  // Current-listing / Field-impact sections.
+  assert(appJs.body.includes("1️⃣ Prompt to copy"),           'MODAL-NAV.1 step 1 quick-nav button');
+  assert(appJs.body.includes("2️⃣ Paste Claude's response"),  'MODAL-NAV.2 step 2 quick-nav button');
+  assert(appJs.body.includes("3️⃣ Preview + Push"),           'MODAL-NAV.3 step 3 quick-nav button');
+  assert(appJs.body.includes("shopifyJsonInput')?.scrollIntoView"), 'MODAL-NAV.4 step 2 scrolls to + focuses textarea');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
