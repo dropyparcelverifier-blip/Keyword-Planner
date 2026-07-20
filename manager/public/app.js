@@ -5994,8 +5994,14 @@ function renderAnalyticsHero(rows) {
     btn.textContent = '🔄 Re-queueing…';
     try {
       const r = await api.jobsRequeueByUrl(bId, pUrl);
-      if (r.ok) toast(`Re-queued. A worker will pick it up on the next claim tick.`, 'ok', { title: '🔄 Re-queued' });
-      else toast(r.error || 'Server did not re-queue (job may already be pending).', 'warn');
+      if (r.ok) {
+        const msg = r.was_already_pending
+          ? `Job was already pending — no change needed. A worker will claim it on the next tick.`
+          : `Re-queued (was: ${r.prior_status || 'unknown'} → pending). A worker will pick it up on the next claim tick.`;
+        toast(msg, 'ok', { title: '🔄 Re-queued' });
+      } else {
+        toast(r.error || 'Server did not re-queue.', 'warn');
+      }
     } catch (err) {
       toast(err.message || 'Re-queue failed.', 'err');
     } finally { btn.disabled = false; btn.textContent = original; }
