@@ -93,7 +93,7 @@ export const api = {
   renameBatch:       (batchId, name)   => _fetch('/api/batches/rename', { method: 'POST', body: { batchId, name } }),
   wipeSelective:     (flags, batchId)  => _fetch('/api/wipe-selective', { method: 'POST', body: { confirm: 'WIPE', flags, batchId: batchId || null } }),
   shopifyFieldImpact:  ()              => _fetch('/api/shopify/field-impact'),
-  shopifyGetProduct:   (productUrl)    => _fetch(`/api/shopify/get-product?url=${encodeURIComponent(productUrl)}`),
+  shopifyGetProduct:   (productUrl, productIdHint) => _fetch(`/api/shopify/get-product?url=${encodeURIComponent(productUrl)}${productIdHint ? `&productId=${encodeURIComponent(productIdHint)}` : ''}`),
   // Server-cached (10min TTL) — cheap to call every prompt build.
   shopifyGetPolicies:  ()              => _fetch('/api/shopify/get-policies'),
   shopifyMetafieldDefinitions: ()      => _fetch('/api/shopify/metafield-definitions'),

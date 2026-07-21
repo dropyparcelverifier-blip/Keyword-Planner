@@ -2870,12 +2870,26 @@ const server = http.createServer(async (req, res) => {
         method: 'GET', apiPath: `/admin/api/${apiVer}/products.json?handle=${encodeURIComponent(handle)}`,
       });
       if (!r.ok) return send(res, r.status || 502, { ok: false, error: `Shopify API: ${JSON.stringify(r.error)}`, shop_domain: shop.shopDomain });
-      const prod = (r.data?.products || [])[0];
+      let prod = (r.data?.products || [])[0];
+      // Fallback: if handle lookup failed AND the caller supplied a
+      // hint (?productId=), try direct lookup by id. Handles the case
+      // where someone changed the slug in Shopify Admin between
+      // discovery time and now — we still know the id from analytics.
+      const hintId = Number(url.searchParams.get('productId') || 0);
+      if (!prod && hintId > 0) {
+        const rById = await shopifyRequest({
+          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+          method: 'GET', apiPath: `/admin/api/${apiVer}/products/${hintId}.json`,
+        }).catch(() => ({ ok: false }));
+        if (rById.ok && rById.data?.product) {
+          prod = rById.data.product;
+          // Note the handle drift so the client can surface it.
+          if (prod.handle && prod.handle !== handle) {
+            prod._handle_drift = { queried: handle, current: prod.handle };
+          }
+        }
+      }
       if (!prod) {
-        // Fallback probe: maybe the product exists but is DRAFT/ARCHIVED
-        // (some Shopify accounts hide those from the default status=any
-        // handle query in older API versions). Query explicitly with
-        // status filter to disambiguate.
         const r2 = await shopifyRequest({
           shopDomain: shop.shopDomain, adminToken: shop.adminToken,
           method: 'GET', apiPath: `/admin/api/${apiVer}/products.json?handle=${encodeURIComponent(handle)}&status=any`,

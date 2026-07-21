@@ -4431,11 +4431,28 @@ async function openShopifyModal() {
     // Fetch product + field impact + shop policies in parallel. Policies
     // are server-cached (10min TTL) so this is cheap on the 2nd+ open.
     // Policies fetch is soft-fail: prompt still builds without them.
+    // Product-ID hint cache — resolves 'handle changed on Shopify after last
+    // successful fetch' by falling back to id-based lookup. Populated by every
+    // successful get-product below.
+    let idHintCache = {};
+    try { idHintCache = JSON.parse(localStorage.getItem('adbrainShopifyIdCache') || '{}'); } catch {}
+    const cachedId = idHintCache[productUrl];
     const [prodR, impactR, policiesR] = await Promise.all([
-      api.shopifyGetProduct(productUrl),
+      api.shopifyGetProduct(productUrl, cachedId || null),
       api.shopifyFieldImpact(),
       api.shopifyGetPolicies().catch(() => ({ ok: false, policies: [] })),
     ]);
+    // Save the id on success so a future handle change doesn't lock us out.
+    if (prodR.product?.id) {
+      idHintCache[productUrl] = prodR.product.id;
+      try { localStorage.setItem('adbrainShopifyIdCache', JSON.stringify(idHintCache)); } catch {}
+    }
+    // If the fetch fell back to id-based lookup because the handle changed
+    // on Shopify side, warn the operator in a banner.
+    if (prodR.product?._handle_drift) {
+      const drift = prodR.product._handle_drift;
+      toast(`⚠ Handle changed on Shopify side: was "${drift.queried}", now "${drift.current}". Recovered via product-id lookup. The URL your customers see is now /products/${drift.current}.`, 'warn', { title: '🔀 Handle drift detected' });
+    }
     const cur = prodR.product;
     const impactRows = impactR.fields || [];
     const allowlist = impactR.allowlist || [];
