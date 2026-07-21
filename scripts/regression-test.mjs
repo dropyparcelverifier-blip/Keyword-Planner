@@ -2378,9 +2378,29 @@ async function run() {
   assert(srvFull.includes('/policies.json'),                   'POLICY.3 hits the Shopify policies API');
   assert(apiFull.includes('shopifyGetPolicies'),               'POLICY.4 client wrapper defined');
   assert(appJs.body.includes('shopifyGetPolicies()'),          'POLICY.5 modal opens with policy fetch in parallel');
-  assert(appJs.body.includes('STORE POLICY LANGUAGE'),         'POLICY.6 prompt section header');
-  assert(appJs.body.includes('echo, do not invent'),           'POLICY.7 anti-invention directive present');
+  // POLICY.6/.7 rewritten 2026-07-21: the policy-echo block was removed
+  // from the prompt because the storefront theme renders policies natively
+  // and the operator no longer wants Shipping & returns duplicated in
+  // body_html. Assert the removal + the replacement directive.
+  assert(!appJs.body.includes('STORE POLICY LANGUAGE'),        'POLICY.6 policy-echo section removed from prompt');
+  assert(appJs.body.includes('DO NOT') && appJs.body.includes('Shipping & returns'), 'POLICY.7 explicit no-Shipping-returns directive present');
   assert(/policies\s*=\s*\[\]/.test(appJs.body),               'POLICY.8 buildShopifyClaudePrompt defaults policies=[]');
+  // FAQ fan-out — server explodes 'custom.faqs' into individual
+  // faq_q_N / faq_a_N slots so themes reading the per-question schema
+  // pick up new content, and blanks unused slots so stale FAQs clear.
+  assert(srvFull.includes('fanOutConsolidatedFaqs'),            'FAQ-FANOUT.1 fan-out function defined');
+  assert(srvFull.includes('_faq_fanout'),                       'FAQ-FANOUT.2 result surface on patch');
+  assert(/for \(let i = blocks\.length; i < 10; i\+\+\)/.test(srvFull), 'FAQ-FANOUT.3 blanks unused slots up to slot 10');
+  assert(srvFull.includes('faq_fanout: faqFanout'),             'FAQ-FANOUT.4 response includes faq_fanout');
+  assert(appJs.body.includes('faqFanoutNote'),                  'FAQ-FANOUT.5 toast surfaces the fan-out result');
+  assert(appJs.body.includes('r.faq_fanout'),                   'FAQ-FANOUT.6 client reads faq_fanout from response');
+  // Shipping & returns auto-strip — safety net if Claude ignores the
+  // 'do not emit Shipping & returns' directive, server removes the
+  // <h2> section from body_html before it hits Shopify.
+  assert(srvFull.includes('shipReturnsRe'),                     'SHIP-STRIP.1 shipping/returns regex defined');
+  assert(srvFull.includes('shipping_returns_stripped'),         'SHIP-STRIP.2 auto-routed diag includes ship-strip flag');
+  assert(/shipping\\s\*\(\?:&\|and\|&amp;\)\\s\*returns\?/.test(srvFull), 'SHIP-STRIP.3 regex matches shipping & returns h2');
+  assert(appJs.body.includes('shipping_returns_stripped'),      'SHIP-STRIP.4 toast surfaces ship-strip flag');
   // Analytics rail search: matches by SKU/ASIN, not just batch label.
   // Batches whose SKUs match the query are force-expanded + non-matching
   // SKUs hide inside the expanded batch.

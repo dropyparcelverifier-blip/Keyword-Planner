@@ -583,7 +583,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // Logged to the console so users can verify which build is actually
 // running when they refresh — 'my changes aren't showing' is almost
 // always a cached JS problem. Bumped whenever wiring changes.
-console.info('[adbrain] manager UI build 2026-07-21a (handle-drift-fallback + id-hint-cache)');
+console.info('[adbrain] manager UI build 2026-07-21b (faq-fanout + strip-shipping-section)');
 // Clear the stale-cache banner if it was shown (inline script pre-set it).
 const _staleBanner = document.getElementById('globalErrorBanner');
 if (_staleBanner && _staleBanner.textContent.includes('STALE CACHE')) {
@@ -4647,7 +4647,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('- **[ON-PAGE]** Long-tail optimization — target the top-50 keywords BELOW verbatim; each becomes a section heading, a FAQ, an ingredient explanation, or a buying-guide scenario. Do not just rank for the brand token.');
   L.push('- **[ON-PAGE]** CTR — meta title + meta description are your CTR levers. Include a benefit + a trust signal + a CTA.');
   L.push('- **[ON-PAGE]** Bounce-rate reduction — above-the-fold clarity (opening `<p>` + featured-snippet block), then FAQ + comparison + related products so users have somewhere to go on-page.');
-  L.push('- **[ON-PAGE]** E-E-A-T — link to `/policies/shipping-policy`, `/policies/refund-policy`, `/pages/contact`, `/pages/about-us` (Shopify defaults). Mention COD, GST invoice, secure checkout, customer service email in Shipping & returns.');
+  L.push('- **[ON-PAGE]** E-E-A-T — link to `/pages/contact`, `/pages/about-us` (Shopify defaults) inside body_html only where it flows naturally in a paragraph. Do NOT add a dedicated Shipping & returns section — the storefront theme already renders a policies section on every PDP, so duplicating it in body_html is redundant + steals bytes from ranking content.');
   L.push('');
   L.push('## COMPETITIVE LANDSCAPE (who we\'re beating)');
   L.push('Below are the domains that appeared MOST OFTEN in Google SERPs across our keyword research.');
@@ -4695,33 +4695,11 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
     L.push(`- If our real review count is at or above the median, lean into it: the \`AggregateRating\` in schema will earn stars in the SERP snippet and beat competitors on CTR even at lower positions.`);
     L.push('');
   }
-  // ── Actual store-policy language, fetched from Shopify's /policies.json.
-  // Shown to Claude so the 'Shipping & returns' section in body_html echoes
-  // the store's REAL delivery timeline / return window / COD terms instead
-  // of Claude inventing generic 'pan-India shipping' phrasing that might
-  // contradict the /policies/shipping-policy page users click through to.
-  // Only shipping + refund shown — TOS + privacy aren't useful for prompt.
-  const shipPol = policies.find(p => /ship/i.test(p.handle));
-  const retPol  = policies.find(p => /refund|return/i.test(p.handle));
-  if (shipPol?.body || retPol?.body) {
-    L.push('## STORE POLICY LANGUAGE (echo, do not invent)');
-    L.push('Below is the ACTUAL text from the store\'s policy pages. When you write the `Shipping & returns` section inside `body_html`, use the specific numbers (delivery days, return window, COD threshold, geographic scope) from these — do NOT invent generic phrasing that might contradict what users see on `/policies/shipping-policy`.');
-    L.push('');
-    if (shipPol?.body) {
-      L.push('### Shipping policy (as published)');
-      L.push('```');
-      L.push(shipPol.body.slice(0, 2500));
-      L.push('```');
-      L.push('');
-    }
-    if (retPol?.body) {
-      L.push('### Refund / return policy (as published)');
-      L.push('```');
-      L.push(retPol.body.slice(0, 2500));
-      L.push('```');
-      L.push('');
-    }
-  }
+  // Store-policy language previously injected here so Claude's Shipping &
+  // returns section echoed the real policy. Removed 2026-07-21 per operator
+  // request — the storefront theme renders policies natively, so duplicating
+  // shipping/returns copy in body_html is redundant. Keeping the block would
+  // just tempt Claude to write a section we now forbid.
   L.push('## RANKING PLAYBOOK (apply to every field)');
   L.push('1. **Title (highest signal)** — primary keyword literally in the first 3 words. Then descriptor + benefit. e.g. `Aquaphor Lip Repair Balm 10g — Cracked Lip Overnight Fix, Ships Pan-India`. 60-70 chars. NOT `Buy Aquaphor Balm` (weak, generic).');
   L.push('2. **Handle** — **NEVER CHANGE**. The current handle is locked; do NOT emit a `handle` key in your JSON. Shopify preserves the existing URL when we don\'t send one. Changing a live handle breaks every inbound link + loses Google\'s accumulated URL authority. If you think the handle is poorly named, that\'s a manual Shopify Admin task (redirect setup) — never automated.');
@@ -4736,7 +4714,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('   - `<h2>` Buying guide — a `<h3>` "How to choose the right variant for your need" block with 3-5 short scenarios matching the buying-intent keywords from research. This is the mini-buying-guide that captures "best X for Y" queries directly on the PDP.');
   L.push('   - `<h2>` Who it\'s for — India-specific use cases (cold Delhi winter, Bengaluru AC skin, Mumbai humidity, Chennai heat). Rank on regional queries.');
   L.push('   - `<h2>` Related on dropy.in — 3-6 `<a>` INTERNAL LINKS with keyword-rich anchor text. Target patterns (dropy uses standard Shopify URLs): `/collections/<category-slug>` for category (e.g. `/collections/acne-face-wash`), `/collections/<brand-slug>` for brand siblings, `/collections/<use-case-slug>` for concern (e.g. `/collections/body-acne`). Pick collections from the top themes below. Only invent slugs if they clearly match a research theme — a dead link is worse than no link.');
-  L.push('   - `<h2>` Shipping & returns — India-first: pan-India delivery, COD, GST invoice, return policy days, customer-support contact. Trust signals. Link to `/policies/shipping-policy`, `/policies/refund-policy`, `/pages/contact` (these paths exist on every Shopify store by default).');
+  L.push('   - **DO NOT** emit a Shipping & returns `<h2>` section — the storefront theme renders shipping / refund policy natively on every product page. Duplicating it in body_html adds bloat + steals space from ranking content. Trust signals belong in the FAQ (`custom.faqs`) or worked into other sections in one line, NOT as their own section.');
   L.push('   - `<p class="hint">` Last updated: `<time datetime="YYYY-MM-DD">Month YYYY</time>` — freshness signal. Use today\'s date.');
   L.push('   - `<script type="application/ld+json">` block at the end. See SCHEMA REQUIREMENTS below — this must include richer Product schema than before.');
   L.push('6. **Tags** — **LOCKED. DO NOT emit a `tags` key in your JSON.** Shopify Smart Collections use tag conditions, and any tag rewrite silently changes what collections this product belongs to (both current + any future collections whose rules match protected tags). The store operator manages tags in Shopify Admin; you focus on the fields that can\'t contaminate collection membership.');
@@ -4868,7 +4846,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
     L.push('- **DO NOT duplicate** — if content is here, the theme is already showing it. Duplicate content in body_html hurts SEO (Google detects it) AND bloats page weight.');
     L.push('- **Preserve factual accuracy** — for ingredients, dosage, disclaimers, direct-quote FAQ answers: echo VERBATIM if you reference them, never paraphrase.');
     L.push('');
-    L.push('body_html should COMPLEMENT these metafields with: ranking-focused opening paragraph, featured-snippet block, comparison table, buying guide, regional use-cases, related-collections links, Shipping & returns. Skip: ingredient breakdown, how-to-use, standard FAQ (those metafields already cover them).');
+    L.push('body_html should COMPLEMENT these metafields with: ranking-focused opening paragraph, featured-snippet block, comparison table, buying guide, regional use-cases, related-collections links. Skip: ingredient breakdown, how-to-use, standard FAQ, Shipping & returns (metafields cover the first three; theme renders policies natively for the last).');
     L.push('');
     for (const mf of currentProduct.curated_metafields) {
       const label = `${mf.namespace}.${mf.key}`;
@@ -4993,7 +4971,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('**Tier 4**');
   L.push('- [ ] Top 15 long-tail keywords from research each appear at least once in `body_html`, `tags`, or FAQ.');
   L.push('- [ ] Body opens with clear above-the-fold answer to primary query (bounce-rate lever).');
-  L.push('- [ ] Shipping & returns section links to `/policies/shipping-policy`, `/policies/refund-policy`, `/pages/contact` (E-E-A-T).');
+  L.push('- [ ] NO `<h2>` Shipping & returns section — theme renders policies natively; body_html must not duplicate.');
   L.push('**Hard rules**');
   L.push('- [ ] Zero competitor brand names in the actual `body_html` copy (schema `brand` for our own product is fine).');
   L.push('- [ ] Zero fabricated ratings / reviews / certifications / awards.');
@@ -5624,7 +5602,15 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
         // even if Claude tried to dump everything into Description.
         const ar = r.auto_routed;
         const autoRoutedNote = ar
-          ? `<div class="hint" style="color: var(--accent); margin-top: 6px; padding: 8px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 6px;">🔀 Server auto-routed content out of body_html into metafields (Claude tried to dump into Description again): ${ar.how_to_use_extracted ? '<code>how_to_use</code> ' : ''}${ar.ingredients_extracted ? '<code>ingredients</code> ' : ''}${ar.faqs_extracted ? `<code>${ar.faqs_extracted} FAQ(s)</code> ` : ''}· body_html shrunk by ${ar.body_shrunk_by} chars. Theme tabs should now populate.</div>`
+          ? `<div class="hint" style="color: var(--accent); margin-top: 6px; padding: 8px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 6px;">🔀 Server auto-routed content out of body_html into metafields (Claude tried to dump into Description again): ${ar.how_to_use_extracted ? '<code>how_to_use</code> ' : ''}${ar.ingredients_extracted ? '<code>ingredients</code> ' : ''}${ar.faqs_extracted ? `<code>${ar.faqs_extracted} FAQ(s)</code> ` : ''}${ar.shipping_returns_stripped ? '<code>Shipping&nbsp;&amp;&nbsp;returns section removed</code> ' : ''}· body_html shrunk by ${ar.body_shrunk_by} chars. Theme tabs should now populate.</div>`
+          : '';
+        // FAQ fan-out — server exploded custom.faqs into individual q_N/a_N
+        // slots + blanked the unused ones. Explains why the storefront's
+        // per-question FAQ section now reflects the new content instead of
+        // stale entries from earlier pushes.
+        const ff = r.faq_fanout;
+        const faqFanoutNote = ff && ff.total_blocks > 0
+          ? `<div class="hint" style="color: var(--accent); margin-top: 6px; padding: 8px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 6px;">❓ Server fanned <code>custom.faqs</code> out to ${ff.filled} individual <code>faq_q_N/faq_a_N</code> slot(s) + blanked ${ff.blanked} stale slot(s). Storefront themes reading the per-question schema will now show the new ${ff.total_blocks} FAQ(s), not stale ones.</div>`
           : '';
         // Image-alts result — how many alts landed.
         const altResults = Array.isArray(r.results?.image_alts) ? r.results.image_alts : [];
@@ -5643,7 +5629,7 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
               ${tp.dropped?.length ? ` · <span style="color:var(--warn);">${tp.dropped.length} tag(s) dropped by Claude</span> (${tp.dropped.map(t => `<code>${esc(t)}</code>`).join(', ')}) — check if any of these anchor auto-collections you need this product in` : ''}
             </div>`
           : '';
-        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${sentKeys.map(k => `<code>${k}</code>`).join(', ') || '(none)'}${mfNote}${altNote}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}${snapshotNote}</div>${tagPreserveNote}${autoRoutedNote}${skippedNote}`;
+        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${sentKeys.map(k => `<code>${k}</code>`).join(', ') || '(none)'}${mfNote}${altNote}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}${snapshotNote}</div>${tagPreserveNote}${autoRoutedNote}${faqFanoutNote}${skippedNote}`;
         toast('Shopify listing updated. Revert button available below if needed.', 'ok', { title: 'Pushed' });
         // Wire the just-pushed revert button.
         document.getElementById('shopifyRevertLastBtn')?.addEventListener('click', async (e) => {

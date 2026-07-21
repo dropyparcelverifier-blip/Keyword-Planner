@@ -231,6 +231,12 @@ function autoRouteBodyToMetafields(patch) {
     body = body.replace(/<h2[^>]*>\s*(?:frequently\s+asked\s+questions?|faqs?)[^<]*<\/h2>[\s\S]*?(?=<h2\b|<script\b|$)/i, '');
     body = body.replace(detailsRe, '');
   }
+  // Strip any Shipping & returns h2 section — theme renders policies
+  // natively; body_html duplication is redundant. Runs even if we didn't
+  // extract other sections, so the safety net always applies.
+  const shipReturnsRe = /<h2[^>]*>\s*(?:shipping\s*(?:&|and|&amp;)\s*returns?|shipping,?\s*returns?\s*(?:&|and|&amp;)?\s*(?:refunds?)?|delivery\s*(?:&|and|&amp;)\s*returns?)[^<]*<\/h2>[\s\S]*?(?=<h2\b|<script\b|$)/i;
+  const shipReturnsMatch = body.match(shipReturnsRe);
+  if (shipReturnsMatch) body = body.replace(shipReturnsMatch[0], '');
   // Only rewrite body_html if we actually extracted something. Trim
   // consecutive blank lines the strips leave behind.
   if (body !== original) {
@@ -239,6 +245,7 @@ function autoRouteBodyToMetafields(patch) {
       how_to_use_extracted: !!howToMatch,
       ingredients_extracted: !!ingMatch,
       faqs_extracted: details.length,
+      shipping_returns_stripped: !!shipReturnsMatch,
       body_shrunk_by: original.length - patch.body_html.length,
     };
   }
@@ -283,11 +290,50 @@ function mergeTagsPreservingProtected(claudeTagsRaw, currentTagsRaw, vendor) {
   return { merged: [...claudeList, ...preserved].join(', '), preserved, dropped: currentList.filter(t => !lowerSet.has(t.toLowerCase())) };
 }
 
+// If Claude sent the consolidated 'custom.faqs' block, fan its <details>
+// entries out to individual 'custom.faq_q_N' / 'custom.faq_a_N' slots so
+// storefront themes that render the OLD individual-metafield schema pick
+// up new content. Also BLANK slots N+1..10 so stale FAQs from earlier
+// pushes don't linger on the page. If Claude also sent explicit q/a
+// values, respect them and don't overwrite.
+function fanOutConsolidatedFaqs(patch) {
+  patch.metafields = patch.metafields || {};
+  const faqs = patch.metafields['custom.faqs'];
+  if (typeof faqs !== 'string' || !faqs.trim()) return patch;
+  const stripHtml = html => String(html || '')
+    .replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+    .replace(/[ \t]+/g, ' ').trim();
+  const rx = /<details[^>]*>\s*<summary[^>]*>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>/gi;
+  const blocks = [...faqs.matchAll(rx)].slice(0, 10);
+  let filled = 0;
+  for (let i = 0; i < blocks.length; i++) {
+    const qKey = `custom.faq_q_${i + 1}`;
+    const aKey = `custom.faq_a_${i + 1}`;
+    if (!patch.metafields[qKey]) { patch.metafields[qKey] = stripHtml(blocks[i][1]); filled++; }
+    if (!patch.metafields[aKey]) { patch.metafields[aKey] = stripHtml(blocks[i][2]); }
+  }
+  // Blank remaining slots (blocks.length+1..10) so stale content clears.
+  // Empty string wipes the metafield value without deleting the definition.
+  for (let i = blocks.length; i < 10; i++) {
+    const qKey = `custom.faq_q_${i + 1}`;
+    const aKey = `custom.faq_a_${i + 1}`;
+    if (!(qKey in patch.metafields)) patch.metafields[qKey] = '';
+    if (!(aKey in patch.metafields)) patch.metafields[aKey] = '';
+  }
+  patch._faq_fanout = { total_blocks: blocks.length, filled, blanked: Math.max(0, 10 - blocks.length) };
+  return patch;
+}
+
 function stripToShopifyAllowlist(payload, opts = {}) {
   // Run auto-router FIRST so extracted content lands in metafields BEFORE
   // the allowlist strip decides what to keep. Non-destructive on payloads
   // that already split cleanly (metafields present, body_html clean).
   payload = autoRouteBodyToMetafields({ ...(payload || {}) });
+  // Then fan out consolidated 'custom.faqs' to individual q_N/a_N slots
+  // + blank empty slots. Handles the case where Claude sent FAQs only in
+  // the consolidated field but the theme reads from individual slots.
+  payload = fanOutConsolidatedFaqs(payload);
   // Tag preservation — merge protected tags from current listing back into
   // Claude's new tag list. opts.currentTags + opts.currentVendor supply the
   // 'before' state (fetched by update-product before we call this).
@@ -299,6 +345,8 @@ function stripToShopifyAllowlist(payload, opts = {}) {
   }
   const autoRouted = payload._auto_routed || null;
   delete payload._auto_routed;   // don't emit as 'stripped'
+  const faqFanout = payload._faq_fanout || null;
+  delete payload._faq_fanout;
   const out = {};
   const stripped = [];
   const metafieldsOut = {};   // 'namespace.key' → value (only allowlisted)
@@ -327,7 +375,7 @@ function stripToShopifyAllowlist(payload, opts = {}) {
   }
   if (Object.keys(metafieldsOut).length > 0) out.metafields = metafieldsOut;
   if (imageAltsOut.length > 0) out.image_alts = imageAltsOut;
-  return { safe: out, stripped, autoRouted, tagPreservation };
+  return { safe: out, stripped, autoRouted, tagPreservation, faqFanout };
 }
 // Preflight validator — runs against the tier rubric BEFORE any Shopify write.
 // Returns {ok, critical: [], warn: [], stats}. Critical failures block the
@@ -3073,7 +3121,7 @@ const server = http.createServer(async (req, res) => {
     if (m === 'POST' && p === '/api/shopify/validate-patch') {
       const b = await readJson(req);
       if (!b.patch || typeof b.patch !== 'object') return send(res, 400, { ok: false, error: 'patch object required' });
-      const { safe, stripped, autoRouted, tagPreservation } = stripToShopifyAllowlist(b.patch, { currentTags: b.currentTags || null, currentVendor: b.currentVendor || null });
+      const { safe, stripped, autoRouted, tagPreservation, faqFanout } = stripToShopifyAllowlist(b.patch, { currentTags: b.currentTags || null, currentVendor: b.currentVendor || null });
       const preflight = validateShopifyPatch(safe, b.validationContext || {});
       return send(res, 200, { ok: true, preflight, stripped, safe });
     }
@@ -3083,7 +3131,7 @@ const server = http.createServer(async (req, res) => {
       if (!productId) return send(res, 400, { ok: false, error: 'productId required' });
       if (!b.patch || typeof b.patch !== 'object') return send(res, 400, { ok: false, error: 'patch object required' });
       if (b.confirm !== 'PUSH') return send(res, 400, { ok: false, error: "safety: send {confirm:'PUSH'} to proceed" });
-      const { safe, stripped, autoRouted, tagPreservation } = stripToShopifyAllowlist(b.patch, { currentTags: b.currentTags || null, currentVendor: b.currentVendor || null });
+      const { safe, stripped, autoRouted, tagPreservation, faqFanout } = stripToShopifyAllowlist(b.patch, { currentTags: b.currentTags || null, currentVendor: b.currentVendor || null });
       if (Object.keys(safe).length === 0) {
         return send(res, 400, { ok: false, error: 'no allowlisted fields in patch (all were stripped)', stripped });
       }
@@ -3302,7 +3350,7 @@ const server = http.createServer(async (req, res) => {
           .run(productId, b.productUrl || null, b.sku || null, b.batchId || null, now(), b.pushedBy || null, JSON.stringify(snapshot || {}), JSON.stringify(safe));
         historyId = Number(hist.lastInsertRowid);
       } catch (e) { /* audit-only; do not fail the push */ }
-      return send(res, 200, { ok: true, productId, sent: safe, stripped, results, product: results.rest?.product || null, history_id: historyId, snapshot_captured: !!snapshot, snapshot_error: snapshotErr, auto_routed: autoRouted, tag_preservation: tagPreservation });
+      return send(res, 200, { ok: true, productId, sent: safe, stripped, results, product: results.rest?.product || null, history_id: historyId, snapshot_captured: !!snapshot, snapshot_error: snapshotErr, auto_routed: autoRouted, tag_preservation: tagPreservation, faq_fanout: faqFanout });
     }
     // List push history for a product — powers the 'Revert' UI in the
     // Shopify modal. Returns most-recent first, with the fields we can
