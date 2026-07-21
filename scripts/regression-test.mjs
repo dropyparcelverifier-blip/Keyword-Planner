@@ -2589,6 +2589,12 @@ async function run() {
   // Client METAFIELD_ALLOWLIST now matches server (17 keys, not 5).
   assert(appJs.body.includes("'custom.faq_q_5'") && appJs.body.includes("'custom.highlight_3'"), 'PUSH-FIX.3 client allowlist expanded to full 17');
   assert(appJs.body.includes("kept['image_alts'] = v"),         'PUSH-FIX.4 image_alts array preserved through preview → push');
+  // Handle locked: server strips it, prompt tells Claude to omit.
+  assert(!srvFull.includes("  'handle',\n"),                    'HANDLE-LOCK.1 handle removed from SHOPIFY_ALLOWED_FIELDS');
+  assert(srvFull.includes("Handle DELIBERATELY EXCLUDED"),      'HANDLE-LOCK.2 reason documented in server');
+  assert(appJs.body.includes('**NEVER CHANGE**'),               'HANDLE-LOCK.3 prompt playbook says never change');
+  assert(appJs.body.includes('handle` key is OMITTED'),         'HANDLE-LOCK.4 sanity checklist requires handle omission');
+  assert(appJs.body.includes('LOCKED — do not emit'),           'HANDLE-LOCK.5 current-listing block marks handle locked');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.

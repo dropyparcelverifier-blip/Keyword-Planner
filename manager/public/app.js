@@ -4707,7 +4707,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   }
   L.push('## RANKING PLAYBOOK (apply to every field)');
   L.push('1. **Title (highest signal)** — primary keyword literally in the first 3 words. Then descriptor + benefit. e.g. `Aquaphor Lip Repair Balm 10g — Cracked Lip Overnight Fix, Ships Pan-India`. 60-70 chars. NOT `Buy Aquaphor Balm` (weak, generic).');
-  L.push('2. **Handle** — kebab-case slug MUST contain the primary keyword. If the current handle is generic (e.g. `product-1234`), replace it. If it already contains the primary keyword, KEEP IT (changing loses backlinks + existing SEO).');
+  L.push('2. **Handle** — **NEVER CHANGE**. The current handle is locked; do NOT emit a `handle` key in your JSON. Shopify preserves the existing URL when we don\'t send one. Changing a live handle breaks every inbound link + loses Google\'s accumulated URL authority. If you think the handle is poorly named, that\'s a manual Shopify Admin task (redirect setup) — never automated.');
   L.push('3. **Meta title** — 55-60 chars. Different phrasing than title. Include the #1 buying-intent keyword + one benefit hook + `| dropy.in` at the end for brand-trust CTR.');
   L.push('4. **Meta description** — 150-160 chars. Include primary keyword in first 60 chars. Include a CTA verb ("Shop", "Order", "Get"). Include a trust signal ("Pan-India delivery" / "COD available" / "Free shipping"). Never truncated — count chars.');
   L.push('5. **Body HTML (DESCRIPTION tab only)** — 800-1200 words for this tab. THREE sections go to METAFIELDS not here: How To Use, Ingredients, FAQs (see OUTPUT SPEC below). Required sections for body_html IN THIS ORDER:');
@@ -4762,7 +4762,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('## CURRENT SHOPIFY LISTING (before your changes)');
   L.push(`- **Product ID**: ${currentProduct.id}`);
   L.push(`- **Title**: ${currentProduct.title || '(blank)'}`);
-  L.push(`- **Handle**: \`${currentProduct.handle || '(blank)'}\` — keep IF it already contains the primary keyword; replace IF it\'s generic.`);
+  L.push(`- **Handle** (LOCKED — do not emit): \`${currentProduct.handle || '(blank)'}\``);
   L.push(`- **Vendor**: ${currentProduct.vendor || '(blank)'}`);
   L.push(`- **Product type**: ${currentProduct.product_type || '(blank)'}`);
   L.push(`- **Tags** (current): ${currentProduct.tags || '(none)'}`);
@@ -4912,7 +4912,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('  "tags": "tag1, tag2, tag3",');
   L.push('  "product_type": "…",');
   L.push('  "vendor": "…",');
-  L.push('  "handle": "kebab-case-slug-with-primary-keyword",');
+  // handle intentionally omitted — locked, never write, see playbook item 2
   L.push('  "seo_title": "SEO <title> (55-60 chars) | dropy.in",');
   L.push('  "seo_description": "SEO <meta description> (150-160 chars, with CTA)",');
   L.push('  "metafields_global_title_tag": "same as seo_title — legacy metafield for REST compatibility",');
@@ -4959,7 +4959,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('### Sanity checklist BEFORE returning — Tier 1-4 rubric self-check');
   L.push('**Tier 1**');
   L.push('- [ ] `title` contains the primary keyword in the first 3 words (Tier 1 · CTR + relevance).');
-  L.push('- [ ] `handle` contains the primary keyword.');
+  L.push('- [ ] `handle` key is OMITTED from your JSON (handle is locked — see playbook item 2).');
   L.push('- [ ] `seo_title` AND `metafields_global_title_tag` are BOTH set to the same 55-60 char string (modern + legacy). Includes a benefit + `| dropy.in`.');
   L.push('- [ ] `seo_description` AND `metafields_global_description_tag` are BOTH set to the same 150-160 char string; primary keyword in first 60 chars, includes a CTA verb + a trust signal.');
   L.push('- [ ] `product_category` is set to a `gid://shopify/ProductTaxonomyNode/N` id IF you can pick a category with high confidence; omit the key entirely otherwise (a wrong id is worse than none — Shopify Google Merchant sync will fail).');

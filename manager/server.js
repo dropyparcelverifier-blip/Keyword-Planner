@@ -51,7 +51,13 @@ const SHOPIFY_ALLOWED_FIELDS = new Set([
   'tags',
   'product_type',
   'vendor',
-  'handle',
+  // Handle DELIBERATELY EXCLUDED. Changing a live product's URL breaks
+  // every inbound link + loses accumulated Google authority + requires
+  // manual redirect setup. Even a "better" keyword-rich handle is worse
+  // than the SEO of the URL Google has already indexed. Shopify preserves
+  // the existing handle when a PUT omits it — which is exactly what we
+  // want. If a store operator ever wants to change a handle, they do it
+  // manually in Shopify Admin so the redirect can be set at the same time.
   // Legacy SEO metafields — REST-compatible, still work on 2024-10.
   'metafields_global_title_tag',
   'metafields_global_description_tag',
@@ -141,7 +147,6 @@ function resolveMetafieldTarget(alias, definitions = []) {
 // items, and the manager UI shows the same order in previews.
 const SHOPIFY_FIELD_IMPACT = [
   { field: 'title',                              impact: 'critical', why: 'primary rank signal + SERP snippet + cart title' },
-  { field: 'handle',                             impact: 'critical', why: 'URL slug; changing an existing product\'s handle breaks SEO — only regenerate when intentional' },
   { field: 'seo_title',                          impact: 'critical', why: 'modern <title> (Shopify Admin > Search engine listing). 55-60 chars, keyword + benefit + brand. Prefer this over the legacy metafield.' },
   { field: 'metafields_global_title_tag',        impact: 'critical', why: 'legacy <title> metafield; kept for REST compatibility. Duplicate seo_title here for belt-and-braces coverage.' },
   { field: 'seo_description',                    impact: 'high',     why: 'modern <meta description>; drives SERP CTR. 150-160 chars, hook + benefit + CTA. Prefer this over the legacy metafield.' },
