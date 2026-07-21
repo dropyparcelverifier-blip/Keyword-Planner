@@ -4723,12 +4723,12 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('   - `<p class="hint">` Last updated: `<time datetime="YYYY-MM-DD">Month YYYY</time>` — freshness signal. Use today\'s date.');
   L.push('   - `<script type="application/ld+json">` block at the end. See SCHEMA REQUIREMENTS below — this must include richer Product schema than before.');
   L.push('6. **Tags** — **LOCKED. DO NOT emit a `tags` key in your JSON.** Shopify Smart Collections use tag conditions, and any tag rewrite silently changes what collections this product belongs to (both current + any future collections whose rules match protected tags). The store operator manages tags in Shopify Admin; you focus on the fields that can\'t contaminate collection membership.');
-  L.push('7. **Product type** — the single most-searched category term (from the themes below).');
-  L.push('8. **Vendor** — keep current unless clearly wrong. Amazon/brand ranking depends on brand consistency.');
+  L.push('7. **Product type** — **LOCKED. DO NOT emit.** Shopify Smart Collections often use `product_type equals X` as a rule. Any rewrite silently moves the product between category-page collections. Operator manages product_type in Shopify Admin.');
+  L.push('8. **Vendor** — **LOCKED. DO NOT emit.** Smart Collections use `vendor is X` as a rule (brand-page collections). Any rewrite silently moves the product between brand collections. Operator manages vendor in Shopify Admin.');
   L.push('');
   L.push('## HARD CONSTRAINTS');
   L.push('- **NEVER produce**: `price`, `weight`, `weight_unit`, `location`, `inventory_quantity`, `variants`, `images`, `sku`. The manager strips them server-side; wasted output tokens.');
-  L.push('- **ONLY produce keys** from this allowlist: ' + allowlist.map(f => `\`${f}\``).join(', ') + `, PLUS an \`image_alts\` array (one entry per image on the product — see Images section above for ids), PLUS a nested \`metafields\` object with any of these 8 theme-writable keys: \`custom.how_to_use\`, \`custom.ingredients\`, \`custom.bullet_points\`, \`custom.department\`, \`custom.highlight_1\`, \`custom.highlight_2\`, \`custom.highlight_3\`, \`custom.faqs\` (ONE consolidated FAQ block of 6-10 \`<details><summary>Q</summary>A</details>\` pairs — do NOT emit separate custom.faq_q_1, faq_a_1 keys; server extracts individual pairs from the consolidated block if the store's theme needs them). Anything else is stripped server-side. Only OMIT a key if you truly don't have content for it — do not skip populating an eligible metafield.`);
+  L.push('- **ONLY produce keys** from this allowlist: ' + allowlist.map(f => `\`${f}\``).join(', ') + `, PLUS an \`image_alts\` array (one entry per image on the product — see Images section above for ids), PLUS a nested \`metafields\` object with any of these 8 theme-writable keys: \`custom.how_to_use\`, \`custom.ingredients\`, \`custom.bullet_points\`, \`custom.department\`, \`custom.highlight_1\`, \`custom.highlight_2\`, \`custom.highlight_3\`, \`custom.faqs\` (ONE consolidated FAQ block of 6-10 \`<details><summary>Q</summary>A</details>\` pairs — do NOT emit separate custom.faq_q_1, faq_a_1 keys; server extracts individual pairs from the consolidated block if the store's theme needs them). Anything else is stripped server-side. \`tags\`, \`handle\`, \`vendor\`, \`product_type\` are LOCKED — do NOT emit them; they anchor Shopify Smart Collection rules and any rewrite silently moves the product between collections. Only OMIT a key if you truly don't have content for it — do not skip populating an eligible metafield.`);
   L.push('- **Return format**: reasoning paragraph, then ONE fenced ```json``` block. No other JSON. No commentary after.');
   L.push('- **India-first**. Currency ₹ and `INR` in schema. Pan-India context. Every trust signal India-specific.');
   L.push('- **No invented claims** — do not add "clinically proven", "dermatologist tested", certifications, awards, specific test results unless they appear in the research data.');
@@ -4763,8 +4763,8 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push(`- **Product ID**: ${currentProduct.id}`);
   L.push(`- **Title**: ${currentProduct.title || '(blank)'}`);
   L.push(`- **Handle** (LOCKED — do not emit): \`${currentProduct.handle || '(blank)'}\``);
-  L.push(`- **Vendor**: ${currentProduct.vendor || '(blank)'}`);
-  L.push(`- **Product type**: ${currentProduct.product_type || '(blank)'}`);
+  L.push(`- **Vendor** (LOCKED — do not emit): ${currentProduct.vendor || '(blank)'}`);
+  L.push(`- **Product type** (LOCKED — do not emit): ${currentProduct.product_type || '(blank)'}`);
   L.push(`- **Tags** (LOCKED — do not emit): ${currentProduct.tags || '(none)'}`);
   L.push(`- **Status**: ${currentProduct.status || '(unknown)'}`);
   // Modern SEO fields, populated by the server via GraphQL productQuery. If
@@ -4910,8 +4910,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('  "title": "…",');
   L.push('  "body_html": "…HTML for the DESCRIPTION tab only — DO NOT include How To Use, Ingredients, or FAQ sections here (those go in metafields below). Include: opening paragraph, featured-snippet block, why-it-works bullets, comparison table, buying guide, who-it\'s-for regional block, related-collections links, shipping & returns, freshness line, JSON-LD schema…",');
   // tags intentionally omitted — locked. Never write. See playbook item 6.
-  L.push('  "product_type": "…",');
-  L.push('  "vendor": "…",');
+  // product_type + vendor intentionally omitted — locked (Smart Collection anchors).
   // handle intentionally omitted — locked, never write, see playbook item 2
   L.push('  "seo_title": "SEO <title> (55-60 chars) | dropy.in",');
   L.push('  "seo_description": "SEO <meta description> (150-160 chars, with CTA)",');
