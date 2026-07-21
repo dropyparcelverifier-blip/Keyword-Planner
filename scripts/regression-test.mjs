@@ -2581,6 +2581,14 @@ async function run() {
   assert(srvFull.includes('/products/${productId}/images/${entry.imageId}.json'), 'IMG-ALTS.2 server PUTs each image alt');
   assert(appJs.body.includes('image_alts'),                     'IMG-ALTS.3 prompt output spec has image_alts key');
   assert(appJs.body.includes("Every image gets a NEW alt"),     'IMG-ALTS.4 prompt requires per-image alt');
+  // Client push-payload assembly: un-flatten metafields before sending.
+  // Was: kept.metafield:custom.foo → server rejected as unrecognized key.
+  // Now: kept.metafield:custom.foo → payload.metafields.custom.foo.
+  assert(appJs.body.includes("k.startsWith('metafield:')"),     'PUSH-FIX.1 push path un-flattens metafields');
+  assert(appJs.body.includes("pushPayload.metafields = metafields"), 'PUSH-FIX.2 nested metafields object rebuilt');
+  // Client METAFIELD_ALLOWLIST now matches server (17 keys, not 5).
+  assert(appJs.body.includes("'custom.faq_q_5'") && appJs.body.includes("'custom.highlight_3'"), 'PUSH-FIX.3 client allowlist expanded to full 17');
+  assert(appJs.body.includes("kept['image_alts'] = v"),         'PUSH-FIX.4 image_alts array preserved through preview → push');
 
   // ===== 21. WEB APP CAN REACH ALL DASHBOARD ENDPOINTS =====
   // Simulates the web app's initial dashboard poll: summary + worker-stats + activity.
