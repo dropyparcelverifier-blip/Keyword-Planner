@@ -2869,9 +2869,28 @@ const server = http.createServer(async (req, res) => {
         shopDomain: shop.shopDomain, adminToken: shop.adminToken,
         method: 'GET', apiPath: `/admin/api/${apiVer}/products.json?handle=${encodeURIComponent(handle)}`,
       });
-      if (!r.ok) return send(res, r.status || 502, { ok: false, error: `Shopify API: ${JSON.stringify(r.error)}` });
+      if (!r.ok) return send(res, r.status || 502, { ok: false, error: `Shopify API: ${JSON.stringify(r.error)}`, shop_domain: shop.shopDomain });
       const prod = (r.data?.products || [])[0];
-      if (!prod) return send(res, 404, { ok: false, error: `no Shopify product with handle "${handle}"` });
+      if (!prod) {
+        // Fallback probe: maybe the product exists but is DRAFT/ARCHIVED
+        // (some Shopify accounts hide those from the default status=any
+        // handle query in older API versions). Query explicitly with
+        // status filter to disambiguate.
+        const r2 = await shopifyRequest({
+          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
+          method: 'GET', apiPath: `/admin/api/${apiVer}/products.json?handle=${encodeURIComponent(handle)}&status=any`,
+        }).catch(() => ({ ok: false }));
+        const hidden = (r2.ok ? r2.data?.products || [] : [])[0];
+        return send(res, 404, {
+          ok: false,
+          error: hidden
+            ? `Product with handle "${handle}" exists on shop "${shop.shopDomain}" but has status="${hidden.status}" (not "active"). Publish it in Shopify Admin, then retry.`
+            : `Shopify Admin API on shop "${shop.shopDomain}" returned no product with handle "${handle}". Possible causes: (1) Product was archived/deleted on Shopify side. (2) Shopify shop domain in Config → Shopify integration doesn't point at the store that hosts this product (verify: dropy.in and 7n0vkr-rn.myshopify.com are the SAME store — cross-check the SKU list in Shopify Admin). (3) Admin API token was rotated or lost read_products scope. (4) Handle changed on Shopify side after the last successful fetch.`,
+          handle_queried: handle,
+          shop_domain:    shop.shopDomain,
+          hidden_status:  hidden?.status || null,
+        });
+      }
       // Parallel fetch: metafields (for reviews, seo, category) + product_category via GraphQL.
       // Metafields carry the review-app data (Judge.me / Loox / Yotpo / native).
       // Failing either request is soft — we still return the base product so the
