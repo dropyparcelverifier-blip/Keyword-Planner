@@ -2608,13 +2608,20 @@ async function run() {
   assert(appJs.body.includes('anchor auto-collections'),        'TAG-PRESERVE.7 toast warns about collection impact');
   // Tags locked: server strips them entirely, prompt tells Claude to omit.
   assert(!srvFull.includes("  'tags',\n"),                      'TAGS-LOCK.1 tags removed from SHOPIFY_ALLOWED_FIELDS');
-  assert(srvFull.includes('Tags DELIBERATELY EXCLUDED'),        'TAGS-LOCK.2 reason documented server-side');
+  assert(srvFull.match(/tags\s+→ Smart-Collection rule anchor/),'TAGS-LOCK.2 tags-lockdown rationale documented server-side');
   assert(appJs.body.includes('**LOCKED. DO NOT emit a `tags` key'), 'TAGS-LOCK.3 prompt playbook says LOCKED');
   assert(appJs.body.includes('`tags` key is OMITTED'),          'TAGS-LOCK.4 sanity checklist requires tags omission');
   assert(appJs.body.includes('Tags** (LOCKED'),                 'TAGS-LOCK.5 current-listing block marks tags locked');
+  // Vendor + product_type also locked (Smart Collection anchors).
+  assert(!srvFull.includes("  'vendor',\n"),                    'ANCHOR-LOCK.1 vendor removed from allowlist');
+  assert(!srvFull.includes("  'product_type',\n"),              'ANCHOR-LOCK.2 product_type removed from allowlist');
+  assert(srvFull.includes('vendor       → Smart-Collection'),   'ANCHOR-LOCK.3 vendor lockdown documented');
+  assert(srvFull.includes('product_type → Smart-Collection'),   'ANCHOR-LOCK.4 product_type lockdown documented');
+  assert(appJs.body.includes('7. **Product type** — **LOCKED'), 'ANCHOR-LOCK.5 prompt playbook locks product_type');
+  assert(appJs.body.includes('8. **Vendor** — **LOCKED'),       'ANCHOR-LOCK.6 prompt playbook locks vendor');
   // Handle locked: server strips it, prompt tells Claude to omit.
   assert(!srvFull.includes("  'handle',\n"),                    'HANDLE-LOCK.1 handle removed from SHOPIFY_ALLOWED_FIELDS');
-  assert(srvFull.includes("Handle DELIBERATELY EXCLUDED"),      'HANDLE-LOCK.2 reason documented in server');
+  assert(srvFull.includes("DELIBERATELY EXCLUDED"),             'HANDLE-LOCK.2 lockdown rationale documented in server');
   assert(appJs.body.includes('**NEVER CHANGE**'),               'HANDLE-LOCK.3 prompt playbook says never change');
   assert(appJs.body.includes('handle` key is OMITTED'),         'HANDLE-LOCK.4 sanity checklist requires handle omission');
   assert(appJs.body.includes('LOCKED — do not emit'),           'HANDLE-LOCK.5 current-listing block marks handle locked');
