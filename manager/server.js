@@ -101,11 +101,19 @@ const SHOPIFY_METAFIELD_ALIASES = {
   'custom.highlight_1':   { displayNames: ['highlight 1', 'highlight1'],                                  type: 'single_line_text_field' },
   'custom.highlight_2':   { displayNames: ['highlight 2', 'highlight2'],                                  type: 'single_line_text_field' },
   'custom.highlight_3':   { displayNames: ['highlight 3', 'highlight3'],                                  type: 'single_line_text_field' },
+  // ONE consolidated FAQ block — 6-10 Q/A pairs as HTML details/summary.
+  // Cleaner than 20 separate faq_q_1..10 / faq_a_1..10 metafields, and
+  // matches store's existing 'FAQ'S' definition. Server writes to this
+  // alias when a matching definition exists (any of the display names
+  // below); otherwise falls back to the individual Q_1/A_1 slots.
+  'custom.faqs':          { displayNames: ["faq's", "faqs", "faq", "frequently asked questions", "product faqs"], type: 'multi_line_text_field' },
 };
-// FAQ Q/A pairs — 1 through 10. The store defines all 10; we write 1-5
-// (Google truncates FAQPage rich results at ~5 anyway; writing 6-10 wastes
-// output tokens). Loop-generated so adding more later is one number change.
-for (let i = 1; i <= 5; i++) {
+// Individual FAQ Q/A pairs — 1 through 10. Kept as a fallback in case the
+// store still reads from the per-question metafields, OR for stores that
+// haven't migrated to the consolidated 'custom.faqs' single-field pattern.
+// If both custom.faqs AND custom.faq_q_N are produced, the server prefers
+// consolidated (see push handler) — one write, less noise in Shopify Admin.
+for (let i = 1; i <= 10; i++) {
   SHOPIFY_METAFIELD_ALIASES[`custom.faq_q_${i}`] = {
     displayNames: [`f&q question ${i}`, `faq question ${i}`, `faq_q_${i}`, `faq q ${i}`, `question ${i}`],
     type: 'single_line_text_field',
@@ -196,23 +204,25 @@ function autoRouteBodyToMetafields(patch) {
     patch.metafields['custom.ingredients'] = htmlToPlain(ingMatch[1]);
     body = body.replace(ingMatch[0], '');
   }
-  // Extract FAQ <details><summary>Q</summary>A</details> blocks — up to 5,
-  // matching our custom.faq_q_1..5 / faq_a_1..5 alias set. If Claude used
-  // FAQPage JSON-LD only (no <details>), we can also try to extract from
-  // the schema block but keep this pass simple for now.
+  // Extract FAQ <details><summary>Q</summary>A</details> blocks — up to 10.
+  // Two write paths: (a) consolidated custom.faqs if Claude didn't already
+  // set it, keeping the HTML details/summary formatting verbatim, AND
+  // (b) individual custom.faq_q_N / faq_a_N slots as fallback. resolver
+  // picks whichever alias has a matching definition on the store; both
+  // fill so themes reading either shape find content.
   const detailsRe = /<details[^>]*>\s*<summary[^>]*>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>/gi;
-  const details = [...body.matchAll(detailsRe)].slice(0, 5);
+  const details = [...body.matchAll(detailsRe)].slice(0, 10);
+  if (details.length > 0 && !patch.metafields['custom.faqs']) {
+    patch.metafields['custom.faqs'] = details.map(m => m[0]).join('\n\n');
+  }
   for (let i = 0; i < details.length; i++) {
     const qKey = `custom.faq_q_${i + 1}`;
     const aKey = `custom.faq_a_${i + 1}`;
     if (!patch.metafields[qKey]) patch.metafields[qKey] = htmlToPlain(details[i][1]);
     if (!patch.metafields[aKey]) patch.metafields[aKey] = htmlToPlain(details[i][2]);
   }
-  // Strip the entire FAQ block (h2 heading + all details) if we extracted at
-  // least one — assume the whole FAQ section is now covered by the metafields.
   if (details.length > 0) {
     body = body.replace(/<h2[^>]*>\s*(?:frequently\s+asked\s+questions?|faqs?)[^<]*<\/h2>[\s\S]*?(?=<h2\b|<script\b|$)/i, '');
-    // Also strip any orphan <details> blocks that outlived the h2 strip.
     body = body.replace(detailsRe, '');
   }
   // Only rewrite body_html if we actually extracted something. Trim

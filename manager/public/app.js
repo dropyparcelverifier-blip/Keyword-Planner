@@ -4728,7 +4728,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('');
   L.push('## HARD CONSTRAINTS');
   L.push('- **NEVER produce**: `price`, `weight`, `weight_unit`, `location`, `inventory_quantity`, `variants`, `images`, `sku`. The manager strips them server-side; wasted output tokens.');
-  L.push('- **ONLY produce keys** from this allowlist: ' + allowlist.map(f => `\`${f}\``).join(', ') + `, PLUS an \`image_alts\` array (one entry per image on the product — see Images section above for ids), PLUS a nested \`metafields\` object with any of these 17 keys (theme-writable): \`custom.how_to_use\`, \`custom.ingredients\`, \`custom.bullet_points\`, \`custom.department\`, \`custom.highlight_1\`, \`custom.highlight_2\`, \`custom.highlight_3\`, \`custom.faq_q_1\`, \`custom.faq_a_1\`, \`custom.faq_q_2\`, \`custom.faq_a_2\`, \`custom.faq_q_3\`, \`custom.faq_a_3\`, \`custom.faq_q_4\`, \`custom.faq_a_4\`, \`custom.faq_q_5\`, \`custom.faq_a_5\`. Anything else is stripped server-side. Only OMIT a key if you truly don't have content for it — do not skip populating an eligible metafield.`);
+  L.push('- **ONLY produce keys** from this allowlist: ' + allowlist.map(f => `\`${f}\``).join(', ') + `, PLUS an \`image_alts\` array (one entry per image on the product — see Images section above for ids), PLUS a nested \`metafields\` object with any of these 8 theme-writable keys: \`custom.how_to_use\`, \`custom.ingredients\`, \`custom.bullet_points\`, \`custom.department\`, \`custom.highlight_1\`, \`custom.highlight_2\`, \`custom.highlight_3\`, \`custom.faqs\` (ONE consolidated FAQ block of 6-10 \`<details><summary>Q</summary>A</details>\` pairs — do NOT emit separate custom.faq_q_1, faq_a_1 keys; server extracts individual pairs from the consolidated block if the store's theme needs them). Anything else is stripped server-side. Only OMIT a key if you truly don't have content for it — do not skip populating an eligible metafield.`);
   L.push('- **Return format**: reasoning paragraph, then ONE fenced ```json``` block. No other JSON. No commentary after.');
   L.push('- **India-first**. Currency ₹ and `INR` in schema. Pan-India context. Every trust signal India-specific.');
   L.push('- **No invented claims** — do not add "clinically proven", "dermatologist tested", certifications, awards, specific test results unless they appear in the research data.');
@@ -4930,16 +4930,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('    "custom.highlight_1":   "Short phrase (≤30 chars) for the trust-strip near price. e.g. \'USA Import\' / \'30-Day Returns\' / \'COD Available\'. Only populate if you know the value would improve on the current highlight.",');
   L.push('    "custom.highlight_2":   "Second highlight — different angle than highlight_1.",');
   L.push('    "custom.highlight_3":   "Third highlight.",');
-  L.push('    "custom.faq_q_1":       "TOP buyer question (short phrase; matches highest-value question-shaped query from research). Renders in the theme\'s FAQ section.",');
-  L.push('    "custom.faq_a_1":       "60-100 word factual answer to faq_q_1.",');
-  L.push('    "custom.faq_q_2":       "SECOND most important question. Different intent than Q1 (if Q1 is safety, Q2 could be price/availability).",');
-  L.push('    "custom.faq_a_2":       "60-100 word factual answer to faq_q_2.",');
-  L.push('    "custom.faq_q_3":       "THIRD question — usage / how-often / side-effects style.",');
-  L.push('    "custom.faq_a_3":       "60-100 word factual answer.",');
-  L.push('    "custom.faq_q_4":       "FOURTH question — comparison / \'best for X\' / variant selection.",');
-  L.push('    "custom.faq_a_4":       "60-100 word factual answer.",');
-  L.push('    "custom.faq_q_5":       "FIFTH question — price / COD / delivery / GST invoice (India-specific concerns).",');
-  L.push('    "custom.faq_a_5":       "60-100 word factual answer. If you populate Q1-Q5, ALSO put the same 5 FAQs in the FAQPage JSON-LD schema in body_html — Google reads that for rich results."');
+  L.push('    "custom.faqs":          "One consolidated FAQ block — 6-10 <details><summary>Question</summary>Answer</details> HTML pairs concatenated. Use the question-shaped queries from research verbatim for the <summary>. Answers 60-100 words each, plain text inside <details>. Cover: safety (Q1), price/availability (Q2), usage/frequency (Q3), comparison/best-for-X (Q4), India-specific (COD/delivery/GST) (Q5), plus 1-5 more from research. Also mirror the same set into the FAQPage JSON-LD schema in body_html so Google shows rich-result stars."');
   L.push('  }');
   L.push('}');
   L.push('```');
@@ -4970,7 +4961,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('- [ ] `metafields.custom.how_to_use` populated with numbered steps + frequency + side effects + storage (theme renders in the "How To Use" tab).');
   L.push('- [ ] `metafields.custom.ingredients` populated — echo verbatim from source metafield if provided, never paraphrase actives / dosage (theme renders in the "Ingredients" tab).');
   L.push('- [ ] `metafields.custom.bullet_points` populated with 5-6 Amazon-style CAPITAL-PREFIX bullets, one per line.');
-  L.push('- [ ] `metafields.custom.faq_q_1` + `faq_a_1` populated with the highest-value buyer question + a 60-100 word answer (theme renders in the FAQ block).');
+  L.push('- [ ] `metafields.custom.faqs` populated with 6-10 `<details><summary>Q</summary>A</details>` HTML pairs (one consolidated block; theme renders in the FAQ section). Do NOT emit separate faq_q_1..N / faq_a_1..N keys — server splits the consolidated block automatically if needed.');
   L.push('- [ ] Every external `<a>` (dermnetnz.org / aad.org / pubmed.* / mailto:*) has `rel="nofollow noopener"` (Lighthouse Best Practices).');
   L.push('- [ ] Product JSON-LD includes: name, description, sku, brand, image, offers {price, priceCurrency:INR, availability, url, priceValidUntil}, dateModified. GTIN if research data has one. AggregateRating ONLY if real review data provided.');
   L.push('**Tier 2**');
@@ -5373,11 +5364,20 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
     const METAFIELD_ALLOWLIST = [
       'custom.how_to_use', 'custom.ingredients', 'custom.bullet_points',
       'custom.department', 'custom.highlight_1', 'custom.highlight_2', 'custom.highlight_3',
+      'custom.faqs',  // consolidated single-metafield FAQ (preferred)
+      // Individual Q/A slots — kept as fallback for stores whose theme still
+      // reads from the per-question shape. Server prefers custom.faqs when
+      // its definition exists; auto-router fills both anyway.
       'custom.faq_q_1', 'custom.faq_a_1',
       'custom.faq_q_2', 'custom.faq_a_2',
       'custom.faq_q_3', 'custom.faq_a_3',
       'custom.faq_q_4', 'custom.faq_a_4',
       'custom.faq_q_5', 'custom.faq_a_5',
+      'custom.faq_q_6', 'custom.faq_a_6',
+      'custom.faq_q_7', 'custom.faq_a_7',
+      'custom.faq_q_8', 'custom.faq_a_8',
+      'custom.faq_q_9', 'custom.faq_a_9',
+      'custom.faq_q_10', 'custom.faq_a_10',
     ];
     for (const [k, v] of Object.entries(parsed.data)) {
       if (k === 'metafields' && v && typeof v === 'object' && !Array.isArray(v)) {

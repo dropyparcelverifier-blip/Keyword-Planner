@@ -2540,7 +2540,7 @@ async function run() {
   // Prompt consumes signals + expanded output spec.
   assert(appJs.body.includes('Store signals'),                  'MF-EXPAND.7 prompt has store-signals context section');
   assert(appJs.body.includes('hasStoreRating'),                 'MF-EXPAND.8 prompt uses store rating for AggregateRating');
-  assert(appJs.body.includes('"custom.faq_q_5"'),               'MF-EXPAND.9 output spec includes faq_q_5');
+  assert(appJs.body.includes('"custom.faqs":'),                 'MF-EXPAND.9 consolidated custom.faqs alias exists (replaced individual faq_q_5 spec entry)');
   assert(appJs.body.includes('"custom.highlight_1"'),           'MF-EXPAND.10 output spec includes highlight_1');
   // Preflight: body_html leak detection.
   assert(srvFull.includes('body_leaked_how_to_use'),            'MF-EXPAND.11 preflight warns if How-To-Use leaked into body_html');
@@ -2589,6 +2589,13 @@ async function run() {
   // Client METAFIELD_ALLOWLIST now matches server (17 keys, not 5).
   assert(appJs.body.includes("'custom.faq_q_5'") && appJs.body.includes("'custom.highlight_3'"), 'PUSH-FIX.3 client allowlist expanded to full 17');
   assert(appJs.body.includes("kept['image_alts'] = v"),         'PUSH-FIX.4 image_alts array preserved through preview → push');
+  // Consolidated custom.faqs metafield: one metafield holding all Q/A pairs.
+  assert(srvFull.includes("'custom.faqs':"),                    'FAQ-CONSOL.1 custom.faqs alias declared server-side');
+  assert(srvFull.includes("faq's"),                             'FAQ-CONSOL.2 display-name match against store\'s FAQ\'S definition');
+  assert(srvFull.includes("patch.metafields['custom.faqs']"),   'FAQ-CONSOL.3 auto-router fills consolidated when details<>emptied');
+  assert(appJs.body.includes('custom.faqs'),                    'FAQ-CONSOL.4 client allowlist includes custom.faqs');
+  assert(appJs.body.includes('consolidated FAQ block'),         'FAQ-CONSOL.5 prompt output spec describes consolidated shape');
+  assert(appJs.body.includes('do NOT emit separate custom.faq_q_1'), 'FAQ-CONSOL.6 hard constraints tell Claude to prefer consolidated');
   // Handle locked: server strips it, prompt tells Claude to omit.
   assert(!srvFull.includes("  'handle',\n"),                    'HANDLE-LOCK.1 handle removed from SHOPIFY_ALLOWED_FIELDS');
   assert(srvFull.includes("Handle DELIBERATELY EXCLUDED"),      'HANDLE-LOCK.2 reason documented in server');
