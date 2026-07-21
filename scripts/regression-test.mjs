@@ -2606,6 +2606,12 @@ async function run() {
   assert(appJs.body.includes('currentTags:   currentProduct?.tags'), 'TAG-PRESERVE.5 client passes current tags into push');
   assert(appJs.body.includes('tag_preservation'),               'TAG-PRESERVE.6 client reads server tag_preservation');
   assert(appJs.body.includes('anchor auto-collections'),        'TAG-PRESERVE.7 toast warns about collection impact');
+  // Tags locked: server strips them entirely, prompt tells Claude to omit.
+  assert(!srvFull.includes("  'tags',\n"),                      'TAGS-LOCK.1 tags removed from SHOPIFY_ALLOWED_FIELDS');
+  assert(srvFull.includes('Tags DELIBERATELY EXCLUDED'),        'TAGS-LOCK.2 reason documented server-side');
+  assert(appJs.body.includes('**LOCKED. DO NOT emit a `tags` key'), 'TAGS-LOCK.3 prompt playbook says LOCKED');
+  assert(appJs.body.includes('`tags` key is OMITTED'),          'TAGS-LOCK.4 sanity checklist requires tags omission');
+  assert(appJs.body.includes('Tags** (LOCKED'),                 'TAGS-LOCK.5 current-listing block marks tags locked');
   // Handle locked: server strips it, prompt tells Claude to omit.
   assert(!srvFull.includes("  'handle',\n"),                    'HANDLE-LOCK.1 handle removed from SHOPIFY_ALLOWED_FIELDS');
   assert(srvFull.includes("Handle DELIBERATELY EXCLUDED"),      'HANDLE-LOCK.2 reason documented in server');
