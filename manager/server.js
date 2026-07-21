@@ -460,7 +460,7 @@ function validateShopifyPatch(patch, context = {}) {
     stats.anchor_count = anchors;
     if (h2Count > 12) pushWarn('body_too_many_sections', `body_html has ${h2Count} <h2> sections — target 8-10 for lean rendering`);
     if (anchors > 20) pushWarn('body_too_many_links',    `body_html has ${anchors} <a> tags — target ≤ 15 (each link adds DOM + potential preconnect cost)`);
-    if (faqBlocks > 10) pushWarn('body_too_many_faq',    `body_html has ${faqBlocks} FAQ <details> blocks — Google truncates FAQPage rich snippets at ~5; keep 6-8`);
+    if (faqBlocks > 0) pushWarn('body_faq_leaked_to_body', `body_html has ${faqBlocks} FAQ <details> blocks — FAQ content belongs in metafields.custom.faqs (theme slots require exactly 10 pairs). Body_html should carry only the FAQPage JSON-LD schema, not visible <details>.`);
     // External-link rel enforcement — big Lighthouse Best Practices signal.
     const externalAnchorsWithoutRel = (bodyHtml.match(/<a\b[^>]*href=["']https?:\/\/(?!(?:[a-z0-9-]+\.)?dropy\.in)[^"']+["'][^>]*>/gi) || [])
       .filter(tag => !/rel=["'][^"']*(nofollow|noopener)/i.test(tag)).length;
@@ -526,6 +526,38 @@ function validateShopifyPatch(patch, context = {}) {
   // ─── product_category (Standard Taxonomy) ─────────────────────
   if (productCategory && !/^gid:\/\/shopify\/ProductTaxonomyNode\/\d+$/.test(productCategory)) {
     pushCrit('bad_product_category', `product_category "${productCategory}" is not a valid gid://shopify/ProductTaxonomyNode/N — Shopify will reject`);
+  }
+
+  // ─── FAQ count enforcement ────────────────────────────────────
+  // Storefront theme has 10 FAQ slots (custom.f_q_question_1..10 +
+  // custom.f_q_answer_1..10). If Claude sends fewer, the storefront
+  // shows a mix of new + stale entries; the fan-out step will blank
+  // the missing ones but the operator wants 10 distinct new FAQs
+  // for long-tail keyword coverage. Enforce hard 10 minimum.
+  const faqsBlock = String(patch?.metafields?.['custom.faqs'] || '');
+  if (faqsBlock) {
+    const faqPairs = (faqsBlock.match(/<details\b[^>]*>[\s\S]*?<\/details>/gi) || []).length;
+    stats.faq_pairs = faqPairs;
+    if (faqPairs < 10) {
+      pushCrit('faq_count_below_10', `custom.faqs has ${faqPairs} <details> pair(s) — theme requires EXACTLY 10 slots. Ask Claude to add ${10 - faqPairs} more distinct Q&A pair(s) and re-paste (use different angles: usage frequency, storage, allergy, comparison with size N±1, post-partum, price/COD, etc.).`);
+    }
+    if (faqPairs > 10) {
+      pushWarn('faq_count_above_10', `custom.faqs has ${faqPairs} <details> pair(s) — only the first 10 land in theme slots; extras are dropped.`);
+    }
+    // Cross-check schema JSON-LD count if body_html has FAQPage
+    const bodyHtmlStr = String(patch?.body_html || '');
+    const faqPageM = bodyHtmlStr.match(/"@type"\s*:\s*"FAQPage"[\s\S]*?"mainEntity"\s*:\s*\[([\s\S]*?)\]/i);
+    if (faqPageM) {
+      const questionCount = (faqPageM[1].match(/"@type"\s*:\s*"Question"/gi) || []).length;
+      stats.faq_schema_pairs = questionCount;
+      if (questionCount !== faqPairs) {
+        pushWarn('faq_schema_mismatch', `custom.faqs has ${faqPairs} pair(s) but FAQPage JSON-LD has ${questionCount} — mismatch may trigger Google rich-result flag. Regenerate both from the same list.`);
+      }
+    }
+  } else if (patch?.metafields && ('custom.faqs' in patch.metafields || Object.keys(patch.metafields).some(k => k.startsWith('custom.faq_q_')))) {
+    // metafields object exists but custom.faqs is empty — Claude sent
+    // per-question keys directly (older schema) OR blanked the field.
+    pushCrit('faqs_metafield_empty', 'custom.faqs is empty in the payload — theme needs 10 FAQ pairs. Ask Claude to fill the consolidated custom.faqs block.');
   }
 
   return {

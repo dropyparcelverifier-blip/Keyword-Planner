@@ -583,7 +583,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // Logged to the console so users can verify which build is actually
 // running when they refresh — 'my changes aren't showing' is almost
 // always a cached JS problem. Bumped whenever wiring changes.
-console.info('[adbrain] manager UI build 2026-07-21b (faq-fanout + strip-shipping-section)');
+console.info('[adbrain] manager UI build 2026-07-21c (faq-count-10-mandatory)');
 // Clear the stale-cache banner if it was shown (inline script pre-set it).
 const _staleBanner = document.getElementById('globalErrorBanner');
 if (_staleBanner && _staleBanner.textContent.includes('STALE CACHE')) {
@@ -4633,7 +4633,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('### Tier 3 — Often overlooked');
   L.push('- **[ON-PAGE]** Medical references — cite AAD / DermNet NZ / PubMed by name when discussing ingredients or claims. Link only to `dermnetnz.org`, `aad.org`, `pubmed.ncbi.nlm.nih.gov` search URLs (`https://dermnetnz.org/search?q=<term>` is always valid) — never invent article paths.');
   L.push('- **[ON-PAGE]** Usage instructions — how to use, frequency, side effects, storage. All four required.');
-  L.push('- **[ON-PAGE]** People-Also-Ask FAQ — 6-10 FAQ entries using the question-shaped queries from the research verbatim.');
+  L.push('- **[ON-PAGE]** People-Also-Ask FAQ — EXACTLY 10 FAQ entries using the question-shaped queries from the research verbatim. Not 8, not 9 — the theme has 10 FAQ slots and the push will be BLOCKED if fewer than 10 are supplied.');
   L.push('- **[OFF-SCOPE]** Video content — media pipeline. If the current product data has a video URL, reference it in schema; otherwise skip.');
   L.push('- **[ON-PAGE, CONDITIONAL]** UGC photos — reference existing image URLs from research. Do not invent.');
   L.push('- **[ON-PAGE]** Rich snippet triggers — Product + FAQPage + HowTo schemas, plus AggregateRating when real, plus `offers` for price+availability rich results.');
@@ -4723,7 +4723,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('');
   L.push('## HARD CONSTRAINTS');
   L.push('- **NEVER produce**: `price`, `weight`, `weight_unit`, `location`, `inventory_quantity`, `variants`, `images`, `sku`. The manager strips them server-side; wasted output tokens.');
-  L.push('- **ONLY produce keys** from this allowlist: ' + allowlist.map(f => `\`${f}\``).join(', ') + `, PLUS an \`image_alts\` array (one entry per image on the product — see Images section above for ids), PLUS a nested \`metafields\` object with any of these 8 theme-writable keys: \`custom.how_to_use\`, \`custom.ingredients\`, \`custom.bullet_points\`, \`custom.department\`, \`custom.highlight_1\`, \`custom.highlight_2\`, \`custom.highlight_3\`, \`custom.faqs\` (ONE consolidated FAQ block of 6-10 \`<details><summary>Q</summary>A</details>\` pairs — do NOT emit separate custom.faq_q_1, faq_a_1 keys; server extracts individual pairs from the consolidated block if the store's theme needs them). Anything else is stripped server-side. \`tags\`, \`handle\`, \`vendor\`, \`product_type\` are LOCKED — do NOT emit them; they anchor Shopify Smart Collection rules and any rewrite silently moves the product between collections. Only OMIT a key if you truly don't have content for it — do not skip populating an eligible metafield.`);
+  L.push('- **ONLY produce keys** from this allowlist: ' + allowlist.map(f => `\`${f}\``).join(', ') + `, PLUS an \`image_alts\` array (one entry per image on the product — see Images section above for ids), PLUS a nested \`metafields\` object with any of these 8 theme-writable keys: \`custom.how_to_use\`, \`custom.ingredients\`, \`custom.bullet_points\`, \`custom.department\`, \`custom.highlight_1\`, \`custom.highlight_2\`, \`custom.highlight_3\`, \`custom.faqs\` (ONE consolidated FAQ block of **EXACTLY 10** \`<details><summary>Q</summary>A</details>\` pairs — the theme has 10 FAQ slots, and the manager BLOCKS pushes with fewer than 10. Do NOT emit separate custom.faq_q_1, faq_a_1 keys; server splits the consolidated block into per-Q metafields automatically). Anything else is stripped server-side. \`tags\`, \`handle\`, \`vendor\`, \`product_type\` are LOCKED — do NOT emit them; they anchor Shopify Smart Collection rules and any rewrite silently moves the product between collections. Only OMIT a key if you truly don't have content for it — do not skip populating an eligible metafield.`);
   L.push('- **Return format**: reasoning paragraph, then ONE fenced ```json``` block. No other JSON. No commentary after.');
   L.push('- **India-first**. Currency ₹ and `INR` in schema. Pan-India context. Every trust signal India-specific.');
   L.push('- **No invented claims** — do not add "clinically proven", "dermatologist tested", certifications, awards, specific test results unless they appear in the research data.');
@@ -4736,7 +4736,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('- **Page-speed guardrails** (protects Core Web Vitals — Lighthouse Performance directly measures the below):');
   L.push('  · **Target body_html size: 12-18 KB** (roughly 12,000-18,000 characters). HARD CAP: ≤ 25 KB. Every extra KB adds parse + render + main-thread cost on mobile. The old body_html was ~1 KB and Google ranked it OK; we want depth, not bloat.');
   L.push('  · **Section count**: 8-10 `<h2>` sections max. Each `<h2>` block averages 1.5-2 KB of well-written content. If you\'re writing 15+ `<h2>`s you\'re padding.');
-  L.push('  · **FAQ count**: 6-8 entries, NOT 10+. Google truncates FAQPage rich results at ~5 anyway; more entries just cost bytes.');
+  L.push('  · **FAQ count**: EXACTLY 10 entries required. Storefront theme has 10 FAQ slots; the push is blocked below 10. Google may truncate the rich result at ~5 but the on-page section renders all 10 for conversion + long-tail keyword coverage.');
   L.push('  · **Table rows**: keep specification/comparison tables ≤ 6 rows each. Prefer 2-column tables over 4-column.');
   L.push('  · **Anchor links**: total `<a>` tags in body_html ≤ 15. Every link adds a preconnect burden + DOM node cost. Prefer inline mentions over multi-link paragraphs.');
   L.push('  · No `<script>` tags EXCEPT the one `application/ld+json` schema block. No inline JS.');
@@ -4955,7 +4955,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('- [ ] `metafields.custom.how_to_use` populated with numbered steps + frequency + side effects + storage (theme renders in the "How To Use" tab).');
   L.push('- [ ] `metafields.custom.ingredients` populated — echo verbatim from source metafield if provided, never paraphrase actives / dosage (theme renders in the "Ingredients" tab).');
   L.push('- [ ] `metafields.custom.bullet_points` populated with 5-6 Amazon-style CAPITAL-PREFIX bullets, one per line.');
-  L.push('- [ ] `metafields.custom.faqs` populated with 6-10 `<details><summary>Q</summary>A</details>` HTML pairs (one consolidated block; theme renders in the FAQ section). Do NOT emit separate faq_q_1..N / faq_a_1..N keys — server splits the consolidated block automatically if needed.');
+  L.push('- [ ] `metafields.custom.faqs` populated with **EXACTLY 10** `<details><summary>Q</summary>A</details>` HTML pairs (one consolidated block; theme renders 10 FAQ slots). Push is blocked if fewer than 10. Do NOT emit separate faq_q_1..N / faq_a_1..N keys — server splits the consolidated block automatically.');
   L.push('- [ ] Every external `<a>` (dermnetnz.org / aad.org / pubmed.* / mailto:*) has `rel="nofollow noopener"` (Lighthouse Best Practices).');
   L.push('- [ ] Product JSON-LD includes: name, description, sku, brand, image, offers {price, priceCurrency:INR, availability, url, priceValidUntil}, dateModified. GTIN if research data has one. AggregateRating ONLY if real review data provided.');
   L.push('**Tier 2**');
@@ -4965,7 +4965,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('- [ ] `<h2>` Related on dropy.in has 3-6 internal `<a href="/collections/…">` links with keyword-rich anchor text.');
   L.push('**Tier 3**');
   L.push('- [ ] Usage instructions section covers how / frequency / side effects / storage — all four.');
-  L.push('- [ ] FAQPage schema present. 6-10 FAQ entries; each answer 40-80 words; uses question-shaped queries from research verbatim.');
+  L.push('- [ ] FAQPage schema present. **EXACTLY 10** FAQ entries (must match custom.faqs count); each answer 40-80 words; uses question-shaped queries from research verbatim.');
   L.push('- [ ] At least one dermatology-source citation (AAD / DermNet NZ / PubMed) if any medical claim is made; link is to a search URL only.');
   L.push('- [ ] `<time datetime="…">` freshness line present. Product schema `dateModified` = today.');
   L.push('**Tier 4**');
