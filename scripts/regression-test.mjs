@@ -2596,6 +2596,16 @@ async function run() {
   assert(appJs.body.includes('custom.faqs'),                    'FAQ-CONSOL.4 client allowlist includes custom.faqs');
   assert(appJs.body.includes('consolidated FAQ block'),         'FAQ-CONSOL.5 prompt output spec describes consolidated shape');
   assert(appJs.body.includes('do NOT emit separate custom.faq_q_1'), 'FAQ-CONSOL.6 hard constraints tell Claude to prefer consolidated');
+  // Tag preservation: protected patterns (Drop N / vendor / no-* / _prefix)
+  // merged back into the outgoing tag list so auto-collection membership
+  // survives a Claude rewrite.
+  assert(srvFull.includes('TAG_PRESERVE_PATTERNS'),             'TAG-PRESERVE.1 pattern list declared');
+  assert(srvFull.includes('mergeTagsPreservingProtected'),      'TAG-PRESERVE.2 merge helper defined');
+  assert(srvFull.includes('tagPreservation'),                   'TAG-PRESERVE.3 result exposed');
+  assert(srvFull.includes('currentTags'),                       'TAG-PRESERVE.4 update-product accepts current tags');
+  assert(appJs.body.includes('currentTags:   currentProduct?.tags'), 'TAG-PRESERVE.5 client passes current tags into push');
+  assert(appJs.body.includes('tag_preservation'),               'TAG-PRESERVE.6 client reads server tag_preservation');
+  assert(appJs.body.includes('anchor auto-collections'),        'TAG-PRESERVE.7 toast warns about collection impact');
   // Handle locked: server strips it, prompt tells Claude to omit.
   assert(!srvFull.includes("  'handle',\n"),                    'HANDLE-LOCK.1 handle removed from SHOPIFY_ALLOWED_FIELDS');
   assert(srvFull.includes("Handle DELIBERATELY EXCLUDED"),      'HANDLE-LOCK.2 reason documented in server');
