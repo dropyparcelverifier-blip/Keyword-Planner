@@ -48,7 +48,6 @@ const destructiveRoutes = require('./routes/destructive.js');
 const SHOPIFY_ALLOWED_FIELDS = new Set([
   'title',
   'body_html',
-  'tags',
   'product_type',
   'vendor',
   // Handle DELIBERATELY EXCLUDED. Changing a live product's URL breaks
@@ -58,6 +57,17 @@ const SHOPIFY_ALLOWED_FIELDS = new Set([
   // the existing handle when a PUT omits it — which is exactly what we
   // want. If a store operator ever wants to change a handle, they do it
   // manually in Shopify Admin so the redirect can be set at the same time.
+  //
+  // Tags DELIBERATELY EXCLUDED. Shopify Smart (automated) collections use
+  // tag conditions ('product_tag contains X'). Any Claude rewrite of the
+  // tag list can silently remove the product from those collections + also
+  // affects future collections whose rules match tags that would have been
+  // preserved. The tag_preservation protected-pattern approach (2b47b8a)
+  // reduces but does not eliminate this — impossible to know ahead of time
+  // which future auto-collection rules an operator will set up. Locking
+  // tags entirely means the operator's Shopify Admin tag management stays
+  // authoritative; Claude focuses on the fields that CAN'T contaminate
+  // collection membership (title / body_html / SEO / metafields).
   // Legacy SEO metafields — REST-compatible, still work on 2024-10.
   'metafields_global_title_tag',
   'metafields_global_description_tag',
@@ -161,7 +171,6 @@ const SHOPIFY_FIELD_IMPACT = [
   { field: 'metafields_global_description_tag',  impact: 'high',     why: 'legacy <meta description> metafield; kept for REST compatibility.' },
   { field: 'body_html',                          impact: 'high',     why: 'first 100 words = ranking anchor; include secondary keywords + FAQ + buying-intent phrases' },
   { field: 'product_category',                   impact: 'high',     why: 'Standard Product Taxonomy node id (gid://shopify/ProductTaxonomyNode/N). Feeds Google Merchant / Meta Shop categorization + Shopify category filters. HIGH SEO signal.' },
-  { field: 'tags',                               impact: 'medium',   why: 'on-site search + auto-collections; use themes here' },
   { field: 'product_type',                       impact: 'medium',   why: 'categorization; filters + auto-collections' },
   { field: 'vendor',                             impact: 'low',      why: 'brand filter; rarely changes' },
 ];

@@ -4722,7 +4722,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('   - `<h2>` Shipping & returns — India-first: pan-India delivery, COD, GST invoice, return policy days, customer-support contact. Trust signals. Link to `/policies/shipping-policy`, `/policies/refund-policy`, `/pages/contact` (these paths exist on every Shopify store by default).');
   L.push('   - `<p class="hint">` Last updated: `<time datetime="YYYY-MM-DD">Month YYYY</time>` — freshness signal. Use today\'s date.');
   L.push('   - `<script type="application/ld+json">` block at the end. See SCHEMA REQUIREMENTS below — this must include richer Product schema than before.');
-  L.push('6. **Tags** — 10-15 tags. Include: primary keyword, category, use-case terms, top 5 themes below. Drives on-site search + auto-collections.');
+  L.push('6. **Tags** — **LOCKED. DO NOT emit a `tags` key in your JSON.** Shopify Smart Collections use tag conditions, and any tag rewrite silently changes what collections this product belongs to (both current + any future collections whose rules match protected tags). The store operator manages tags in Shopify Admin; you focus on the fields that can\'t contaminate collection membership.');
   L.push('7. **Product type** — the single most-searched category term (from the themes below).');
   L.push('8. **Vendor** — keep current unless clearly wrong. Amazon/brand ranking depends on brand consistency.');
   L.push('');
@@ -4765,7 +4765,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push(`- **Handle** (LOCKED — do not emit): \`${currentProduct.handle || '(blank)'}\``);
   L.push(`- **Vendor**: ${currentProduct.vendor || '(blank)'}`);
   L.push(`- **Product type**: ${currentProduct.product_type || '(blank)'}`);
-  L.push(`- **Tags** (current): ${currentProduct.tags || '(none)'}`);
+  L.push(`- **Tags** (LOCKED — do not emit): ${currentProduct.tags || '(none)'}`);
   L.push(`- **Status**: ${currentProduct.status || '(unknown)'}`);
   // Modern SEO fields, populated by the server via GraphQL productQuery. If
   // empty, that IS the gap Claude fills. If populated, Claude can decide
@@ -4909,7 +4909,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('{');
   L.push('  "title": "…",');
   L.push('  "body_html": "…HTML for the DESCRIPTION tab only — DO NOT include How To Use, Ingredients, or FAQ sections here (those go in metafields below). Include: opening paragraph, featured-snippet block, why-it-works bullets, comparison table, buying guide, who-it\'s-for regional block, related-collections links, shipping & returns, freshness line, JSON-LD schema…",');
-  L.push('  "tags": "tag1, tag2, tag3",');
+  // tags intentionally omitted — locked. Never write. See playbook item 6.
   L.push('  "product_type": "…",');
   L.push('  "vendor": "…",');
   // handle intentionally omitted — locked, never write, see playbook item 2
@@ -4984,7 +4984,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('- [ ] Zero invented image URLs; only READ-ONLY URLs from context above.');
   L.push('- [ ] Zero `<script>` tags in `body_html` except the ONE `application/ld+json` block.');
   L.push('- [ ] Zero base64 `data:` URIs, zero `<iframe>`, zero external stylesheets.');
-  L.push('- [ ] `tags` has 10-15 entries drawn from top research themes.');
+  L.push('- [ ] `tags` key is OMITTED from your JSON (tags are locked — Shopify collections depend on them; the store operator manages tags in Admin).');
   L.push('- [ ] Every non-schema field is a full rewrite; no copied sentences from current listing above.');
   L.push('');
   L.push('Begin. Ranking rationale first, then the single JSON block.');
