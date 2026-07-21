@@ -5300,6 +5300,22 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
           </div>
         `;
       }).join('');
+      // NOTE: 'Restore to original' concept intentionally NOT surfaced here.
+      // Rationale (per operator's guidance):
+      //   1. The PROMPT already fetches CURRENT Shopify data live at
+      //      modal-open — that's the true 'original/before' for any push,
+      //      not a stored snapshot.
+      //   2. Restoring to an old snapshot would potentially UNDO the
+      //      operator's manual Shopify Admin cleanup done since that
+      //      snapshot was captured. Old snapshot values may be stale
+      //      relative to current admin state.
+      //   3. Locked fields (handle/tags/vendor/product_type) are stripped
+      //      from every push including reverts, so a 'restore original'
+      //      button would only restore content fields — misleading.
+      // Per-push revert (the ↶ button on each row) is retained for the
+      // narrow case of undoing a SPECIFIC recent push while the operator
+      // remembers what its snapshot looked like.
+      const restoreBanner = '';
       panel.innerHTML = `
         <div style="display:flex; align-items:baseline; gap:10px; margin-bottom: 8px;">
           <strong>🕘 Push history</strong>
@@ -5307,8 +5323,11 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
           <span class="spacer" style="flex:1;"></span>
           <button class="small ghost" id="shopifyHistoryCloseBtn">Close</button>
         </div>
+        ${restoreBanner}
         ${rowsHtml}
       `;
+      // (Restore-to-original + show-locked-values handlers intentionally
+      //  omitted — see NOTE above.)
       panel.dataset.loaded = String(productId);
       $('shopifyHistoryCloseBtn')?.addEventListener('click', () => { panel.style.display = 'none'; });
       panel.querySelectorAll('[data-revert-history-id]').forEach(btn => {
