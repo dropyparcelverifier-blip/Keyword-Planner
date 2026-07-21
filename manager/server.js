@@ -239,11 +239,58 @@ function autoRouteBodyToMetafields(patch) {
   return patch;
 }
 
-function stripToShopifyAllowlist(payload) {
+// Tag patterns that MUST be preserved through a Claude rewrite, because
+// dropping them silently changes collection membership or breaks downstream
+// tooling that filters on them. Merged back into the outgoing tag list
+// during stripToShopifyAllowlist if the current-listing carries them but
+// Claude's new list doesn't. Case-insensitive match.
+//
+// - Drop N / drop-N / drop_N — internal batch groupings the operator uses
+// - Vendor name matched separately below (need currentProduct.vendor to know)
+// - Control flags — no-google / noindex / no-search / hidden / cod-eligible
+// - Underscore-prefixed — internal convention many stores use (_pinned, _staff)
+const TAG_PRESERVE_PATTERNS = [
+  /^drop[\s_-]?\d+$/i,
+  /^(no-google|noindex|no-index|no-search|nosearch|no_google|hidden)$/i,
+  /^_[a-z0-9_-]+$/i,
+];
+
+// Return the safe tag list: Claude's new tags PLUS any preserved tags from
+// the current tags that Claude dropped. Deduplicates case-insensitively but
+// keeps the original casing when we preserve.
+function mergeTagsPreservingProtected(claudeTagsRaw, currentTagsRaw, vendor) {
+  const currentList = String(currentTagsRaw || '').split(/\s*,\s*/).filter(Boolean);
+  const claudeList  = String(claudeTagsRaw  || '').split(/\s*,\s*/).filter(Boolean);
+  const lowerSet = new Set(claudeList.map(t => t.toLowerCase()));
+  const preserved = [];
+  const vendorLc = String(vendor || '').toLowerCase();
+  for (const tag of currentList) {
+    const lc = tag.toLowerCase();
+    if (lowerSet.has(lc)) continue;                       // already in Claude's list
+    const isPatternProtected = TAG_PRESERVE_PATTERNS.some(rx => rx.test(tag));
+    const isVendorTag = vendorLc && lc === vendorLc;
+    if (isPatternProtected || isVendorTag) {
+      preserved.push(tag);
+      lowerSet.add(lc);
+    }
+  }
+  return { merged: [...claudeList, ...preserved].join(', '), preserved, dropped: currentList.filter(t => !lowerSet.has(t.toLowerCase())) };
+}
+
+function stripToShopifyAllowlist(payload, opts = {}) {
   // Run auto-router FIRST so extracted content lands in metafields BEFORE
   // the allowlist strip decides what to keep. Non-destructive on payloads
   // that already split cleanly (metafields present, body_html clean).
   payload = autoRouteBodyToMetafields({ ...(payload || {}) });
+  // Tag preservation — merge protected tags from current listing back into
+  // Claude's new tag list. opts.currentTags + opts.currentVendor supply the
+  // 'before' state (fetched by update-product before we call this).
+  let tagPreservation = null;
+  if (typeof payload.tags === 'string' && opts.currentTags != null) {
+    const merged = mergeTagsPreservingProtected(payload.tags, opts.currentTags, opts.currentVendor);
+    payload.tags = merged.merged;
+    tagPreservation = { preserved: merged.preserved, dropped: merged.dropped };
+  }
   const autoRouted = payload._auto_routed || null;
   delete payload._auto_routed;   // don't emit as 'stripped'
   const out = {};
@@ -274,7 +321,7 @@ function stripToShopifyAllowlist(payload) {
   }
   if (Object.keys(metafieldsOut).length > 0) out.metafields = metafieldsOut;
   if (imageAltsOut.length > 0) out.image_alts = imageAltsOut;
-  return { safe: out, stripped, autoRouted };
+  return { safe: out, stripped, autoRouted, tagPreservation };
 }
 // Preflight validator — runs against the tier rubric BEFORE any Shopify write.
 // Returns {ok, critical: [], warn: [], stats}. Critical failures block the
@@ -2987,7 +3034,7 @@ const server = http.createServer(async (req, res) => {
     if (m === 'POST' && p === '/api/shopify/validate-patch') {
       const b = await readJson(req);
       if (!b.patch || typeof b.patch !== 'object') return send(res, 400, { ok: false, error: 'patch object required' });
-      const { safe, stripped, autoRouted } = stripToShopifyAllowlist(b.patch);
+      const { safe, stripped, autoRouted, tagPreservation } = stripToShopifyAllowlist(b.patch, { currentTags: b.currentTags || null, currentVendor: b.currentVendor || null });
       const preflight = validateShopifyPatch(safe, b.validationContext || {});
       return send(res, 200, { ok: true, preflight, stripped, safe });
     }
@@ -2997,7 +3044,7 @@ const server = http.createServer(async (req, res) => {
       if (!productId) return send(res, 400, { ok: false, error: 'productId required' });
       if (!b.patch || typeof b.patch !== 'object') return send(res, 400, { ok: false, error: 'patch object required' });
       if (b.confirm !== 'PUSH') return send(res, 400, { ok: false, error: "safety: send {confirm:'PUSH'} to proceed" });
-      const { safe, stripped, autoRouted } = stripToShopifyAllowlist(b.patch);
+      const { safe, stripped, autoRouted, tagPreservation } = stripToShopifyAllowlist(b.patch, { currentTags: b.currentTags || null, currentVendor: b.currentVendor || null });
       if (Object.keys(safe).length === 0) {
         return send(res, 400, { ok: false, error: 'no allowlisted fields in patch (all were stripped)', stripped });
       }
@@ -3216,7 +3263,7 @@ const server = http.createServer(async (req, res) => {
           .run(productId, b.productUrl || null, b.sku || null, b.batchId || null, now(), b.pushedBy || null, JSON.stringify(snapshot || {}), JSON.stringify(safe));
         historyId = Number(hist.lastInsertRowid);
       } catch (e) { /* audit-only; do not fail the push */ }
-      return send(res, 200, { ok: true, productId, sent: safe, stripped, results, product: results.rest?.product || null, history_id: historyId, snapshot_captured: !!snapshot, snapshot_error: snapshotErr, auto_routed: autoRouted });
+      return send(res, 200, { ok: true, productId, sent: safe, stripped, results, product: results.rest?.product || null, history_id: historyId, snapshot_captured: !!snapshot, snapshot_error: snapshotErr, auto_routed: autoRouted, tag_preservation: tagPreservation });
     }
     // List push history for a product — powers the 'Revert' UI in the
     // Shopify modal. Returns most-recent first, with the fields we can

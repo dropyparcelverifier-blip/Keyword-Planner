@@ -5545,6 +5545,12 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
           sku: currentProduct?.id ? (analytics.sku || null) : null,
           productUrl: currentProduct?.handle ? `${location.origin.includes('myshopify') ? location.origin : ''}${currentProduct.handle}` : null,
           batchId: analytics.batchId || null,
+          // Give the server the current tag list + vendor so it can preserve
+          // protected tags (Drop N, vendor name, no-google, _-prefixed) that
+          // Claude's rewrite would otherwise drop. Prevents silent removal
+          // from auto-collections whose rules match those tags.
+          currentTags:   currentProduct?.tags   || null,
+          currentVendor: currentProduct?.vendor || null,
         });
         const snapshotNote = r.snapshot_captured
           ? ` <span class="hint">· <button class="small ghost" id="shopifyRevertLastBtn" data-history-id="${r.history_id}" title="If the new copy is worse than the old one, click to restore the exact fields that were on this listing before the push. Only works while this push is the most recent one.">↶ Revert this push</button></span>`
@@ -5592,7 +5598,17 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
         const altNote = altResults.length > 0
           ? `<div class="hint" style="margin-top: 6px;">🖼 Image alts: ${altOkCount} of ${altResults.length} updated${altFailCount > 0 ? ` · <span style="color:var(--danger);">${altFailCount} failed</span>` : ' ✓'}</div>`
           : '';
-        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${sentKeys.map(k => `<code>${k}</code>`).join(', ') || '(none)'}${mfNote}${altNote}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}${snapshotNote}</div>${autoRoutedNote}${skippedNote}`;
+        // Tag preservation — server merged protected tags back in. Surfaced
+        // so the operator sees the collection-membership safety in action.
+        const tp = r.tag_preservation;
+        const tagPreserveNote = tp && (tp.preserved?.length > 0 || tp.dropped?.length > 0)
+          ? `<div class="hint" style="margin-top: 6px; padding: 8px; background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 6px; font-size: 12px;">
+              🏷 <strong>Tag safety:</strong>
+              ${tp.preserved?.length ? ` <span style="color:var(--success);">✓ ${tp.preserved.length} protected tag(s) preserved</span> (${tp.preserved.map(t => `<code>${esc(t)}</code>`).join(', ')})` : ''}
+              ${tp.dropped?.length ? ` · <span style="color:var(--warn);">${tp.dropped.length} tag(s) dropped by Claude</span> (${tp.dropped.map(t => `<code>${esc(t)}</code>`).join(', ')}) — check if any of these anchor auto-collections you need this product in` : ''}
+            </div>`
+          : '';
+        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${sentKeys.map(k => `<code>${k}</code>`).join(', ') || '(none)'}${mfNote}${altNote}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}${snapshotNote}</div>${tagPreserveNote}${autoRoutedNote}${skippedNote}`;
         toast('Shopify listing updated. Revert button available below if needed.', 'ok', { title: 'Pushed' });
         // Wire the just-pushed revert button.
         document.getElementById('shopifyRevertLastBtn')?.addEventListener('click', async (e) => {
