@@ -5366,18 +5366,29 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
       return;
     }
     const kept = {}, stripped = {};
-    // Metafield allowlist mirrors the server-side SHOPIFY_METAFIELD_ALLOWLIST.
-    // Keep in sync — this is a client-side preview so it doesn't have to be
-    // 100% accurate (server strips again on push) but the diff should mostly
-    // match what the operator will see after Push.
-    const METAFIELD_ALLOWLIST = ['custom.how_to_use', 'custom.ingredients', 'custom.faq_q_1', 'custom.faq_a_1', 'custom.bullet_points'];
+    // Metafield allowlist mirrors the server-side SHOPIFY_METAFIELD_ALIASES.
+    // Full 17-key list (was outdated at 5 keys — that's why department /
+    // highlight_1..3 / faq 2..5 kept getting stripped client-side before
+    // they ever reached the server).
+    const METAFIELD_ALLOWLIST = [
+      'custom.how_to_use', 'custom.ingredients', 'custom.bullet_points',
+      'custom.department', 'custom.highlight_1', 'custom.highlight_2', 'custom.highlight_3',
+      'custom.faq_q_1', 'custom.faq_a_1',
+      'custom.faq_q_2', 'custom.faq_a_2',
+      'custom.faq_q_3', 'custom.faq_a_3',
+      'custom.faq_q_4', 'custom.faq_a_4',
+      'custom.faq_q_5', 'custom.faq_a_5',
+    ];
     for (const [k, v] of Object.entries(parsed.data)) {
       if (k === 'metafields' && v && typeof v === 'object' && !Array.isArray(v)) {
-        // Nested metafields: hoist allowlisted ones as `metafield:<key>` in kept.
         for (const [mkey, mval] of Object.entries(v)) {
           if (METAFIELD_ALLOWLIST.includes(mkey)) kept[`metafield:${mkey}`] = mval;
           else stripped[`metafield:${mkey}`] = mval;
         }
+      } else if (k === 'image_alts' && Array.isArray(v)) {
+        // Top-level array — keep as-is; server splits it out to
+        // /products/{pid}/images/{iid}.json PUT calls after main push.
+        kept['image_alts'] = v;
       } else if (allowlist.includes(k)) {
         kept[k] = v;
       } else {
@@ -5517,7 +5528,19 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
       const force = $('shopifyForceOverride')?.checked;
       btn.disabled = true; btn.textContent = 'Pushing…';
       try {
-        const r = await api.shopifyUpdateProduct(productId, kept, {
+        // Un-flatten metafields before sending. The preview panel uses
+        // 'metafield:<ns.key>' keys for a flat diff display; the server
+        // expects a nested { metafields: { 'ns.key': ... } } payload.
+        // Without this un-flatten the server strips every metafield as
+        // an unrecognized top-level key — that's exactly what was happening.
+        const pushPayload = {};
+        const metafields = {};
+        for (const [k, v] of Object.entries(kept)) {
+          if (k.startsWith('metafield:')) metafields[k.slice('metafield:'.length)] = v;
+          else pushPayload[k] = v;
+        }
+        if (Object.keys(metafields).length > 0) pushPayload.metafields = metafields;
+        const r = await api.shopifyUpdateProduct(productId, pushPayload, {
           force, validationContext,
           sku: currentProduct?.id ? (analytics.sku || null) : null,
           productUrl: currentProduct?.handle ? `${location.origin.includes('myshopify') ? location.origin : ''}${currentProduct.handle}` : null,
