@@ -2615,7 +2615,15 @@ async function run() {
   assert(srvFull.includes("patch.metafields['custom.faqs']"),   'FAQ-CONSOL.3 auto-router fills consolidated when details<>emptied');
   assert(appJs.body.includes('custom.faqs'),                    'FAQ-CONSOL.4 client allowlist includes custom.faqs');
   assert(appJs.body.includes('consolidated FAQ block'),         'FAQ-CONSOL.5 prompt output spec describes consolidated shape');
-  assert(appJs.body.includes('do NOT emit separate custom.faq_q_1'), 'FAQ-CONSOL.6 hard constraints tell Claude to prefer consolidated');
+  assert(/Do NOT emit separate custom\.faq_q_1/i.test(appJs.body), 'FAQ-CONSOL.6 hard constraints tell Claude to prefer consolidated');
+  // FAQ count mandated at exactly 10 — preflight blocks pushes with <10.
+  // Theme has 10 FAQ slots; under-populating leaves stale entries visible.
+  assert(srvFull.includes('faq_count_below_10'),                'FAQ-10.1 preflight critical id defined');
+  assert(srvFull.includes('EXACTLY 10 slots'),                  'FAQ-10.2 preflight message specifies theme requirement');
+  assert(/faqPairs\s*<\s*10/.test(srvFull),                     'FAQ-10.3 preflight enforces minimum count');
+  assert(srvFull.includes('faq_schema_mismatch'),               'FAQ-10.4 preflight cross-checks FAQPage JSON-LD vs custom.faqs');
+  assert(appJs.body.includes('EXACTLY 10'),                     'FAQ-10.5 prompt tells Claude exactly 10');
+  assert(!appJs.body.includes('6-8 entries, NOT 10+'),          'FAQ-10.6 old 6-8 guidance removed');
   // Tag preservation: protected patterns (Drop N / vendor / no-* / _prefix)
   // merged back into the outgoing tag list so auto-collection membership
   // survives a Claude rewrite.
