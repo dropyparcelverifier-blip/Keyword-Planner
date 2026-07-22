@@ -927,7 +927,19 @@ const Q = {
   heartbeatById: db.prepare(`UPDATE jobs SET heartbeat_at=? WHERE id=? AND claimed_by=? AND status='claimed'`),
   markDone: db.prepare(`UPDATE jobs SET status='done', done_at=? WHERE batch_id=? AND product_url=?`),
   markFailed: db.prepare(`UPDATE jobs SET status='failed', failed_reason=?, done_at=? WHERE batch_id=? AND product_url=?`),
-  releaseStale: db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL WHERE status='claimed' AND (heartbeat_at IS NULL OR heartbeat_at < ?)`),
+  releaseStale: db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL WHERE status='claimed' AND (heartbeat_at IS NULL OR heartbeat_at < ?) AND attempts < 3`),
+  // Auto-fail jobs that have retried too many times so the worker stops
+  // hammering them and moves to fresh SKUs. Runs alongside releaseStale.
+  // Fires on jobs still 'claimed' with a stale heartbeat AND attempts >= 3
+  // — same predicate as releaseStale except the attempts branch. Reason
+  // string surfaces on the dashboard's failure column so the operator
+  // knows this was a retry-loop bail-out, not a real error signal.
+  failMaxAttempts: db.prepare(`UPDATE jobs SET status='failed', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=?, failed_reason='auto-failed: exceeded 3 attempts (retry loop). Fix the root cause and requeue.' WHERE status='claimed' AND (heartbeat_at IS NULL OR heartbeat_at < ?) AND attempts >= 3`),
+  // Retry-loops diagnostic — surface every job with attempts >= 3 so the
+  // operator sees which SKUs are stuck. done_at is populated when a job
+  // was auto-failed, so we can distinguish 'still in flight but retried a
+  // lot' from 'already gave up'.
+  retryLoops: db.prepare(`SELECT id, batch_id, sku, product_name, product_url, status, attempts, claimed_at, heartbeat_at, done_at, failed_reason FROM jobs WHERE attempts >= 3 ORDER BY attempts DESC, id DESC`),
   // Direct release by worker_id — bypasses the release_claims command
   // (which routes through the worker's SW). Used when a worker is stopped
   // or offline and its stale claims are blocking other workers from
@@ -2159,8 +2171,28 @@ const server = http.createServer(async (req, res) => {
     if (m === 'POST' && p === '/api/jobs/failed') { const b = await readJson(req); Q.markFailed.run(b.reason || null, now(), b.batchId, b.productUrl); return send(res, 200, { ok: true }); }
     if (m === 'POST' && p === '/api/jobs/release-stale') {
       const b = await readJson(req); const mins = Number.isFinite(b.staleMinutes) ? b.staleMinutes : 10;
-      const info = Q.releaseStale.run(now() - mins * 60000);
-      return send(res, 200, { ok: true, released: info.changes });
+      const cutoff = now() - mins * 60000;
+      // Auto-fail retry-loop jobs FIRST (attempts >= 3), then release the
+      // remaining stale ones back to pending. Order matters: if we release
+      // first, the attempts-count-3 job flips to pending, then the
+      // auto-fail predicate no longer sees it as 'claimed' so it never
+      // fires. Auto-fail-then-release runs both cleanly.
+      const failed = Q.failMaxAttempts.run(now(), cutoff);
+      const released = Q.releaseStale.run(cutoff);
+      return send(res, 200, { ok: true, released: released.changes, auto_failed: failed.changes });
+    }
+    // Retry-loop diagnostic — list jobs stuck at attempts >= 3.
+    // Used by the dashboard's Retry-loops panel to show what's blocking
+    // throughput. Read-only; no state change.
+    if (m === 'GET' && p === '/api/jobs/retry-loops') {
+      const rows = Q.retryLoops.all();
+      const nowMs = now();
+      const enriched = rows.map(r => ({
+        ...r,
+        claimed_for_ms: r.claimed_at ? nowMs - r.claimed_at : null,
+        heartbeat_stale_for_ms: r.heartbeat_at ? nowMs - r.heartbeat_at : null,
+      }));
+      return send(res, 200, { ok: true, count: rows.length, jobs: enriched });
     }
     // Release all claims held by a specific worker — used when the
     // dashboard detects a stopped/offline worker still holding SKUs
@@ -2425,7 +2457,11 @@ const server = http.createServer(async (req, res) => {
       // heartbeat again. Runs on every dashboard poll (10s) — cheap, one
       // UPDATE with an index-covered filter — and self-heals ghost claims
       // without waiting for a client to call /api/jobs/release-stale.
-      Q.releaseStale.run(now() - 5 * 60000);
+      // Auto-fail retry-loop jobs BEFORE releasing (attempts >= 3 auto-fails,
+      // so the worker stops hammering broken SKUs and moves to fresh work).
+      const staleCutoff = now() - 5 * 60000;
+      Q.failMaxAttempts.run(now(), staleCutoff);
+      Q.releaseStale.run(staleCutoff);
       return send(res, 200, { ok: true, workers: Q.workerStats.all() });
     }
     if (m === 'GET' && p === '/api/jobs/per-product') {
