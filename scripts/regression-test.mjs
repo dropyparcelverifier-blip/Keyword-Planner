@@ -2266,7 +2266,9 @@ async function run() {
   assertEq(verList1.status, 200,                               'VER.6 workers/list 200');
   const verW1 = (verList1.data.workers || []).find(w => w.worker_id === 'ver-test-worker');
   assert(verW1,                                                'VER.7 test worker present in list');
-  assertEq(verW1.outdated, true,                               'VER.8 stale hash flagged outdated');
+  // hash_mismatch = underlying truth (skips grace). outdated = UI-facing
+  // flag (grace-window suppressed for ~3 min after a fresh version report).
+  assertEq(verW1.hash_mismatch, true,                          'VER.8 stale hash flagged hash_mismatch (grace-independent)');
   assertEq(verList1.data.current_bundle_hash, vh.data.hash,    'VER.9 list echoes current bundle hash');
   // Reporting the current hash → not outdated.
   await req('POST', '/api/workers/heartbeat', { workerId: 'ver-test-worker', versionHash: vh.data.hash });

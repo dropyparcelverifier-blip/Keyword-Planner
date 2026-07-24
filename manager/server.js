@@ -2716,9 +2716,13 @@ const server = http.createServer(async (req, res) => {
       const GRACE_MS = 3 * 60 * 1000;
       const workers = Q.listWorkers.all().map(w => {
         const reportedAt = Number(w.version_reported_at || 0);
+        const hashMismatch = w.version_hash != null && w.version_hash !== currentHash;
         const withinGrace = reportedAt > 0 && (nowMs - reportedAt) < GRACE_MS;
-        const outdated = w.version_hash != null && w.version_hash !== currentHash && !withinGrace;
-        return { ...w, current_bundle_hash: currentHash, outdated };
+        // outdated → user-visible badge; grace window suppresses right after
+        // a fresh version report. hash_mismatch → underlying truth for tests
+        // and diagnostics (skips the grace suppression).
+        const outdated = hashMismatch && !withinGrace;
+        return { ...w, current_bundle_hash: currentHash, hash_mismatch: hashMismatch, outdated };
       });
       return send(res, 200, { ok: true, workers, current_bundle_hash: currentHash });
     }
