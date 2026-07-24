@@ -4527,19 +4527,33 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // FAIL-FAST: if we have no seeds AND no KP1 rows, all downstream
       // stages (R1 SERP cycle, R2 KP re-expansion, Amazon Round, related
       // search drain) will burn 5-10 min on empty data producing nothing.
-      // Bail early, mark done, move to next product. Common causes: KP
-      // session expired, Google throttling, product name unrecognised.
+      // Bail early, mark FAILED (not done — done would hide the SKU in
+      // the operator dashboard when in reality nothing was captured).
+      // Common causes: KP session expired, Google throttling, product name
+      // unrecognised. Marking failed puts it in the Failed jobs panel with
+      // a clear reason so the operator can fix + requeue in one click.
       // We DO keep going if kp1RowsArr has some rows even with 0 seeds —
       // that's a partial win worth pushing through.
       if (round1Seeds.length === 0 && kp1RowsArr.length === 0) {
+        const failReason = 'zero seeds + zero KP rows — likely KP session dead or product name unrecognised. Fix Google Ads session on this worker + requeue.';
         onProgress?.({
           currentProduct: productName,
           currentSource: 'round1',
-          currentAction: `⏭ FAIL-FAST: zero seeds + zero KP rows — bailing early to save ~5-10 min. Product yields nothing without KP or PAA data. Fix Google Ads session or product name and requeue.`,
-          logKind: 'warn',
+          currentAction: `⏭ FAIL-FAST: ${failReason}`,
+          logKind: 'err',
         });
         productsDone++;
-        try { await onProductDone(cleanUrl); } catch {}
+        try {
+          // Prefer onProductFailed if the caller provides it (surfaces in
+          // manager's Failed jobs panel with a clear reason). Fall back to
+          // onProductDone for older callers that don't distinguish — better
+          // than hanging the loop.
+          if (typeof opts.onProductFailed === 'function') {
+            await opts.onProductFailed(cleanUrl, failReason);
+          } else {
+            await onProductDone(cleanUrl);
+          }
+        } catch {}
         continue; // to next product in the outer loop
       }
 
