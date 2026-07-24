@@ -527,14 +527,17 @@
     }
     await dismissOverlays();
 
-    // FAST PATH — session-scoped cache: once click strategies have failed
-    // this session (Google's DOM revamp), skip straight to direct URL nav.
-    // Every seed after the first was burning ~65s on the 45s hydrate wait
-    // + 3× click attempts that we know will fail. Now: skip to nav (~5s).
-    // Cache is per-tab-session, so a Google DOM restoration resets it on
-    // next KP tab reload.
+    // FAST PATH — chrome.storage.local cache (survives KP tab navigation,
+    // unlike sessionStorage which resets every page load). Once click
+    // strategies have failed once, we know Google's DOM revamped; skip
+    // straight to direct URL nav on every subsequent seed (~5s instead of
+    // ~65s hydrate wait + 3× click attempts). Reset by clearing storage
+    // or by fresh worker install.
     let clickBroken = false;
-    try { clickBroken = sessionStorage.getItem('kp_click_broken') === '1'; } catch {}
+    try {
+      const s = await chrome.storage.local.get('kp_click_broken');
+      clickBroken = s?.kp_click_broken === true;
+    } catch {}
     if (clickBroken) {
       kpLog('click strategies known-broken this session — skipping to direct URL nav', 'warn');
       const target = `${location.origin}/aw/keywordplanner/ideas/new${location.search}`;
@@ -548,7 +551,7 @@
         return;
       }
       // Fast path failed too — clear the flag and fall through to full flow.
-      try { sessionStorage.removeItem('kp_click_broken'); } catch {}
+      try { await chrome.storage.local.remove('kp_click_broken'); } catch {}
     }
 
     // Shorter hydrate wait (12s vs 45s). If Google's DOM was going to hydrate
@@ -596,7 +599,7 @@
       try {
         // Mark click strategies broken so future seeds this session skip
         // the 12s hydrate wait + click attempts and go straight to nav.
-        try { sessionStorage.setItem('kp_click_broken', '1'); } catch {}
+        try { await chrome.storage.local.set({ kp_click_broken: true }); } catch {}
         const target = `${location.origin}/aw/keywordplanner/ideas/new${location.search}`;
         kpLog(`click strategies failed — navigating directly to ${target.slice(0, 100)}`, 'warn');
         location.href = target;
@@ -630,7 +633,10 @@
     // data showed 90 minutes of one PC re-doing this loop on a single SKU
     // — that's the pain this guard eliminates.
     let manualPointless = false;
-    try { manualPointless = sessionStorage.getItem('kp_manual_wait_pointless') === '1'; } catch {}
+    try {
+      const s = await chrome.storage.local.get('kp_manual_wait_pointless');
+      manualPointless = s?.kp_manual_wait_pointless === true;
+    } catch {}
     if (manualPointless) {
       kpLog(`Auto-click failed AND manual-click already timed out earlier this session — failing fast (no human to click). Fix Google Ads login + retry the batch.`, 'err');
       throw new Error('Auto-click failed; manual fallback disabled after first timeout this session');
@@ -647,7 +653,7 @@
     } catch (e) {
       // Manual click didn't happen. Session-cache this fact so subsequent
       // seeds skip the 30s wait entirely — no human is watching this PC.
-      try { sessionStorage.setItem('kp_manual_wait_pointless', '1'); } catch {}
+      try { await chrome.storage.local.set({ kp_manual_wait_pointless: true }); } catch {}
       const dialogs = document.querySelectorAll('[role="dialog"]').length;
       const inputs  = document.querySelectorAll('input, textarea').length;
       const btnText = Array.from(document.querySelectorAll('button, [role="button"]'))
