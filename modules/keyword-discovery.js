@@ -4542,6 +4542,26 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           currentAction: `⏭ FAIL-FAST: ${failReason}`,
           logKind: 'err',
         });
+        // Bump the cross-SKU R2 streak here too — a zero-yield SKU almost
+        // always means KP is dead, which is the same signal R2 auto-skip
+        // is trying to detect. Adding R1 failures to the streak means
+        // after 2 consecutive KP-dead SKUs (from either R1 OR R2 failure),
+        // subsequent SKUs auto-skip R2 KP entirely (saves ~6-8 min each).
+        try {
+          if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+            const s = await chrome.storage.local.get('adbrainR2DeadStreak');
+            const next = Number(s?.adbrainR2DeadStreak || 0) + 1;
+            await chrome.storage.local.set({ adbrainR2DeadStreak: next });
+            if (next === 2) {
+              onProgress?.({
+                currentProduct: productName,
+                currentSource: 'round1',
+                currentAction: `⏭ AUTO-SKIP ARMED (from R1 failure): 2 consecutive KP-dead SKUs on this worker. Next SKU skips R2 KP entirely to save ~6-8 min.`,
+                logKind: 'warn',
+              });
+            }
+          }
+        } catch {}
         productsDone++;
         try {
           // Prefer onProductFailed if the caller provides it (surfaces in
