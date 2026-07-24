@@ -946,10 +946,16 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
         } catch (msgErr) {
           // Channel closed mid-flight. Poll storage — kp.js may have
           // completed the flow but couldn't sendResponse because the tab
-          // was torn down. Poll every 5s for up to 3 min.
+          // was torn down. BUT first check if the tab is even alive —
+          // if the content script is dead there's no hope of a storage
+          // write and the 3-min poll is pure waste. Fast-fail in that case.
           const isPortClosed = /message port closed|message channel closed|Receiving end does not exist|asynchronous response by returning true/i.test(msgErr.message || '');
           if (!isPortClosed) throw msgErr;
-          log(`KP seed ${i + 1}: message channel closed mid-flow — polling storage for result (${taskId})`);
+          const alive = await pingContentScript(tabId, 'KP_PING', 3, 500);
+          if (!alive) {
+            throw new Error('message channel closed AND content script dead — tab crashed, no storage recovery possible');
+          }
+          log(`KP seed ${i + 1}: message channel closed mid-flow, tab alive — polling storage for result (${taskId})`);
           const storageKey = `kp_result_${taskId}`;
           let recovered = null;
           for (let poll = 0; poll < 36; poll++) {          // 36 * 5s = 3 min
@@ -1056,8 +1062,14 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
           // the flow and written the result even though the channel closed.
           const isPortClosed = /message port closed|message channel closed|Receiving end does not exist|asynchronous response by returning true/i.test(msgErr.message || '');
           if (isPortClosed) {
+            // Fast-fail if the content script is dead — no point waiting.
+            const alive = await pingContentScript(tabId, 'KP_PING', 3, 500);
+            if (!alive) {
+              seedErrors.push(`website fallback: channel closed AND tab crashed — no storage recovery possible`);
+              break;
+            }
             const storageKey = `kp_result_${wTaskId}`;
-            log(`KP website fallback: channel closed — polling storage for result (${wTaskId})`);
+            log(`KP website fallback: channel closed, tab alive — polling storage for result (${wTaskId})`);
             let recovered = null;
             for (let poll = 0; poll < 36; poll++) {         // 3 min total
               await sleep(5000);
@@ -4660,9 +4672,26 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // this; the per-product completion summary surfaces the count so a
       // silently-degraded run is visible without grepping the log.
       let r2DegradedSeeds = 0;
+      // R2 fast-bail counter. If 2 consecutive R2 seeds fail with the same
+      // channel-closed / tab-crashed error, the KP session is dead for
+      // this SKU. Every subsequent seed will burn ~4 min hitting the same
+      // wall (3-min storage poll × 2 attempts). Bail to save wall clock —
+      // R1 data is already stored and the phantom-done post-mortem will
+      // flag the SKU for requeue.
+      let r2ConsecutiveKpDead = 0;
       for (const seedRow of kp1ForR2) {
         kp1Idx++;
         if (shouldStop() || report.size >= productCap) break;
+        if (r2ConsecutiveKpDead >= 2) {
+          onProgress?.({
+            currentProduct: productName,
+            currentSource: 'round2',
+            currentAction: `⏭ R2 BAIL: 2 consecutive KP failures on this SKU — KP session degraded, skipping remaining ${kp1ForR2.length - kp1Idx + 1} R2 seed(s) to save wall clock. R1 data preserved. Retry the SKU later or fix KP session.`,
+            logKind: 'warn',
+          });
+          r2DegradedSeeds += (kp1ForR2.length - kp1Idx + 1);
+          break;
+        }
         const expandSeed = simplifyForKP(seedRow.keyword);
         const elapsedS  = (Date.now() - round2StartedAt) / 1000;
         const observedAvg = kp1Idx > 1 ? elapsedS / (kp1Idx - 1) : AVG_KP_REEXPAND_SECONDS;
@@ -4718,12 +4747,23 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         if (!expansion?.ok) {
           r2SeedDegraded = true;
           r2DegradedSeeds++;
+          // Bump the consecutive-dead counter ONLY on channel-close / tab-crash
+          // errors — the R2 bail is specifically for 'KP tab is broken', not
+          // for legitimate 'this seed returned nothing' failures.
+          const errStr = String(expansion?.error || '');
+          if (/message (port|channel) closed|Receiving end does not exist|asynchronous response by returning true|tab crashed|content script dead/i.test(errStr)) {
+            r2ConsecutiveKpDead++;
+          } else {
+            r2ConsecutiveKpDead = 0;
+          }
           onProgress?.({
             currentProduct: productName,
             currentAction: `Round 2 (${kp1Idx}/${totalKp1}): "${seedRow.keyword}" KP failed after ${r2SeedAttempts} attempt(s): ${expansion?.error || 'unknown'} — flagging R2 as degraded for this product`,
             logKind: 'err',
           });
         } else {
+          // Successful R2 KP call resets the consecutive-dead counter.
+          r2ConsecutiveKpDead = 0;
           // Filter R2 KP output against the product-relevance gate BEFORE
           // any per-row cycle. KP re-expansion on a category-broad seed like
           // "alfalfa supplement" returns farming / livestock ideas mixed in.
