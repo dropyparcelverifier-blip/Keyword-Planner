@@ -2823,6 +2823,10 @@ $('requeueAllFailedBtn')?.addEventListener('click', async () => {
 
 function renderActivity(events) {
   const el = $('activityLog');
+  // Hide the Clear button when the log is empty — nothing to clear.
+  // Restored when events arrive on the next dashboard poll.
+  const clearBtn = document.getElementById('activityClearBtn');
+  if (clearBtn) clearBtn.style.display = (events && events.length > 0) ? '' : 'none';
   if (!events || events.length === 0) {
     el.innerHTML = `<div class="empty">No activity yet.</div>`;
     return;
