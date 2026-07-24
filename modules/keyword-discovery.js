@@ -4660,6 +4660,23 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             kp1ForR2.some(picked => opts.seedsAreSimilar(cand.keyword, [picked.keyword]))) continue;
         kp1ForR2.push(cand);
       }
+      // Opt-out: when the operator KNOWS the KP session is dead on this
+      // worker's Chrome profile (e.g. persistent Google Ads CAPTCHA / login
+      // wall), R2 KP is guaranteed to fail every seed. Setting
+      // opts.skipR2Kp=true (from background.js runOpts, which reads
+      // chrome.storage.local.adbrainSkipR2Kp) skips R2 entirely. Every
+      // SKU still completes with R1 data (~150-400 kw); we just don't
+      // burn 6-8 min per SKU proving KP is dead. Toggle it on the failing
+      // workers, keep it off on the ones with healthy KP sessions.
+      if (opts.skipR2Kp) {
+        onProgress?.({
+          currentProduct: productName,
+          currentSource: 'round2',
+          currentAction: `⏭ R2 KP DISABLED for this worker (adbrainSkipR2Kp=true). Skipping R2 KP re-expansion — every seed would fail on this Chrome profile's dead Google Ads session. R1 data (${kp1RowsArr.length} row(s)) preserved.`,
+          logKind: 'warn',
+        });
+        kp1ForR2.length = 0; // clear so the R2 for-loop below runs 0 iterations
+      }
       if (kp1ForR2.length > 0) {
         onProgress?.({
           currentProduct: productName,

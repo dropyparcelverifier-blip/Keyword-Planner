@@ -1408,6 +1408,15 @@ async function _handleStartInner(msg) {
         },
         {
           ...runOpts,
+          // Per-worker KP-dead escape hatch. When Google Ads session is dead
+          // on this Chrome profile, every R2 KP call fails and wastes 6-8 min
+          // per SKU. Setting adbrainSkipR2Kp=true in chrome.storage.local on
+          // that worker's PC (or via the manager's worker-config Skip R2 KP
+          // toggle) makes the engine skip R2 KP entirely — every SKU still
+          // completes with R1 data. Fetched at runKeywordDiscovery start so
+          // toggle takes effect on the NEXT SKU without a full worker
+          // restart.
+          skipR2Kp: (await chrome.storage.local.get('adbrainSkipR2Kp')).adbrainSkipR2Kp === true,
           shouldStop: () => state.stopRequested,
           report: reportMap,
           excludeUrls,
