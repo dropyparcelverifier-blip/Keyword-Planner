@@ -696,15 +696,19 @@ async function workerAutoPollTick() {
     // the manager can Wake-on-LAN this PC later.
     (async () => {
       try {
-        const d = await chrome.storage.local.get(['adbrainWorkerMac', 'adbrainWorkerHostname', 'adbrainWorkerBundleHash']);
-        // Version hash — cache in memory + storage so we don't re-fetch on
-        // every heartbeat. Fetched once on cold-start and echoed forever.
-        // If we don't have it yet, kick a fetch now and use whatever we
-        // have (may be empty) — subsequent heartbeats will have it.
+        const d = await chrome.storage.local.get(['adbrainWorkerMac', 'adbrainWorkerHostname', 'adbrainWorkerBundleHash', 'adbrainWorkerBundleHashAt']);
+        // Version hash — refresh every 10 min so a fresh install-worker.ps1
+        // reinstall is picked up promptly. Previously cached forever after
+        // first fetch, so post-install workers kept reporting their PREVIOUS
+        // hash and appearing as 'outdated' in the fleet UI even after
+        // reinstalling. Now: fetch on cold start AND when cached hash is
+        // older than 10 min. Cheap — /api/worker/version-hash is ~5ms.
+        const HASH_MAX_AGE_MS = 10 * 60 * 1000;
+        const hashAgeMs = d.adbrainWorkerBundleHashAt ? Date.now() - d.adbrainWorkerBundleHashAt : Infinity;
         let vhash = d.adbrainWorkerBundleHash || '';
-        if (!vhash) {
+        if (!vhash || hashAgeMs > HASH_MAX_AGE_MS) {
           fetchWorkerBundleHash().then(h => {
-            if (h) chrome.storage.local.set({ adbrainWorkerBundleHash: h }).catch(() => {});
+            if (h) chrome.storage.local.set({ adbrainWorkerBundleHash: h, adbrainWorkerBundleHashAt: Date.now() }).catch(() => {});
           }).catch(() => {});
         }
         sendWorkerHeartbeat(state.workerId, {
