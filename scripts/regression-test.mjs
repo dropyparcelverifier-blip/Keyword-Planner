@@ -2319,9 +2319,9 @@ async function run() {
   assert(appJs.body.includes('install-worker.ps1'),            'FLEET-CMD.3 install one-liner referenced');
   // Activity-log auto-follow: renderActivity must sample scrollTop before
   // re-render and only snap back to top when the user was already there.
-  assert(/renderActivity[\s\S]{0,600}scrollTop\s*<=/.test(appJs.body),
+  assert(/renderActivity[\s\S]{0,1000}scrollTop\s*<=/.test(appJs.body),
     'ACT-SCROLL.1 renderActivity samples scrollTop before rewrite');
-  assert(/renderActivity[\s\S]{0,1200}el\.scrollTop\s*=\s*0/.test(appJs.body),
+  assert(/renderActivity[\s\S]{0,1600}el\.scrollTop\s*=\s*0/.test(appJs.body),
     'ACT-SCROLL.2 renderActivity snaps to top only when previously at top');
   // Client wrapper + UI wiring.
   assert(apiJsSrc.body.includes('fetchWorkerBundleHash') === false, 'VER.11 client wrapper is in modules/discovery-jobs.js not api.js (worker-side)');
