@@ -2412,9 +2412,40 @@ function renderWorkerFleet() {
       <button id="reconnectAllFrozenBtn" class="small danger">Hard reset all frozen</button>
     </div>` : '';
 
+  // Sort workers so the operator can spot the ACTIVE ones at a glance
+  // without scrolling through 14 rows. Priority (top-to-bottom):
+  //   1  actively working    — fresh heartbeat + in_flight > 0
+  //   2  online idle          — fresh heartbeat + in_flight = 0 (ready to pick up)
+  //   3  warming up           — fresh heartbeat, no engine activity yet
+  //   4  needs attention      — stuck / frozen / stale
+  //   5  offline               — 5 min – 4 h since heartbeat
+  //   6  shut down             — 4 h+ since heartbeat
+  //   7  never seen            — no heartbeat ever
+  // Within each tier: newest heartbeat first, so the freshest signal wins.
+  const sortedWorkers = [...state.workers].sort((a, b) => {
+    const tier = (w) => {
+      const hb = Number(w.last_heartbeat || 0);
+      const ago = hb ? Date.now() - hb : Infinity;
+      const inFlight = Number(w.in_flight || 0);
+      const stage = stageFor(w._lastActivity, w);
+      if (!hb)                             return 7; // never seen
+      if (ago > 4 * 3600 * 1000)           return 6; // shut down
+      if (ago > 5 * 60 * 1000)             return 5; // offline
+      if (stage.stuck || stage.label === 'stopped by user') return 4; // needs attention
+      if (ago > 3 * 60 * 1000)             return 4; // stale
+      if (inFlight > 0)                    return 1; // actively working
+      if (stage.label === 'warming up')    return 3; // warming up
+      return 2; // online idle
+    };
+    const ta = tier(a), tb = tier(b);
+    if (ta !== tb) return ta - tb;
+    // Same tier — newest heartbeat first
+    return Number(b.last_heartbeat || 0) - Number(a.last_heartbeat || 0);
+  });
+
   el.innerHTML = frozenBanner + stuckBanner + `<table class="tbl">
     <thead><tr><th>Worker</th><th>Current step</th><th>Last hb</th><th class="num">In-flight</th><th class="num">Done</th><th class="num">Failed</th><th style="min-width: 300px; white-space: nowrap;">Actions</th></tr></thead>
-    <tbody>${state.workers.map(w => {
+    <tbody>${sortedWorkers.map(w => {
       const stage = stageFor(w._lastActivity, w);
       const isStuck = stuck.includes(w);
       const isFrozen = stage.stuck === true;
