@@ -880,7 +880,16 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
   // warmer cache and the Discover button hydrates within seconds).
   // "no keyword ideas" / "try different keywords" are NOT transient — that's
   // KP's actual response, and retrying just wastes time.
-  const TRANSIENT_RE = /timed out|hydrate|never responded|shell|get results button|discover keywords/i;
+  //
+  // 'message (port|channel) closed' + 'Receiving end does not exist' added
+  // 2026-07-24 — live activity showed 3 worker PCs (PC-608D90, PC-F76F1F,
+  // PC-80C2C2) hitting these MV3 messaging errors on the primary text-seed
+  // flow and immediately failing. The website-fallback path already had
+  // its own port-closed retry with fresh navigate; this brings the primary
+  // loop up to parity. Root cause: KP tab navigates from /ideas/new to the
+  // results view mid-message; content script tears down before sendResponse
+  // fires. Fresh navigate + retry recovers cleanly.
+  const TRANSIENT_RE = /timed out|hydrate|never responded|shell|get results button|discover keywords|message port closed|message channel closed|receiving end does not exist|asynchronous response by returning true/i;
   const SEED_MAX_ATTEMPTS = 2;
 
   for (let i = 0; i < seedList.length; i++) {
