@@ -5732,11 +5732,26 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
         // JSON-LD parse errors, malformed FAQPage/HowTo, mojibake. Same
         // rules Google Rich Results Test applies. Surfaces issues here
         // instead of waiting days for GSC crawl.
+        // Resolve the storefront URL to audit. currentProduct.handle is
+        // reliable (freshly fetched by wireShopifyModalHandlers). Some
+        // stores have their storefront on a different domain than the
+        // admin's *.myshopify.com — the get-product endpoint records the
+        // canonical URL that was actually queried, but we need the public
+        // one. Prefer currentProduct.online_store_url if present, then
+        // the vendor's known dropy.in domain, then fall back to
+        // constructing from handle.
+        const auditUrl = currentProduct?.online_store_url
+          || currentProduct?.storefront_url
+          || (currentProduct?.handle ? `https://dropy.in/products/${currentProduct.handle}` : null);
         setTimeout(async () => {
           const slot = document.getElementById('shopifyLiveAuditSlot');
           if (!slot) return;
+          if (!auditUrl) {
+            slot.innerHTML = `<span style="color:var(--text-3);">🔎 Live-page audit skipped — no storefront URL available (currentProduct.handle missing).</span>`;
+            return;
+          }
           try {
-            const audit = await api.shopifyAuditLivePage(productUrl);
+            const audit = await api.shopifyAuditLivePage(auditUrl);
             if (!audit.ok) {
               slot.innerHTML = `<span style="color:var(--warn);">⚠ Live-page audit failed: ${esc(audit.error || 'unknown')}</span>`;
               return;
