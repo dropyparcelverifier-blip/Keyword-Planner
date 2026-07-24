@@ -697,13 +697,15 @@ async function workerAutoPollTick() {
     (async () => {
       try {
         const d = await chrome.storage.local.get(['adbrainWorkerMac', 'adbrainWorkerHostname', 'adbrainWorkerBundleHash', 'adbrainWorkerBundleHashAt']);
-        // Version hash — refresh every 10 min so a fresh install-worker.ps1
-        // reinstall is picked up promptly. Previously cached forever after
-        // first fetch, so post-install workers kept reporting their PREVIOUS
-        // hash and appearing as 'outdated' in the fleet UI even after
-        // reinstalling. Now: fetch on cold start AND when cached hash is
-        // older than 10 min. Cheap — /api/worker/version-hash is ~5ms.
-        const HASH_MAX_AGE_MS = 10 * 60 * 1000;
+        // Version hash — refresh every 2 min so post-install workers
+        // report the current hash promptly (was 10 min in a241e35, too
+        // long — kept 'update' badge showing on freshly-reinstalled
+        // workers because the manager's hash changes with each new
+        // commit push while workers lagged 10 min behind). 2 min is a
+        // good balance: negligible /api/worker/version-hash cost
+        // (~5ms per worker per 2 min) and the badge clears within one
+        // heartbeat cycle after a genuine reinstall.
+        const HASH_MAX_AGE_MS = 2 * 60 * 1000;
         const hashAgeMs = d.adbrainWorkerBundleHashAt ? Date.now() - d.adbrainWorkerBundleHashAt : Infinity;
         let vhash = d.adbrainWorkerBundleHash || '';
         if (!vhash || hashAgeMs > HASH_MAX_AGE_MS) {

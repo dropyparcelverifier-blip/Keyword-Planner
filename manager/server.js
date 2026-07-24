@@ -2705,11 +2705,21 @@ const server = http.createServer(async (req, res) => {
     }
     if (m === 'GET' && p === '/api/workers/list') {
       const currentHash = currentWorkerBundleHash();
-      const workers = Q.listWorkers.all().map(w => ({
-        ...w,
-        current_bundle_hash: currentHash,
-        outdated: w.version_hash != null && w.version_hash !== currentHash,
-      }));
+      // Grace window: if the worker reported its version < 3 min ago AND
+      // the reported hash differs from ours, the mismatch is almost always
+      // because the manager just pushed a new commit and the worker hasn't
+      // done its 2-min refresh cycle yet. Suppress the 'outdated' badge
+      // during that window to avoid false 'update' calls-to-action right
+      // after operator commits + reloads. Real outdated workers (haven't
+      // refreshed hash in >3 min AND still don't match) still show.
+      const nowMs = Date.now();
+      const GRACE_MS = 3 * 60 * 1000;
+      const workers = Q.listWorkers.all().map(w => {
+        const reportedAt = Number(w.version_reported_at || 0);
+        const withinGrace = reportedAt > 0 && (nowMs - reportedAt) < GRACE_MS;
+        const outdated = w.version_hash != null && w.version_hash !== currentHash && !withinGrace;
+        return { ...w, current_bundle_hash: currentHash, outdated };
+      });
       return send(res, 200, { ok: true, workers, current_bundle_hash: currentHash });
     }
     // Ghost-worker cleanup — remove worker rows that haven't checked
