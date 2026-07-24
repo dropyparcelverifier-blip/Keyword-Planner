@@ -159,12 +159,36 @@ function _dominantColorsFromImageData(imageData, k = 3) {
   return tagged.map(t => ({ r: t.c[0], g: t.c[1], b: t.c[2] }));
 }
 
+// Hosts known to reject cross-origin fetches from sandbox (origin: null).
+// Sandbox contexts are ALWAYS null-origin so any host without Access-Control-
+// Allow-Origin:* returns opaque failures. These are the observed high-volume
+// offenders — Instagram CDN especially appears in every Google Images SERP.
+// Skipping upfront avoids the fetch noise AND saves the wall-clock cost of
+// starting the request. Long-term fix is routing through background SW which
+// bypasses CORS; this short-circuit cuts the loudest cases immediately.
+const CORS_BLOCKED_HOSTS = [
+  'scontent.cdninstagram.com',
+  'scontent.fbcdn.net',
+  'scontent-',            // matches all Meta CDN regional subdomains (scontent-lhr8-1, etc.)
+  'lookaside.fbsbx.com',
+  'instagram.com',
+  'cdninstagram.com',
+  'pinimg.com',           // Pinterest — also strict about CORS from null origin
+];
+function isKnownCorsBlocked(u) {
+  try {
+    const host = new URL(u).hostname.toLowerCase();
+    return CORS_BLOCKED_HOSTS.some(h => host.includes(h));
+  } catch { return false; }
+}
+
 async function fetchAndExtractColors(url) {
   if (colorCache.has(url)) {
     const v = colorCache.get(url);
     colorCache.delete(url); colorCache.set(url, v); // LRU touch
     return v;
   }
+  if (isKnownCorsBlocked(url)) { colorCache.set(url, []); return []; }
   try {
     const resp = await fetch(url, { credentials: 'omit' });
     if (!resp.ok) { colorCache.set(url, []); return []; }
@@ -199,6 +223,7 @@ function _colorsFromCanvas(canvas) {
 }
 
 async function fetchAndDHash(url) {
+  if (isKnownCorsBlocked(url)) return null;
   try {
     const resp = await fetch(url, { credentials: 'omit' });
     if (!resp.ok) return null;
@@ -258,6 +283,9 @@ async function getCachedEmbedding(url) {
     embCache.set(url, e);
     return e;
   }
+  // Short-circuit hosts that will fail CORS on the transformers.js fetch.
+  // Cache a null so we don't retry, keep embedUrl call semantics stable.
+  if (isKnownCorsBlocked(url)) { embCache.set(url, null); return null; }
   const e = await embedUrl(url);
   embCache.set(url, e);
   if (embCache.size > EMB_CACHE_MAX) {
@@ -368,7 +396,7 @@ async function buildReferenceEmbeddings(urls) {
       ]);
       refs.push({ embedding, dhash, colors });
       // Stash the first successful bitmap for potential augmentation below.
-      if (!firstBitmap) {
+      if (!firstBitmap && !isKnownCorsBlocked(u)) {
         try {
           const resp = await fetch(u, { credentials: 'omit' });
           if (resp.ok) {
