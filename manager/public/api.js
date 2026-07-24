@@ -94,6 +94,10 @@ export const api = {
   wipeSelective:     (flags, batchId)  => _fetch('/api/wipe-selective', { method: 'POST', body: { confirm: 'WIPE', flags, batchId: batchId || null } }),
   shopifyFieldImpact:  ()              => _fetch('/api/shopify/field-impact'),
   shopifyGetProduct:   (productUrl, productIdHint) => _fetch(`/api/shopify/get-product?url=${encodeURIComponent(productUrl)}${productIdHint ? `&productId=${encodeURIComponent(productIdHint)}` : ''}`),
+  // Post-push live audit — fetch the rendered storefront HTML for productUrl
+  // and run Google-Rich-Results-style checks (parseability, duplicates,
+  // deep FAQPage/HowTo shape). No creds needed; hits the public URL.
+  shopifyAuditLivePage: (productUrl) => _fetch(`/api/shopify/audit-live-page?url=${encodeURIComponent(productUrl)}`),
   // Server-cached (10min TTL) — cheap to call every prompt build.
   shopifyGetPolicies:  ()              => _fetch('/api/shopify/get-policies'),
   shopifyMetafieldDefinitions: ()      => _fetch('/api/shopify/metafield-definitions'),
