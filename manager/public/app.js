@@ -1378,10 +1378,17 @@ async function refreshDashboard() {
     state.batches = summary.batches || [];
     // Detect newly-connected workers (first time we see this worker_id)
     // and pop a friendly toast so the manager knows their install worked.
+    // BUG FIX: previously the 'is this our first poll' check (seenIds.size
+    // > 0) ran INSIDE the loop. On a fresh page load with N workers
+    // already online, worker 1 got added silently, but the check for
+    // workers 2..N passed because seenIds.size > 0 after worker 1 was
+    // added — producing N-1 spam toasts. Capture the flag BEFORE the
+    // loop so the initial population is always silent regardless of size.
     const seenIds = state.seenWorkerIds;
+    const wasFirstPoll = seenIds.size === 0;
     for (const w of (workers.workers || [])) {
       if (!seenIds.has(w.worker_id)) {
-        if (seenIds.size > 0) toast(`Worker ${w.worker_id} online`, 'ok', { title: 'Worker connected' });
+        if (!wasFirstPoll) toast(`Worker ${w.worker_id} online`, 'ok', { title: 'Worker connected' });
         seenIds.add(w.worker_id);
       }
     }
