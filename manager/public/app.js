@@ -4729,10 +4729,11 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('- **No invented claims** — do not add "clinically proven", "dermatologist tested", certifications, awards, specific test results unless they appear in the research data.');
   L.push('- **No invented URLs** — dropy internal collection slugs must be plausible (kebab-case of a research theme). External references only to `dermnetnz.org/search?q=…`, `aad.org/search?q=…`, `pubmed.ncbi.nlm.nih.gov/?term=…` — always-valid search URLs. Do NOT invent article paths.');
   L.push('- **No competitor brand names in copy** — no "unlike Amazon", "similar to X brand". Never. (Schema `brand` field is different — that\'s our own product\'s brand and is required.)');
-  L.push('- **Schema.org JSON-LD is REQUIRED** and MUST include ALL of these three types in a single `<script type="application/ld+json">` block containing an array of objects:');
-  L.push('  1. `Product` — with `name`, `description`, `sku` (echo from research context above), `brand` (as `{"@type":"Brand","name":"…"}` — use current vendor), `image` (from the READ-ONLY image URLs above; do NOT invent), `offers` (as `{"@type":"Offer","price":"…","priceCurrency":"INR","availability":"https://schema.org/InStock","url":"<product URL>","priceValidUntil":"<YYYY-12-31 of current year>"}` — use current price from variant data above; if multiple variants exist, use lowest), `mpn` if known, `gtin13`/`gtin14` if a barcode appears in the research context, `dateModified` = today, and `aggregateRating` **only if real review data is provided** (never fabricate).');
-  L.push('  2. `FAQPage` — one `mainEntity` per FAQ, each with `Question` name and `Answer` text (exact match to the FAQ block in body_html).');
-  L.push('  3. `HowTo` — with `name`, `step` array matching your How-to-use `<ol>`, plus `totalTime` in ISO-8601 (e.g. `PT2M`).');
+  L.push('- **Schema.org JSON-LD** — emit EXACTLY these TWO types in a single `<script type="application/ld+json">` block containing a JSON ARRAY of two objects:');
+  L.push('  1. `FAQPage` — one `mainEntity` per FAQ, each with `Question` name and `Answer` text (exact match to the FAQ block in body_html). Must have EXACTLY 10 entries matching custom.faqs.');
+  L.push('  2. `HowTo` — with `name`, `step` array matching your How-to-use metafield content, plus `totalTime` in ISO-8601 (e.g. `PT2M`).');
+  L.push('  **DO NOT emit a `Product` schema.** The dropy.in theme already emits a full Product schema with @id, seller, shippingDetails, hasMerchantReturnPolicy — richer than anything we can generate. Adding our own Product schema causes Google Rich Results to flag "Duplicate field \'brand\'" because both schemas get merged. Skip Product entirely.');
+  L.push('  Emit CLEAN JSON — no HTML tags, no leading/trailing whitespace, no `<span>` decorations. The block must be pure `[{...FAQPage...}, {...HowTo...}]` on one or more lines, valid JSON that parses with `JSON.parse` on the first try. The preflight now runs `JSON.parse` on your block — a syntax error blocks the push.');
   L.push('- **Page-speed guardrails** (protects Core Web Vitals — Lighthouse Performance directly measures the below):');
   L.push('  · **Target body_html size: 12-18 KB** (roughly 12,000-18,000 characters). HARD CAP: ≤ 25 KB. Every extra KB adds parse + render + main-thread cost on mobile. The old body_html was ~1 KB and Google ranked it OK; we want depth, not bloat.');
   L.push('  · **Section count**: 8-10 `<h2>` sections max. Each `<h2>` block averages 1.5-2 KB of well-written content. If you\'re writing 15+ `<h2>`s you\'re padding.');
@@ -4965,7 +4966,7 @@ function buildShopifyClaudePrompt({ keywordRows, contextRow, currentProduct, imp
   L.push('- [ ] `<h2>` Related on dropy.in has 3-6 internal `<a href="/collections/…">` links with keyword-rich anchor text.');
   L.push('**Tier 3**');
   L.push('- [ ] Usage instructions section covers how / frequency / side effects / storage — all four.');
-  L.push('- [ ] FAQPage schema present. **EXACTLY 10** FAQ entries (must match custom.faqs count); each answer 40-80 words; uses question-shaped queries from research verbatim.');
+  L.push('- [ ] FAQPage schema present with **EXACTLY 10** entries (matches custom.faqs). HowTo schema present. **NO Product schema** — theme emits it, ours causes "Duplicate field brand". JSON-LD block passes JSON.parse — no smart quotes, no trailing commas, no HTML inside.');
   L.push('- [ ] At least one dermatology-source citation (AAD / DermNet NZ / PubMed) if any medical claim is made; link is to a search URL only.');
   L.push('- [ ] `<time datetime="…">` freshness line present. Product schema `dateModified` = today.');
   L.push('**Tier 4**');

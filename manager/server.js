@@ -486,7 +486,50 @@ function validateShopifyPatch(patch, context = {}) {
     const jsonLdCount = scriptMatches.filter(s => /application\/ld\+json/i.test(s)).length;
     const nonLdScripts = scriptMatches.length - jsonLdCount;
     if (nonLdScripts > 0) pushCrit('body_has_scripts', `body_html has ${nonLdScripts} non-JSON-LD <script> tag(s) — page-speed + XSS risk`);
-    if (jsonLdCount === 0) pushCrit('body_no_json_ld', 'body_html has NO JSON-LD schema block — misses Product/FAQPage/HowTo rich snippets');
+    if (jsonLdCount === 0) pushCrit('body_no_json_ld', 'body_html has NO JSON-LD schema block — misses FAQPage/HowTo rich snippets');
+    // Actually PARSE the JSON-LD block(s). Google Rich Results Test flagged
+    // 'Unparsable structured data' on Cetaphil because the theme's text-
+    // transform highlighter injected a <span> inside our <script> block,
+    // AND our own generation occasionally has trailing commas / smart quotes
+    // / unescaped chars. Catching syntax errors at push time is much cheaper
+    // than debugging days later via GSC. Also blocks emission of a Product
+    // schema — the theme already outputs one, ours causes 'Duplicate field
+    // brand' warnings when Google merges them.
+    const jsonLdBlocks = [...bodyHtml.matchAll(/<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)];
+    stats.jsonld_block_count = jsonLdBlocks.length;
+    let jsonLdHasProduct = false;
+    let jsonLdHasFaq = false;
+    let jsonLdHasHowto = false;
+    let jsonLdParseError = null;
+    for (let bi = 0; bi < jsonLdBlocks.length; bi++) {
+      const raw = jsonLdBlocks[bi][1].trim();
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw);
+        const items = Array.isArray(parsed) ? parsed : [parsed];
+        for (const it of items) {
+          const t = String(it?.['@type'] || '').toLowerCase();
+          if (t === 'product') jsonLdHasProduct = true;
+          if (t === 'faqpage') jsonLdHasFaq = true;
+          if (t === 'howto') jsonLdHasHowto = true;
+        }
+      } catch (e) {
+        jsonLdParseError = `block ${bi + 1}: ${e.message.slice(0, 120)}`;
+        break;
+      }
+    }
+    if (jsonLdParseError) {
+      pushCrit('body_jsonld_unparsable', `JSON-LD in body_html failed JSON.parse (${jsonLdParseError}). Google will flag "Unparsable structured data" and drop all rich results. Common causes: (a) smart quotes / curly apostrophes instead of straight ", (b) trailing commas, (c) HTML tags leaked inside the JSON, (d) the theme injecting <span> for text-transform effects. Regenerate the block with clean straight-quoted JSON.`);
+    }
+    if (jsonLdHasProduct) {
+      pushWarn('body_jsonld_has_product', `body_html JSON-LD includes a Product schema. The dropy.in theme already emits a Product schema with @id + shippingDetails + hasMerchantReturnPolicy + seller. Emitting our own causes Google to merge them and flag "Duplicate field \'brand\'" (seen on Cetaphil). Regenerate the block with only FAQPage + HowTo (skip Product).`);
+    }
+    if (jsonLdBlocks.length > 0 && !jsonLdHasFaq) {
+      pushWarn('body_jsonld_missing_faq', 'body_html JSON-LD block(s) present but no FAQPage schema found. FAQPage is required per the prompt spec.');
+    }
+    if (jsonLdBlocks.length > 0 && !jsonLdHasHowto) {
+      pushWarn('body_jsonld_missing_howto', 'body_html JSON-LD block(s) present but no HowTo schema found. HowTo is required per the prompt spec.');
+    }
     if (/<iframe\b/i.test(bodyHtml))                pushCrit('body_iframe', 'body_html contains <iframe> — forbidden');
     if (/\bdata:image[^"'\s>]+base64/i.test(bodyHtml)) pushCrit('body_base64', 'body_html contains base64 image URI — forbidden (bloats payload)');
     if (/<link\b[^>]*stylesheet/i.test(bodyHtml))   pushCrit('body_external_css', 'body_html contains external <link rel=stylesheet> — forbidden');
