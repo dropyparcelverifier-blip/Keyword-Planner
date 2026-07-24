@@ -926,13 +926,51 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
           seedErrors.push(`seed ${i + 1}: KP content script never responded (after ${attempt} attempts)`);
           break;
         }
-        const single = await chrome.tabs.sendMessage(tabId, {
-          type: 'KP_GET_IDEAS',
-          seed: seed,                  // single seed per content-script call
-          maxResults: maxResults - accumulated.length,
-          hydrateTimeoutMs: KP_HYDRATE_TIMEOUT_MS,
-          tableTimeoutMs:   KP_TABLE_TIMEOUT_MS,
-        });
+        // taskId lets us recover the result via chrome.storage if the
+        // content script tears down mid-flow (Google navigates from
+        // /ideas/new to /ideas/results and the message channel closes
+        // before sendResponse fires). kp.js writes the result to
+        // chrome.storage.local['kp_result_<taskId>'] BEFORE calling
+        // sendResponse, so the poll below finds it either way.
+        const taskId = `kp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        let single;
+        try {
+          single = await chrome.tabs.sendMessage(tabId, {
+            type: 'KP_GET_IDEAS',
+            seed: seed,                  // single seed per content-script call
+            taskId,
+            maxResults: maxResults - accumulated.length,
+            hydrateTimeoutMs: KP_HYDRATE_TIMEOUT_MS,
+            tableTimeoutMs:   KP_TABLE_TIMEOUT_MS,
+          });
+        } catch (msgErr) {
+          // Channel closed mid-flight. Poll storage — kp.js may have
+          // completed the flow but couldn't sendResponse because the tab
+          // was torn down. Poll every 5s for up to 3 min.
+          const isPortClosed = /message port closed|message channel closed|Receiving end does not exist|asynchronous response by returning true/i.test(msgErr.message || '');
+          if (!isPortClosed) throw msgErr;
+          log(`KP seed ${i + 1}: message channel closed mid-flow — polling storage for result (${taskId})`);
+          const storageKey = `kp_result_${taskId}`;
+          let recovered = null;
+          for (let poll = 0; poll < 36; poll++) {          // 36 * 5s = 3 min
+            await sleep(5000);
+            try {
+              const stored = await chrome.storage.local.get(storageKey);
+              if (stored?.[storageKey]?.result) {
+                recovered = stored[storageKey].result;
+                await chrome.storage.local.remove(storageKey).catch(() => {});
+                log(`KP seed ${i + 1}: recovered result from storage after channel close (poll ${poll + 1})`);
+                break;
+              }
+            } catch {}
+          }
+          if (recovered) {
+            single = recovered;
+          } else {
+            // Storage poll timed out — treat as transient, allow retry.
+            throw new Error('message channel closed AND storage poll timed out after 3 min');
+          }
+        }
         if (!single?.ok) {
           const errMsg = single?.error || 'unknown';
           if (attempt < SEED_MAX_ATTEMPTS && TRANSIENT_RE.test(errMsg)) {
@@ -1001,10 +1039,12 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
           if (websiteAttempt < WEBSITE_MAX_ATTEMPTS) { await sleep(5000); continue; }
           break;
         }
+        const wTaskId = `kpw_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
         try {
           resp = await chrome.tabs.sendMessage(tabId, {
             type: 'KP_GET_IDEAS_WEBSITE',
             productUrl,
+            taskId: wTaskId,
             maxResults: maxResults - accumulated.length,
             hydrateTimeoutMs: KP_HYDRATE_TIMEOUT_MS,
             tableTimeoutMs:   KP_TABLE_TIMEOUT_MS,
@@ -1012,14 +1052,38 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
         } catch (msgErr) {
           // The classic MV3 flake: content script tore down mid-flow
           // when KP navigated from /ideas/new to the results view.
-          const isPortClosed = /message port closed|message channel closed|Receiving end does not exist/i.test(msgErr.message || '');
-          if (isPortClosed && websiteAttempt < WEBSITE_MAX_ATTEMPTS) {
-            log(`KP website fallback: content script tore down mid-flow (${msgErr.message.slice(0, 80)}) — retrying with fresh navigate`);
-            await sleep(5000);
-            continue;
+          // Try storage recovery BEFORE retrying — kp.js may have finished
+          // the flow and written the result even though the channel closed.
+          const isPortClosed = /message port closed|message channel closed|Receiving end does not exist|asynchronous response by returning true/i.test(msgErr.message || '');
+          if (isPortClosed) {
+            const storageKey = `kp_result_${wTaskId}`;
+            log(`KP website fallback: channel closed — polling storage for result (${wTaskId})`);
+            let recovered = null;
+            for (let poll = 0; poll < 36; poll++) {         // 3 min total
+              await sleep(5000);
+              try {
+                const stored = await chrome.storage.local.get(storageKey);
+                if (stored?.[storageKey]?.result) {
+                  recovered = stored[storageKey].result;
+                  await chrome.storage.local.remove(storageKey).catch(() => {});
+                  log(`KP website fallback: recovered result from storage (poll ${poll + 1})`);
+                  break;
+                }
+              } catch {}
+            }
+            if (recovered) { resp = recovered; }
+            else if (websiteAttempt < WEBSITE_MAX_ATTEMPTS) {
+              log(`KP website fallback: storage poll timed out — retrying with fresh navigate`);
+              await sleep(5000);
+              continue;
+            } else {
+              seedErrors.push(`website fallback: ${msgErr.message} (storage poll also empty after 3 min, ${websiteAttempt} attempts)`);
+              break;
+            }
+          } else {
+            seedErrors.push(`website fallback: ${msgErr.message}${websiteAttempt > 1 ? ` (after ${websiteAttempt} attempts)` : ''}`);
+            break;
           }
-          seedErrors.push(`website fallback: ${msgErr.message}${websiteAttempt > 1 ? ` (after ${websiteAttempt} attempts)` : ''}`);
-          break;
         }
         if (!resp?.ok) {
           seedErrors.push(`website fallback: ${resp?.error || 'unknown'}${websiteAttempt > 1 ? ` (after ${websiteAttempt} attempts)` : ''}`);

@@ -76,6 +76,23 @@
     } catch {}
   }
 
+  // Dual-channel result delivery. Long KP flows (60-120s) frequently see
+  // the content script torn down mid-execution when Google navigates the
+  // tab from /ideas/new to /ideas/results — sendResponse never fires,
+  // engine gets 'message channel closed'. Writing the result to
+  // chrome.storage.local BEFORE sendResponse guarantees the engine can
+  // recover the result via a storage poll even if the message channel
+  // is dead. Storage key: kp_result_<taskId>. Auto-purged by the engine
+  // after read.
+  async function _deliverResult(taskId, result, sendResponse) {
+    if (taskId) {
+      try {
+        await chrome.storage.local.set({ [`kp_result_${taskId}`]: { result, ts: Date.now() } });
+      } catch {}
+    }
+    try { sendResponse(result); } catch {}
+  }
+
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg?.type === 'KP_PING') { sendResponse({ ok: true, ready: true }); return false; }
     if (msg?.type === 'KP_GET_IDEAS') {
@@ -85,9 +102,10 @@
       const seeds = Array.isArray(msg.seeds)
         ? msg.seeds.filter(s => typeof s === 'string' && s.trim())
         : (msg.seed ? [msg.seed] : []);
+      const taskId = msg.taskId || null;
       runKPFlow(seeds, msg.maxResults || 200, msg.hydrateTimeoutMs || 45000, msg.tableTimeoutMs || 60000)
-        .then(result => sendResponse(result))
-        .catch(err => sendResponse({ ok: false, error: err.message, keywords: [] }));
+        .then(result => _deliverResult(taskId, result, sendResponse))
+        .catch(err => _deliverResult(taskId, { ok: false, error: err.message, keywords: [] }, sendResponse));
       return true;
     }
     if (msg?.type === 'KP_GET_IDEAS_WEBSITE') {
@@ -100,9 +118,10 @@
         sendResponse({ ok: false, error: 'no productUrl provided', keywords: [] });
         return false;
       }
+      const taskId = msg.taskId || null;
       runKPWebsiteFlow(productUrl, msg.maxResults || 200, msg.hydrateTimeoutMs || 45000, msg.tableTimeoutMs || 60000)
-        .then(result => sendResponse(result))
-        .catch(err => sendResponse({ ok: false, error: err.message, keywords: [] }));
+        .then(result => _deliverResult(taskId, result, sendResponse))
+        .catch(err => _deliverResult(taskId, { ok: false, error: err.message, keywords: [] }, sendResponse));
       return true;
     }
     if (msg?.type === 'KP_GET_METRICS') {
