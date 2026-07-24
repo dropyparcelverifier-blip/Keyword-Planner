@@ -4628,6 +4628,11 @@ async function openShopifyModal() {
       primaryKeyword,
       competitorBrands,
       hasReviewData: !!(cur.reviews?.hasReviews),
+      // Own vendor lets the preflight skip its own brand name from the
+      // competitor-brand check. Otherwise a product whose vendor.com is a
+      // top SERP hit (e.g. Cetaphil at cetaphil.com) has its own brand
+      // rejected as a competitor and blocks the push.
+      ownVendor: String(cur.vendor || '').trim(),
     };
     wireShopifyModalHandlers(cur.id, allowlist, validationContext, cur);
   } catch (e) {
