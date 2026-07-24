@@ -93,6 +93,25 @@
     try { sendResponse(result); } catch {}
   }
 
+  // Hard-cap any long-running KP promise. runKPFlow / runKPWebsiteFlow can
+  // hang forever if a DOM wait / element poll / network request never
+  // resolves — that leaves the engine polling storage for 3 min then
+  // giving up (seen live: 'message channel closed AND storage poll timed
+  // out after 3 min'). This wrapper guarantees the flow ALWAYS resolves
+  // within N ms so _deliverResult always fires + writes to storage.
+  function _withHardTimeout(promise, ms, label) {
+    return Promise.race([
+      promise,
+      new Promise((resolve) => {
+        setTimeout(() => resolve({
+          ok: false,
+          error: `KP hard timeout after ${Math.round(ms / 1000)}s — content script hung mid-flow (${label}). No result to deliver.`,
+          keywords: [],
+        }), ms);
+      }),
+    ]);
+  }
+
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg?.type === 'KP_PING') { sendResponse({ ok: true, ready: true }); return false; }
     if (msg?.type === 'KP_GET_IDEAS') {
@@ -103,7 +122,7 @@
         ? msg.seeds.filter(s => typeof s === 'string' && s.trim())
         : (msg.seed ? [msg.seed] : []);
       const taskId = msg.taskId || null;
-      runKPFlow(seeds, msg.maxResults || 200, msg.hydrateTimeoutMs || 45000, msg.tableTimeoutMs || 60000)
+      _withHardTimeout(runKPFlow(seeds, msg.maxResults || 200, msg.hydrateTimeoutMs || 45000, msg.tableTimeoutMs || 60000), 165_000, 'KP_GET_IDEAS')
         .then(result => _deliverResult(taskId, result, sendResponse))
         .catch(err => _deliverResult(taskId, { ok: false, error: err.message, keywords: [] }, sendResponse));
       return true;
@@ -119,7 +138,7 @@
         return false;
       }
       const taskId = msg.taskId || null;
-      runKPWebsiteFlow(productUrl, msg.maxResults || 200, msg.hydrateTimeoutMs || 45000, msg.tableTimeoutMs || 60000)
+      _withHardTimeout(runKPWebsiteFlow(productUrl, msg.maxResults || 200, msg.hydrateTimeoutMs || 45000, msg.tableTimeoutMs || 60000), 165_000, 'KP_GET_IDEAS_WEBSITE')
         .then(result => _deliverResult(taskId, result, sendResponse))
         .catch(err => _deliverResult(taskId, { ok: false, error: err.message, keywords: [] }, sendResponse));
       return true;
