@@ -127,7 +127,7 @@ try {
                     # from the (now-updated) extension dir. State
                     # (workerId, buffered pushes, claimed jobs) all
                     # survive via chrome.storage.
-                    $cmdBody = '{"command":"hard_reset","createdBy":"watchdog-auto-update"}'
+                    $cmdBody = '{"command":"graceful_reload","createdBy":"watchdog-auto-update"}'
                     if (Mgr-Post '/api/commands' $cmdBody) {
                         Add-Log ('[update] ' + $okCount + ' file(s) written; hard_reset broadcast - workers reload within ~30s')
                     } else {
