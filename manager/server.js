@@ -495,12 +495,20 @@ function validateShopifyPatch(patch, context = {}) {
     // than debugging days later via GSC. Also blocks emission of a Product
     // schema — the theme already outputs one, ours causes 'Duplicate field
     // brand' warnings when Google merges them.
+    // ── DEEP JSON-LD schema validation — catch every issue Google's Rich
+    // Results Test would flag, at push time. Every check here is one less
+    // "why did this SKU get warned days later in GSC" mystery. Scope:
+    //   • Parseability (JSON.parse must succeed)
+    //   • Type inventory (FAQPage + HowTo required, Product forbidden)
+    //   • FAQPage deep: mainEntity array with proper Question / Answer shape
+    //   • HowTo deep: step array, totalTime ISO-8601 format
+    //   • Cross-consistency with metafields (already checked below)
     const jsonLdBlocks = [...bodyHtml.matchAll(/<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)];
     stats.jsonld_block_count = jsonLdBlocks.length;
     let jsonLdHasProduct = false;
-    let jsonLdHasFaq = false;
-    let jsonLdHasHowto = false;
     let jsonLdParseError = null;
+    let faqPageObj = null;
+    let howToObj = null;
     for (let bi = 0; bi < jsonLdBlocks.length; bi++) {
       const raw = jsonLdBlocks[bi][1].trim();
       if (!raw) continue;
@@ -510,8 +518,8 @@ function validateShopifyPatch(patch, context = {}) {
         for (const it of items) {
           const t = String(it?.['@type'] || '').toLowerCase();
           if (t === 'product') jsonLdHasProduct = true;
-          if (t === 'faqpage') jsonLdHasFaq = true;
-          if (t === 'howto') jsonLdHasHowto = true;
+          if (t === 'faqpage') faqPageObj = it;
+          if (t === 'howto') howToObj = it;
         }
       } catch (e) {
         jsonLdParseError = `block ${bi + 1}: ${e.message.slice(0, 120)}`;
@@ -524,12 +532,99 @@ function validateShopifyPatch(patch, context = {}) {
     if (jsonLdHasProduct) {
       pushWarn('body_jsonld_has_product', `body_html JSON-LD includes a Product schema. The dropy.in theme already emits a Product schema with @id + shippingDetails + hasMerchantReturnPolicy + seller. Emitting our own causes Google to merge them and flag "Duplicate field \'brand\'" (seen on Cetaphil). Regenerate the block with only FAQPage + HowTo (skip Product).`);
     }
-    if (jsonLdBlocks.length > 0 && !jsonLdHasFaq) {
+    if (jsonLdBlocks.length > 0 && !faqPageObj) {
       pushWarn('body_jsonld_missing_faq', 'body_html JSON-LD block(s) present but no FAQPage schema found. FAQPage is required per the prompt spec.');
     }
-    if (jsonLdBlocks.length > 0 && !jsonLdHasHowto) {
+    if (jsonLdBlocks.length > 0 && !howToObj) {
       pushWarn('body_jsonld_missing_howto', 'body_html JSON-LD block(s) present but no HowTo schema found. HowTo is required per the prompt spec.');
     }
+    // Deep FAQPage validation — Google requires each mainEntity to be a
+    // Question with a non-empty name AND acceptedAnswer.text. Silently
+    // malformed entries just get skipped in rich results.
+    if (faqPageObj) {
+      const me = Array.isArray(faqPageObj.mainEntity) ? faqPageObj.mainEntity : [];
+      stats.faq_schema_pairs = me.length;
+      if (me.length !== 10) {
+        pushWarn('faqpage_count', `FAQPage schema has ${me.length} mainEntity item(s) — theme requires EXACTLY 10.`);
+      }
+      const seenQ = new Set();
+      let badShape = 0, duplicateQ = 0, emptyA = 0;
+      for (const q of me) {
+        const t = String(q?.['@type'] || '').toLowerCase();
+        const name = String(q?.name || '').trim();
+        const answer = String(q?.acceptedAnswer?.text || '').trim();
+        if (t !== 'question' || !name) { badShape++; continue; }
+        if (!answer) { emptyA++; continue; }
+        const norm = name.toLowerCase();
+        if (seenQ.has(norm)) duplicateQ++;
+        seenQ.add(norm);
+      }
+      if (badShape > 0) pushCrit('faqpage_bad_shape', `FAQPage has ${badShape} mainEntity item(s) missing @type=Question or non-empty name. Google will drop these from rich results.`);
+      if (emptyA > 0) pushCrit('faqpage_empty_answer', `FAQPage has ${emptyA} Question(s) with empty acceptedAnswer.text. Google will drop these.`);
+      if (duplicateQ > 0) pushWarn('faqpage_duplicate_q', `FAQPage has ${duplicateQ} duplicate question name(s) — Google may flag as duplicate content.`);
+    }
+    // Deep HowTo validation — name + step array with @type=HowToStep + text,
+    // totalTime in ISO-8601 (PT#M / PT#H format).
+    if (howToObj) {
+      if (!String(howToObj.name || '').trim()) pushWarn('howto_no_name', 'HowTo schema missing non-empty "name" field.');
+      const steps = Array.isArray(howToObj.step) ? howToObj.step : [];
+      stats.howto_steps = steps.length;
+      if (steps.length < 3) pushWarn('howto_too_few_steps', `HowTo has only ${steps.length} step(s). Google prefers 3+ for rich results.`);
+      let badStep = 0;
+      for (const s of steps) {
+        const t = String(s?.['@type'] || '').toLowerCase();
+        const text = String(s?.text || s?.name || '').trim();
+        if (t !== 'howtostep' || !text) badStep++;
+      }
+      if (badStep > 0) pushCrit('howto_bad_step', `HowTo has ${badStep} step(s) missing @type=HowToStep or non-empty text. Google will drop these.`);
+      const tt = String(howToObj.totalTime || '').trim();
+      if (tt && !/^PT\d+(?:[HMS])/i.test(tt)) {
+        pushWarn('howto_bad_totaltime', `HowTo.totalTime "${tt}" is not ISO-8601 format (should be PT2M, PT30S, PT1H etc.). Google will ignore this field.`);
+      }
+    }
+    // body_html character-encoding sanity — mojibake / smart quotes / bad
+    // encoding are silent killers: page renders but Google flags markup
+    // errors or shows garbage in rich results. Catch at push time.
+    if (/Ã[¢©®]|â€™|â€œ|â€|â€"|Â|â€|Ã¢â‚¬/.test(bodyHtml)) {
+      pushCrit('body_mojibake', 'body_html contains mojibake (double-encoded UTF-8: Ã¢, â€™, Â, etc.). Paste-through corrupted characters — regenerate the block with clean UTF-8.');
+    }
+    if (/[“”‘’]/.test(bodyHtml.replace(/<script[\s\S]*?<\/script>/gi, ''))) {
+      pushWarn('body_smart_quotes_in_html', 'body_html visible content contains smart/curly quotes (' + '“ ” ‘ ’' + '). Fine for display but breaks JSON if any leaks into the schema block.');
+    }
+    // image_alts sanity — Google Image Search + accessibility both care.
+    // Each alt should be present, distinct, and reasonable length (5-125 chars).
+    if (Array.isArray(patch?.image_alts) && patch.image_alts.length > 0) {
+      const alts = patch.image_alts.map(a => String(a?.alt || '').trim());
+      stats.image_alt_count = alts.length;
+      const short = alts.filter(a => a.length > 0 && a.length < 5).length;
+      const long  = alts.filter(a => a.length > 125).length;
+      const empty = alts.filter(a => a.length === 0).length;
+      const dupes = alts.length - new Set(alts.filter(Boolean)).size;
+      if (empty > 0) pushWarn('image_alt_empty', `image_alts has ${empty} empty entry(ies). Every image should describe its content.`);
+      if (short > 0) pushWarn('image_alt_short', `image_alts has ${short} entry(ies) under 5 chars — too short to be useful for Image Search or screen readers.`);
+      if (long > 0)  pushWarn('image_alt_long',  `image_alts has ${long} entry(ies) over 125 chars — Google may truncate; keep alt text tight.`);
+      if (dupes > 0) pushWarn('image_alt_duplicate', `image_alts has ${dupes} duplicate alt text(s). Every image should describe what's distinct about it.`);
+    }
+    // External-links sanity — every non-dropy.in <a> must be rel="nofollow
+    // noopener" (Lighthouse + SEO). Also flag fabricated citation domains.
+    const anchorTags = bodyHtml.match(/<a\b[^>]*>/gi) || [];
+    let extNoRel = 0, badCitation = 0;
+    const CITATION_ALLOWED = /(?:dermnetnz\.org|aad\.org|pubmed\.ncbi\.nlm\.nih\.gov|schema\.org)/i;
+    for (const tag of anchorTags) {
+      const hm = tag.match(/href=["']([^"']+)["']/i);
+      if (!hm) continue;
+      const href = hm[1];
+      if (!/^https?:\/\//i.test(href)) continue;
+      if (/dropy\.in/i.test(href)) continue;
+      // External link — must have nofollow + noopener
+      if (!/rel=["'][^"']*(nofollow|noopener)/i.test(tag)) extNoRel++;
+      // Guard against Claude inventing article paths on citation sites —
+      // /search?q= paths on dermnetnz/aad/pubmed always resolve; deeper
+      // paths often 404. Warn only, not critical.
+      if (CITATION_ALLOWED.test(href) && !/[?&]q=|\/search/i.test(href)) badCitation++;
+    }
+    if (extNoRel > 0) pushWarn('body_external_no_rel_deep', `body_html has ${extNoRel} external anchor(s) without rel="nofollow noopener" — Lighthouse Best Practices flags, and PageRank leaks to competitors.`);
+    if (badCitation > 0) pushWarn('body_citation_deep_path', `body_html has ${badCitation} citation link(s) using a specific path instead of a /search?q= URL — Claude may have fabricated the article path. Verify each 200s.`);
     if (/<iframe\b/i.test(bodyHtml))                pushCrit('body_iframe', 'body_html contains <iframe> — forbidden');
     if (/\bdata:image[^"'\s>]+base64/i.test(bodyHtml)) pushCrit('body_base64', 'body_html contains base64 image URI — forbidden (bloats payload)');
     if (/<link\b[^>]*stylesheet/i.test(bodyHtml))   pushCrit('body_external_css', 'body_html contains external <link rel=stylesheet> — forbidden');
