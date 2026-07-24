@@ -159,27 +159,40 @@ function _dominantColorsFromImageData(imageData, k = 3) {
   return tagged.map(t => ({ r: t.c[0], g: t.c[1], b: t.c[2] }));
 }
 
-// Hosts known to reject cross-origin fetches from sandbox (origin: null).
-// Sandbox contexts are ALWAYS null-origin so any host without Access-Control-
-// Allow-Origin:* returns opaque failures. These are the observed high-volume
-// offenders — Instagram CDN especially appears in every Google Images SERP.
-// Skipping upfront avoids the fetch noise AND saves the wall-clock cost of
-// starting the request. Long-term fix is routing through background SW which
-// bypasses CORS; this short-circuit cuts the loudest cases immediately.
-const CORS_BLOCKED_HOSTS = [
-  'scontent.cdninstagram.com',
-  'scontent.fbcdn.net',
-  'scontent-',            // matches all Meta CDN regional subdomains (scontent-lhr8-1, etc.)
-  'lookaside.fbsbx.com',
-  'instagram.com',
-  'cdninstagram.com',
-  'pinimg.com',           // Pinterest — also strict about CORS from null origin
-];
-function isKnownCorsBlocked(u) {
-  try {
-    const host = new URL(u).hostname.toLowerCase();
-    return CORS_BLOCKED_HOSTS.some(h => host.includes(h));
-  } catch { return false; }
+// Background-relay fetch. Sandbox context is origin: null so browser CORS
+// blocks most cross-origin fetches. Route through background SW instead —
+// it has <all_urls> host_permissions and bypasses CORS entirely. Sandbox
+// posts to parent (offscreen), offscreen forwards to background, background
+// fetches + base64-encodes bytes, response bubbles back. Base64 avoids
+// ArrayBuffer/Blob serialization loss across the extension message boundary.
+let _imgFetchNextId = 1;
+const _imgFetchPending = new Map();
+window.addEventListener('message', (event) => {
+  const d = event.data || {};
+  if (d.__response === 'imgFetch' && d.reqId != null) {
+    const p = _imgFetchPending.get(d.reqId);
+    if (p) { _imgFetchPending.delete(d.reqId); p.resolve(d); }
+  }
+});
+function bgFetchBytes(url, timeoutMs = 20_000) {
+  return new Promise((resolve) => {
+    const reqId = _imgFetchNextId++;
+    const timer = setTimeout(() => {
+      _imgFetchPending.delete(reqId);
+      resolve({ ok: false, error: 'timeout' });
+    }, timeoutMs);
+    _imgFetchPending.set(reqId, { resolve: (r) => { clearTimeout(timer); resolve(r); } });
+    window.parent.postMessage({ __request: 'imgFetch', reqId, url }, '*');
+  });
+}
+// Decode background's base64 response into a Blob. Content-type falls back
+// to 'image/jpeg' for hosts that omit the header; createImageBitmap sniffs
+// the actual format from the bytes so mismatches are harmless.
+function _b64ToBlob(b64, contentType) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: contentType || 'image/jpeg' });
 }
 
 async function fetchAndExtractColors(url) {
@@ -188,11 +201,10 @@ async function fetchAndExtractColors(url) {
     colorCache.delete(url); colorCache.set(url, v); // LRU touch
     return v;
   }
-  if (isKnownCorsBlocked(url)) { colorCache.set(url, []); return []; }
   try {
-    const resp = await fetch(url, { credentials: 'omit' });
+    const resp = await bgFetchBytes(url);
     if (!resp.ok) { colorCache.set(url, []); return []; }
-    const blob = await resp.blob();
+    const blob = _b64ToBlob(resp.base64, resp.contentType);
     if (!blob.type.startsWith('image/') && blob.size < 100) { colorCache.set(url, []); return []; }
     const bitmap = await createImageBitmap(blob);
     const canvas = document.createElement('canvas');
@@ -223,11 +235,10 @@ function _colorsFromCanvas(canvas) {
 }
 
 async function fetchAndDHash(url) {
-  if (isKnownCorsBlocked(url)) return null;
   try {
-    const resp = await fetch(url, { credentials: 'omit' });
+    const resp = await bgFetchBytes(url);
     if (!resp.ok) return null;
-    const blob = await resp.blob();
+    const blob = _b64ToBlob(resp.base64, resp.contentType);
     if (!blob.type.startsWith('image/') && blob.size < 100) return null;
     const bitmap = await createImageBitmap(blob);
     const canvas = document.createElement('canvas');
@@ -257,11 +268,19 @@ async function fetchAndDHash(url) {
 
 async function embedUrl(url) {
   const ex = await loadExtractor();
-  // transformers.js fetches the URL itself (CORS rules apply). RawImage layer
-  // handles decode + resize. Output: { data: Float32Array, dims: [1, 512] }.
-  const out = await ex(url);
-  // out.data is typically a Float32Array of length 512 (one image)
-  return l2normalize(out.data);
+  // Route the fetch through background SW (bypasses CORS), wrap bytes in
+  // a blob: URL that transformers.js can fetch same-origin. Output:
+  // { data: Float32Array, dims: [1, 512] } — l2-normalized on return.
+  const resp = await bgFetchBytes(url);
+  if (!resp.ok) return null;
+  const blob = _b64ToBlob(resp.base64, resp.contentType);
+  const blobUrl = URL.createObjectURL(blob);
+  try {
+    const out = await ex(blobUrl);
+    return l2normalize(out.data);
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
 }
 
 // In-memory LRU. Heavy lifting is the model inference, so this cache is the
@@ -283,9 +302,6 @@ async function getCachedEmbedding(url) {
     embCache.set(url, e);
     return e;
   }
-  // Short-circuit hosts that will fail CORS on the transformers.js fetch.
-  // Cache a null so we don't retry, keep embedUrl call semantics stable.
-  if (isKnownCorsBlocked(url)) { embCache.set(url, null); return null; }
   const e = await embedUrl(url);
   embCache.set(url, e);
   if (embCache.size > EMB_CACHE_MAX) {
@@ -396,11 +412,11 @@ async function buildReferenceEmbeddings(urls) {
       ]);
       refs.push({ embedding, dhash, colors });
       // Stash the first successful bitmap for potential augmentation below.
-      if (!firstBitmap && !isKnownCorsBlocked(u)) {
+      if (!firstBitmap) {
         try {
-          const resp = await fetch(u, { credentials: 'omit' });
+          const resp = await bgFetchBytes(u);
           if (resp.ok) {
-            const blob = await resp.blob();
+            const blob = _b64ToBlob(resp.base64, resp.contentType);
             firstBitmap = await createImageBitmap(blob);
           }
         } catch {}
