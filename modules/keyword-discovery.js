@@ -4660,19 +4660,28 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             kp1ForR2.some(picked => opts.seedsAreSimilar(cand.keyword, [picked.keyword]))) continue;
         kp1ForR2.push(cand);
       }
-      // Opt-out: when the operator KNOWS the KP session is dead on this
-      // worker's Chrome profile (e.g. persistent Google Ads CAPTCHA / login
-      // wall), R2 KP is guaranteed to fail every seed. Setting
-      // opts.skipR2Kp=true (from background.js runOpts, which reads
-      // chrome.storage.local.adbrainSkipR2Kp) skips R2 entirely. Every
-      // SKU still completes with R1 data (~150-400 kw); we just don't
-      // burn 6-8 min per SKU proving KP is dead. Toggle it on the failing
-      // workers, keep it off on the ones with healthy KP sessions.
-      if (opts.skipR2Kp) {
+      // Opt-out: manual `opts.skipR2Kp` OR auto-detected persistent KP
+      // failure. Read the cross-SKU R2 health counter (adbrainR2DeadStreak
+      // in chrome.storage.local) — 2+ consecutive R2-dead SKUs means the
+      // KP session is TABLE-flat, keep bailing until an R2 succeeds and
+      // resets the streak. Zero operator input required — worker heals
+      // itself and reactivates R2 when KP responds again.
+      let r2DeadStreak = 0;
+      try {
+        if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+          const stored = await chrome.storage.local.get('adbrainR2DeadStreak');
+          r2DeadStreak = Number(stored?.adbrainR2DeadStreak || 0);
+        }
+      } catch {}
+      const autoSkip = r2DeadStreak >= 2;
+      if (opts.skipR2Kp || autoSkip) {
+        const reason = opts.skipR2Kp
+          ? 'operator flag adbrainSkipR2Kp=true'
+          : `auto-detected: ${r2DeadStreak} consecutive R2-dead SKU(s) on this worker — KP session appears broken`;
         onProgress?.({
           currentProduct: productName,
           currentSource: 'round2',
-          currentAction: `⏭ R2 KP DISABLED for this worker (adbrainSkipR2Kp=true). Skipping R2 KP re-expansion — every seed would fail on this Chrome profile's dead Google Ads session. R1 data (${kp1RowsArr.length} row(s)) preserved.`,
+          currentAction: `⏭ R2 KP AUTO-SKIP (${reason}). R1 data (${kp1RowsArr.length} row(s)) preserved. R2 will retry automatically on the SKU after the KP session recovers (or a successful R2 anywhere in the fleet resets the streak).`,
           logKind: 'warn',
         });
         kp1ForR2.length = 0; // clear so the R2 for-loop below runs 0 iterations
@@ -4886,6 +4895,41 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           logKind: 'ok',
         });
       }
+      // Update the cross-SKU R2 health streak: if we bailed with
+      // r2ConsecutiveKpDead >= 2 OR ended with ALL seeds dead, this SKU
+      // counts as R2-dead. If ANY R2 seed succeeded (kp2RowCount > 0),
+      // reset the streak — KP is back. Skipped when we didn't attempt R2
+      // this SKU (totalKp1 === 0 with autoSkip active — see block above).
+      try {
+        if (typeof chrome !== 'undefined' && chrome.storage?.local && totalKp1 > 0) {
+          const wasR2Dead = kp2RowCount === 0 && r2DegradedSeeds >= Math.min(2, totalKp1);
+          if (wasR2Dead) {
+            const s = await chrome.storage.local.get('adbrainR2DeadStreak');
+            const next = Number(s?.adbrainR2DeadStreak || 0) + 1;
+            await chrome.storage.local.set({ adbrainR2DeadStreak: next });
+            if (next === 2) {
+              onProgress?.({
+                currentProduct: productName,
+                currentSource: 'round2',
+                currentAction: `⏭ AUTO-SKIP ARMED: ${next} consecutive R2-dead SKU(s) on this worker. Next SKU will skip R2 KP entirely until a successful R2 anywhere resets the streak. No operator action needed — worker is self-healing.`,
+                logKind: 'warn',
+              });
+            }
+          } else if (kp2RowCount > 0) {
+            // R2 succeeded — reset the streak. KP session is back.
+            const s = await chrome.storage.local.get('adbrainR2DeadStreak');
+            if (Number(s?.adbrainR2DeadStreak || 0) > 0) {
+              await chrome.storage.local.set({ adbrainR2DeadStreak: 0 });
+              onProgress?.({
+                currentProduct: productName,
+                currentSource: 'round2',
+                currentAction: `✅ R2 KP RECOVERED: streak reset to 0. Full R2 re-expansion re-enabled for this worker.`,
+                logKind: 'ok',
+              });
+            }
+          }
+        }
+      } catch {}
 
       // ----- Related-search drain -----
       // Process the related-searches discovered during R1/R2 SERPs as
