@@ -1071,6 +1071,32 @@ async function pollWorkerCommands() {
           }).catch(() => {});
           bufferActivity({ level: 'ok', source: 'cmd', message: `Reconnect command received — force-armed (userStoppedArm cleared). Will auto-claim next chunk.` });
           setTimeout(() => workerAutoPollTick().catch(() => {}), 200);
+        } else if (c.command === 'graceful_reload') {
+          // NON-DESTRUCTIVE update path. Same effect as hard_reset
+          // (chrome.runtime.reload picks up new files) BUT waits for the
+          // current SKU to finish first. Preserves the ~5-10 min of
+          // wall-clock work the worker has already put into the in-flight
+          // product. Used by the watchdog when new files arrive AND the
+          // worker is mid-SKU; the watchdog uses hard_reset only when the
+          // engine is idle.
+          //
+          // Implementation: set state.reloadWhenIdle. onProductDone /
+          // onProductFailed handlers check this flag and call
+          // chrome.runtime.reload() themselves when they fire (after the
+          // current SKU's rows are pushed). If no SKU is in flight when
+          // the command arrives, reload immediately — same behaviour as
+          // hard_reset for idle workers.
+          try { await acknowledgeCommand(c.id, state.workerId); } catch {}
+          const inFlight = state.claimedJobs.length > 0 && state.running;
+          if (!inFlight) {
+            bufferActivity({ level: 'ok', source: 'cmd', message: `Graceful-reload received (no SKU in flight) — reloading extension now.` });
+            try { await flushActivityBuffer(); } catch {}
+            setTimeout(() => { try { chrome.runtime.reload(); } catch {} }, 200);
+            continue;
+          }
+          state.reloadWhenIdle = true;
+          bufferActivity({ level: 'ok', source: 'cmd', message: `Graceful-reload received — will reload after current SKU finishes (${state.claimedJobs.length} in flight). Zero wall-clock waste.` });
+          continue;
         } else if (c.command === 'hard_reset') {
           // NUCLEAR OPTION for stuck engines.
           //
@@ -1641,6 +1667,15 @@ async function _handleStartInner(msg) {
                 pushLog(`jobs:markDone failed (will retry on heartbeat): ${e.message}`, 'err');
               }
             }
+            // Graceful-reload check — if the operator (or watchdog) queued
+            // a reload via the graceful_reload command, honour it now that
+            // this SKU's push has completed. Zero wall-clock waste — the
+            // current SKU's work is already flushed to the manager.
+            if (state.reloadWhenIdle) {
+              bufferActivity({ level: 'ok', source: 'cmd', message: `Graceful-reload: SKU finished, reloading extension now to pick up new files.` });
+              try { await flushActivityBuffer(); } catch {}
+              setTimeout(() => { try { chrome.runtime.reload(); } catch {} }, 200);
+            }
           },
           // Engine calls this when a product genuinely cannot be processed
           // (no product image, repeated KP failure, etc.). Distributed mode
@@ -1703,6 +1738,15 @@ async function _handleStartInner(msg) {
               message: `Product failed: ${cleanUrl} — ${reason || 'unknown'}`,
               productUrl: cleanUrl,
             });
+            // Graceful-reload check — even on failure, this SKU boundary
+            // is a safe point to reload (all state persisted, the
+            // release-stale mechanism will re-claim the SKU under new
+            // code if we didn't already mark it failed).
+            if (state.reloadWhenIdle) {
+              bufferActivity({ level: 'ok', source: 'cmd', message: `Graceful-reload: SKU failed but boundary reached, reloading extension now.` });
+              try { await flushActivityBuffer(); } catch {}
+              setTimeout(() => { try { chrome.runtime.reload(); } catch {} }, 200);
+            }
           },
         }
       );
