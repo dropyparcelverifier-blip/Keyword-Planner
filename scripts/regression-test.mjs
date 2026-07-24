@@ -987,7 +987,7 @@ async function run() {
     patch: { body_html: 'x '.repeat(900) + '<script type="application/ld+json">{}</script> unlike Amazon our product is better' },
     validationContext: { competitorBrands: ['Amazon'] },
   });
-  assert(preCompetitor.data.preflight.critical.some(c => c.id === 'competitor_brand_Amazon'), 'PREF.10 competitor brand in copy critical raised');
+  assert(preCompetitor.data.preflight.critical.some(c => c.id === 'competitor_brand_amazon'), 'PREF.10 competitor brand in copy critical raised (id now normalised lower-case)');
   // Bad product_category shape → critical.
   const preBadCat = await req('POST', '/api/shopify/validate-patch', {
     patch: { product_category: 'skincare' },
