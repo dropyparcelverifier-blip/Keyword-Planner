@@ -174,9 +174,37 @@ function renderRecent() {
 
 // ─────────── Buttons + Log ───────────
 function renderControls() {
-  $('pauseBtn').disabled  = !state.running;
-  $('resumeBtn').disabled = state.running || (state.workerArmed && !state.paused);
-  $('stopBtn').disabled   = !state.running && !state.workerArmed;
+  // State-aware visibility. Hide buttons that don't apply so the operator
+  // sees only what's actionable in the current state. Previously buttons
+  // were greyed via `disabled` — three always-visible controls creates
+  // visual clutter and forces the user to reason about which is legal
+  // right now. Now: only relevant buttons render.
+  const canPause  = state.running;
+  const canResume = !state.running && (state.paused || !state.workerArmed);
+  const canStop   = state.running || state.workerArmed;
+  $('pauseBtn').style.display  = canPause  ? '' : 'none';
+  $('resumeBtn').style.display = canResume ? '' : 'none';
+  $('stopBtn').style.display   = canStop   ? '' : 'none';
+  // If ALL controls are hidden, the Controls card would render empty.
+  // Show a subtle 'Idle — nothing to do' hint instead so the operator
+  // knows the section is intentionally blank, not broken.
+  const controlsRow = document.querySelector('.row-btns');
+  if (controlsRow) {
+    const anyVisible = canPause || canResume || canStop;
+    controlsRow.style.display = anyVisible ? '' : 'none';
+    let emptyNote = document.getElementById('controlsEmptyNote');
+    if (!anyVisible) {
+      if (!emptyNote) {
+        emptyNote = document.createElement('div');
+        emptyNote.id = 'controlsEmptyNote';
+        emptyNote.style.cssText = 'color: var(--text-3); font-size: 11px; font-style: italic; padding: 4px 0;';
+        emptyNote.textContent = 'Idle — no controls applicable right now.';
+        controlsRow.parentNode.insertBefore(emptyNote, controlsRow);
+      }
+    } else if (emptyNote) {
+      emptyNote.remove();
+    }
+  }
 }
 
 function renderLog() {

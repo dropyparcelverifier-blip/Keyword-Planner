@@ -2469,17 +2469,59 @@ function renderWorkerFleet() {
         <td class="num" style="color:${(w.failed||0) > 0 ? 'var(--danger)' : 'var(--text-3)'};">${w.failed || 0}</td>
         <td style="white-space: nowrap; text-align: right;">
           <div class="worker-actions">
-            <button data-worker="${esc(w.worker_id)}" data-monitor="1" class="wa wa-primary" title="Monitor — full status, controls, filtered log" onclick="window.openWorkerMonitor && window.openWorkerMonitor('${esc(w.worker_id)}')">🖥</button>
-            <button data-worker="${esc(w.worker_id)}" data-cmd="wake"   class="wa wa-ok"      title="Wake — start claiming (respects Stop)">▶</button>
-            <button data-worker="${esc(w.worker_id)}" data-cmd="reconnect" class="wa wa-warn"  title="Force reconnect — overrides Stop">⟳</button>
-            <button data-worker="${esc(w.worker_id)}" data-cmd="pause"  class="wa"            title="Pause after current SKU">⏸</button>
-            <span class="wa-sep"></span>
-            <button data-worker="${esc(w.worker_id)}" data-release-worker="${esc(w.worker_id)}" class="wa wa-danger" title="Release claims back to queue">↻</button>
-            <button data-worker="${esc(w.worker_id)}" data-cmd="stop"   class="wa wa-danger" title="Stop and disarm">■</button>
-            <span class="wa-sep"></span>
-            <button data-worker="${esc(w.worker_id)}" data-wol="1"       class="wa wa-primary" title="Wake-on-LAN — magic packet (same LAN only)">🔌</button>
-            <button data-worker="${esc(w.worker_id)}" data-recover="1"   class="wa wa-mute"    title="Recovery guide">?</button>
-            <button data-worker="${esc(w.worker_id)}" data-remove-worker="1" class="wa wa-mute" title="Remove from roster (ghost / decommissioned)">🗑</button>
+            ${(() => {
+              // State-aware action set — show only buttons that make sense
+              // for the worker's current state. Cuts row clutter from 9
+              // buttons to 2-4 relevant ones. Monitor is always visible
+              // (useful anytime). Everything else conditions on state.
+              const hb = Number(w.last_heartbeat || 0);
+              const hbAgo = hb ? Date.now() - hb : Infinity;
+              const isOnline    = hb && hbAgo < 3 * 60 * 1000;         // <3 min = fresh
+              const isOffline   = hbAgo > 5 * 60 * 1000;               // >5 min = offline
+              const isShutDown  = hbAgo > 4 * 3600 * 1000;             // >4 h = probably powered off
+              const inFlight    = Number(w.in_flight || 0) > 0;
+              const isFrozenSt  = stage.stuck === true;
+              const isStoppedByUser = stage.label === 'stopped by user';
+              const idle        = isOnline && !inFlight;
+              const running     = isOnline && inFlight && !isFrozenSt;
+              const bts = [];
+              bts.push(`<button data-worker="${esc(w.worker_id)}" data-monitor="1" class="wa wa-primary" title="Monitor — full status, controls, filtered log" onclick="window.openWorkerMonitor && window.openWorkerMonitor('${esc(w.worker_id)}')">🖥</button>`);
+              // ▶ Wake — only when idle / stopped / offline (has something to do)
+              if (idle || isStoppedByUser || isOffline) {
+                bts.push(`<button data-worker="${esc(w.worker_id)}" data-cmd="wake" class="wa wa-ok" title="Wake — start claiming (respects Stop)">▶</button>`);
+              }
+              // ⟳ Reconnect — only when stopped-by-user or frozen (overrides state)
+              if (isStoppedByUser || isFrozenSt) {
+                bts.push(`<button data-worker="${esc(w.worker_id)}" data-cmd="reconnect" class="wa wa-warn" title="Force reconnect — overrides Stop">⟳</button>`);
+              }
+              // ⏸ Pause — only when running
+              if (running) {
+                bts.push(`<button data-worker="${esc(w.worker_id)}" data-cmd="pause" class="wa" title="Pause after current SKU">⏸</button>`);
+              }
+              // ↻ Release claims — only when in_flight > 0
+              if (inFlight) {
+                bts.push(`<span class="wa-sep"></span>`);
+                bts.push(`<button data-worker="${esc(w.worker_id)}" data-release-worker="${esc(w.worker_id)}" class="wa wa-danger" title="Release claims back to queue">↻</button>`);
+              }
+              // ■ Stop — only when running or has claims to disarm
+              if (running || inFlight) {
+                bts.push(`<button data-worker="${esc(w.worker_id)}" data-cmd="stop" class="wa wa-danger" title="Stop and disarm">■</button>`);
+              }
+              // 🔌 Wake-on-LAN — only when likely powered off
+              if (isShutDown) {
+                bts.push(`<span class="wa-sep"></span>`);
+                bts.push(`<button data-worker="${esc(w.worker_id)}" data-wol="1" class="wa wa-primary" title="Wake-on-LAN — magic packet (same LAN only)">🔌</button>`);
+              }
+              // ? Recovery guide — only when frozen or offline
+              if (isFrozenSt || isOffline) {
+                bts.push(`<button data-worker="${esc(w.worker_id)}" data-recover="1" class="wa wa-mute" title="Recovery guide">?</button>`);
+              }
+              // 🗑 Remove — only when offline > 1 hr (ghost cleanup)
+              if (hbAgo > 60 * 60 * 1000) {
+                bts.push(`<button data-worker="${esc(w.worker_id)}" data-remove-worker="1" class="wa wa-mute" title="Remove from roster (ghost / decommissioned)">🗑</button>`);
+              }
+              return bts.join('');
+            })()}
           </div>
         </td>
       </tr>`;
