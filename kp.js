@@ -585,6 +585,18 @@
     // seeds wastes 10+ min per stale-session run. The engine has its own
     // session-dead detection that skips the remaining R2 seeds once the
     // first one times out, so failing fast here is correct.
+    //
+    // UNATTENDED WORKER GUARD: once the manual click has timed out this
+    // session, no human is watching. Every subsequent seed's 30s wait is
+    // pure waste. Session-cache the timeout and fail-fast next time. Live
+    // data showed 90 minutes of one PC re-doing this loop on a single SKU
+    // — that's the pain this guard eliminates.
+    let manualPointless = false;
+    try { manualPointless = sessionStorage.getItem('kp_manual_wait_pointless') === '1'; } catch {}
+    if (manualPointless) {
+      kpLog(`Auto-click failed AND manual-click already timed out earlier this session — failing fast (no human to click). Fix Google Ads login + retry the batch.`, 'err');
+      throw new Error('Auto-click failed; manual fallback disabled after first timeout this session');
+    }
     kpLog(`Auto-click failed. ACTIVATING the KP tab — please click "Discover new keywords" within 30s; otherwise the engine will skip this seed.`, 'err');
     try {
       chrome.runtime.sendMessage({ action: 'activateMyTab' }).catch(() => {});
@@ -595,6 +607,9 @@
       kpLog('Discover Keywords pane opened (thanks for the manual click!)', 'ok');
       await humanPause(900);
     } catch (e) {
+      // Manual click didn't happen. Session-cache this fact so subsequent
+      // seeds skip the 30s wait entirely — no human is watching this PC.
+      try { sessionStorage.setItem('kp_manual_wait_pointless', '1'); } catch {}
       const dialogs = document.querySelectorAll('[role="dialog"]').length;
       const inputs  = document.querySelectorAll('input, textarea').length;
       const btnText = Array.from(document.querySelectorAll('button, [role="button"]'))
@@ -603,7 +618,7 @@
         .map(b => (b.innerText || '').trim().slice(0, 20))
         .filter(Boolean)
         .join(' | ');
-      kpLog(`gave up — dialogs:${dialogs} inputs:${inputs}; visible buttons: [${btnText}]`, 'err');
+      kpLog(`gave up — dialogs:${dialogs} inputs:${inputs}; visible buttons: [${btnText}]. Skipping manual-click wait for the rest of this session (unattended worker detected).`, 'err');
       throw e;
     }
   }
