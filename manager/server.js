@@ -3108,6 +3108,140 @@ const server = http.createServer(async (req, res) => {
     // GET current product from Shopify by URL. Extracts the handle, calls
     // /admin/api/2024-10/products.json?handle=… . Returns the current
     // title, body_html, tags, vendor, product_type, handle, SEO meta,
+    // Live-page audit — fetch the rendered product HTML from the public
+    // storefront (not Admin), extract every JSON-LD block, and run the same
+    // deep validation we do at push time PLUS duplicate-schema detection.
+    // Mirrors what Google Rich Results Test does. Runs post-push (auto-
+    // triggered ~5s after a successful update-product) so the operator sees
+    // whether the theme's schemas + ours combine into a clean rich-results
+    // eligible page — or if we've caused Duplicate-brand / Unparsable-data
+    // errors. Read-only, no Shopify creds needed (public URL fetch).
+    if (m === 'GET' && p === '/api/shopify/audit-live-page') {
+      const auditUrl = new URL(req.url, 'http://x');
+      const targetUrl = auditUrl.searchParams.get('url') || '';
+      if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
+        return send(res, 400, { ok: false, error: 'url query param required (must be http/https)' });
+      }
+      // Fetch the public storefront HTML. No creds. Follow redirects (handle
+      // drift protection). Timeout 12s — Shopify page usually served in <2s.
+      let html;
+      let finalUrl = targetUrl;
+      try {
+        const controller = new AbortController();
+        const to = setTimeout(() => controller.abort(), 12_000);
+        const resp = await fetch(targetUrl, {
+          redirect: 'follow',
+          signal: controller.signal,
+          headers: { 'User-Agent': 'AdBrain-Audit/1.0 (compatible; Googlebot fingerprint)' },
+        });
+        clearTimeout(to);
+        finalUrl = resp.url || targetUrl;
+        if (!resp.ok) return send(res, 502, { ok: false, error: `fetch failed: HTTP ${resp.status}`, fetched_url: finalUrl });
+        html = await resp.text();
+      } catch (e) {
+        return send(res, 502, { ok: false, error: `fetch error: ${e.message}` });
+      }
+      // Extract every JSON-LD block from the rendered HTML.
+      const blockRegex = /<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi;
+      const raw = [...html.matchAll(blockRegex)].map((m2) => m2[1]);
+      const blocks = [];
+      const typeCounts = {};
+      const critical = [];
+      const warnings = [];
+      for (let i = 0; i < raw.length; i++) {
+        const text = raw[i].trim();
+        const entry = { index: i, length: text.length, parsed: false, types: [], error: null };
+        if (!text) { entry.error = 'empty block'; blocks.push(entry); continue; }
+        try {
+          const obj = JSON.parse(text);
+          entry.parsed = true;
+          const items = Array.isArray(obj) ? obj : [obj];
+          for (const it of items) {
+            const t = String(it?.['@type'] || 'Unknown');
+            entry.types.push(t);
+            typeCounts[t] = (typeCounts[t] || 0) + 1;
+          }
+          entry.raw = items;
+        } catch (e) {
+          entry.error = `JSON.parse failed: ${e.message.slice(0, 200)}`;
+          // Peek at the leading chars — surfaces the theme's <span> injection
+          // that broke Cetaphil.
+          const peek = text.slice(0, 150).replace(/\s+/g, ' ');
+          entry.peek = peek;
+          critical.push({
+            id: 'unparsable_jsonld',
+            message: `Block ${i + 1} is unparsable — Google will flag "Unparsable structured data" and drop ALL rich results from this page. First 150 chars: ${peek}`,
+          });
+        }
+        blocks.push(entry);
+      }
+      // Duplicate-type detection — Google merges duplicates and flags
+      // 'Duplicate field X'. Common on Shopify: theme + our push both emit
+      // Product or both emit BreadcrumbList.
+      for (const [t, n] of Object.entries(typeCounts)) {
+        if (n > 1) {
+          warnings.push({
+            id: 'duplicate_schema_type',
+            message: `${n} copies of ${t} schema found on the page. Google typically merges them and flags "Duplicate field X". If Product is duplicated, the theme is emitting one AND our push is emitting one — regenerate our block without Product.`,
+          });
+        }
+      }
+      // Deep validation of each type — same rules as push-time preflight.
+      const faq = blocks.flatMap(b => b.raw || []).find(o => String(o?.['@type']).toLowerCase() === 'faqpage');
+      if (faq) {
+        const me = Array.isArray(faq.mainEntity) ? faq.mainEntity : [];
+        if (me.length !== 10) warnings.push({ id: 'faqpage_count', message: `Live FAQPage has ${me.length} entries — theme requires exactly 10.` });
+        const seen = new Set();
+        let bad = 0, empty = 0, dup = 0;
+        for (const q of me) {
+          const name = String(q?.name || '').trim();
+          const answer = String(q?.acceptedAnswer?.text || '').trim();
+          if (!name || String(q?.['@type']).toLowerCase() !== 'question') bad++;
+          else if (!answer) empty++;
+          else { const norm = name.toLowerCase(); if (seen.has(norm)) dup++; seen.add(norm); }
+        }
+        if (bad > 0) critical.push({ id: 'faqpage_bad_shape', message: `Live FAQPage has ${bad} malformed Question(s). Google drops these.` });
+        if (empty > 0) critical.push({ id: 'faqpage_empty_answer', message: `Live FAQPage has ${empty} empty answer(s). Google drops these.` });
+        if (dup > 0) warnings.push({ id: 'faqpage_duplicate_q', message: `Live FAQPage has ${dup} duplicate question(s).` });
+      }
+      const howto = blocks.flatMap(b => b.raw || []).find(o => String(o?.['@type']).toLowerCase() === 'howto');
+      if (howto) {
+        const steps = Array.isArray(howto.step) ? howto.step : [];
+        if (steps.length < 3) warnings.push({ id: 'howto_few_steps', message: `Live HowTo has ${steps.length} step(s) — Google prefers 3+.` });
+        let bad = 0;
+        for (const s of steps) {
+          const t = String(s?.['@type'] || '').toLowerCase();
+          if (t !== 'howtostep' || !String(s?.text || s?.name || '').trim()) bad++;
+        }
+        if (bad > 0) critical.push({ id: 'howto_bad_step', message: `Live HowTo has ${bad} malformed step(s).` });
+      }
+      const product = blocks.flatMap(b => b.raw || []).find(o => String(o?.['@type']).toLowerCase() === 'product');
+      if (product && typeCounts['Product'] > 1) {
+        warnings.push({ id: 'product_duplicate', message: `Live page has ${typeCounts['Product']} Product schemas. This causes Google "Duplicate field brand" warnings. Remove Product schema from our body_html push.` });
+      }
+      // Mojibake check on live HTML — catches issues that only surface post-
+      // render (e.g., Shopify re-encoded some chars).
+      if (/Ã[¢©®]|â€™|â€œ|â€|Â|â€/.test(html)) {
+        warnings.push({ id: 'live_mojibake', message: 'Live HTML contains mojibake (double-encoded UTF-8). Reader will see garbage in visible text.' });
+      }
+      return send(res, 200, {
+        ok: true,
+        target_url: targetUrl,
+        fetched_url: finalUrl,
+        html_bytes: html.length,
+        jsonld_block_count: blocks.length,
+        type_inventory: typeCounts,
+        blocks: blocks.map(b => ({ index: b.index, length: b.length, parsed: b.parsed, types: b.types, error: b.error, peek: b.peek })),
+        critical,
+        warnings,
+        summary: {
+          critical_count: critical.length,
+          warning_count: warnings.length,
+          verdict: critical.length === 0 ? (warnings.length === 0 ? 'CLEAN' : 'WARN') : 'FAIL',
+        },
+      });
+    }
+
     // images (readonly for context), variants (readonly for context only —
     // NEVER round-tripped to update). Used to build the Claude prompt.
     if (m === 'GET' && p === '/api/shopify/get-product') {

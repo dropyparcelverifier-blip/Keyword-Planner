@@ -583,7 +583,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // Logged to the console so users can verify which build is actually
 // running when they refresh — 'my changes aren't showing' is almost
 // always a cached JS problem. Bumped whenever wiring changes.
-console.info('[adbrain] manager UI build 2026-07-21c (faq-count-10-mandatory)');
+console.info('[adbrain] manager UI build 2026-07-24a (live-page-audit + deep-schema-preflight)');
 // Clear the stale-cache banner if it was shown (inline script pre-set it).
 const _staleBanner = document.getElementById('globalErrorBanner');
 if (_staleBanner && _staleBanner.textContent.includes('STALE CACHE')) {
@@ -5630,7 +5630,36 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
               ${tp.dropped?.length ? ` · <span style="color:var(--warn);">${tp.dropped.length} tag(s) dropped by Claude</span> (${tp.dropped.map(t => `<code>${esc(t)}</code>`).join(', ')}) — check if any of these anchor auto-collections you need this product in` : ''}
             </div>`
           : '';
-        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${sentKeys.map(k => `<code>${k}</code>`).join(', ') || '(none)'}${mfNote}${altNote}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}${snapshotNote}</div>${tagPreserveNote}${autoRoutedNote}${faqFanoutNote}${skippedNote}`;
+        $('shopifyPushResult').innerHTML = `<div class="hint" style="color: var(--success);">✓ Updated. Fields sent: ${sentKeys.map(k => `<code>${k}</code>`).join(', ') || '(none)'}${mfNote}${altNote}${r.stripped?.length ? ` · Server also stripped: ${r.stripped.join(', ')}` : ''}${snapshotNote}</div>${tagPreserveNote}${autoRoutedNote}${faqFanoutNote}${skippedNote}<div id="shopifyLiveAuditSlot" class="hint" style="margin-top: 8px; color: var(--text-3);">🔎 Auditing live page against Google Rich Results rules… (waiting 6s for Shopify edge cache to refresh)</div>`;
+        // Live-page audit — wait 6s for Shopify to serve fresh HTML, then
+        // fetch the public storefront URL and check for duplicate schemas,
+        // JSON-LD parse errors, malformed FAQPage/HowTo, mojibake. Same
+        // rules Google Rich Results Test applies. Surfaces issues here
+        // instead of waiting days for GSC crawl.
+        setTimeout(async () => {
+          const slot = document.getElementById('shopifyLiveAuditSlot');
+          if (!slot) return;
+          try {
+            const audit = await api.shopifyAuditLivePage(productUrl);
+            if (!audit.ok) {
+              slot.innerHTML = `<span style="color:var(--warn);">⚠ Live-page audit failed: ${esc(audit.error || 'unknown')}</span>`;
+              return;
+            }
+            const verdictColor = audit.summary.verdict === 'CLEAN' ? 'var(--success)' : audit.summary.verdict === 'WARN' ? 'var(--warn)' : 'var(--danger)';
+            const verdictIcon = audit.summary.verdict === 'CLEAN' ? '✅' : audit.summary.verdict === 'WARN' ? '⚠' : '⛔';
+            const typeInv = Object.entries(audit.type_inventory).map(([t, n]) => `<code>${esc(t)}${n > 1 ? '×' + n : ''}</code>`).join(' ');
+            const critHtml = audit.critical.map(c => `<div style="color:var(--danger); margin-left:12px;">⛔ ${esc(c.message)}</div>`).join('');
+            const warnHtml = audit.warnings.map(w => `<div style="color:var(--warn); margin-left:12px;">⚠ ${esc(w.message)}</div>`).join('');
+            slot.innerHTML = `<div style="padding: 8px; background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 6px;">
+              <div style="color: ${verdictColor}; font-weight: 700;">${verdictIcon} Live-page audit: ${audit.summary.verdict} — ${audit.summary.critical_count} critical, ${audit.summary.warning_count} warning</div>
+              <div style="margin-top: 4px; font-size: 12px;">Schemas found on live page: ${typeInv || '<em>none</em>'} · ${audit.jsonld_block_count} JSON-LD block(s) · ${(audit.html_bytes/1024).toFixed(0)} KB HTML</div>
+              ${critHtml}
+              ${warnHtml}
+            </div>`;
+          } catch (e) {
+            slot.innerHTML = `<span style="color:var(--warn);">⚠ Live-page audit threw: ${esc(e.message)}</span>`;
+          }
+        }, 6000);
         toast('Shopify listing updated. Revert button available below if needed.', 'ok', { title: 'Pushed' });
         // Wire the just-pushed revert button.
         document.getElementById('shopifyRevertLastBtn')?.addEventListener('click', async (e) => {
