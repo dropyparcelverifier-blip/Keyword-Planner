@@ -5732,17 +5732,26 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
               slot.innerHTML = `<span style="color:var(--warn);">⚠ Live-page audit failed: ${esc(audit.error || 'unknown')}</span>`;
               return;
             }
-            const verdictColor = audit.summary.verdict === 'CLEAN' ? 'var(--success)' : audit.summary.verdict === 'WARN' ? 'var(--warn)' : 'var(--danger)';
-            const verdictIcon = audit.summary.verdict === 'CLEAN' ? '✅' : audit.summary.verdict === 'WARN' ? '⚠' : '⛔';
+            // CLEAN state → minimal single-line confirmation (no expanded
+            // panel). WARN / FAIL → full panel with all findings so the
+            // operator can act. Reduces visual clutter on the happy path
+            // (which should be MOST pushes after the deep preflight lands
+            // findings early).
             const typeInv = Object.entries(audit.type_inventory).map(([t, n]) => `<code>${esc(t)}${n > 1 ? '×' + n : ''}</code>`).join(' ');
-            const critHtml = audit.critical.map(c => `<div style="color:var(--danger); margin-left:12px;">⛔ ${esc(c.message)}</div>`).join('');
-            const warnHtml = audit.warnings.map(w => `<div style="color:var(--warn); margin-left:12px;">⚠ ${esc(w.message)}</div>`).join('');
-            slot.innerHTML = `<div style="padding: 8px; background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 6px;">
-              <div style="color: ${verdictColor}; font-weight: 700;">${verdictIcon} Live-page audit: ${audit.summary.verdict} — ${audit.summary.critical_count} critical, ${audit.summary.warning_count} warning</div>
-              <div style="margin-top: 4px; font-size: 12px;">Schemas found on live page: ${typeInv || '<em>none</em>'} · ${audit.jsonld_block_count} JSON-LD block(s) · ${(audit.html_bytes/1024).toFixed(0)} KB HTML</div>
-              ${critHtml}
-              ${warnHtml}
-            </div>`;
+            if (audit.summary.verdict === 'CLEAN') {
+              slot.innerHTML = `<span style="color: var(--success);">✅ Live-page audit: CLEAN</span> <span style="color: var(--text-3); font-size: 11px;">— ${typeInv || 'no schema'} · ${audit.jsonld_block_count} block(s) · ${(audit.html_bytes/1024).toFixed(0)} KB</span>`;
+            } else {
+              const verdictColor = audit.summary.verdict === 'WARN' ? 'var(--warn)' : 'var(--danger)';
+              const verdictIcon = audit.summary.verdict === 'WARN' ? '⚠' : '⛔';
+              const critHtml = audit.critical.map(c => `<div style="color:var(--danger); margin-left:12px;">⛔ ${esc(c.message)}</div>`).join('');
+              const warnHtml = audit.warnings.map(w => `<div style="color:var(--warn); margin-left:12px;">⚠ ${esc(w.message)}</div>`).join('');
+              slot.innerHTML = `<div style="padding: 8px; background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 6px;">
+                <div style="color: ${verdictColor}; font-weight: 700;">${verdictIcon} Live-page audit: ${audit.summary.verdict} — ${audit.summary.critical_count} critical, ${audit.summary.warning_count} warning</div>
+                <div style="margin-top: 4px; font-size: 12px;">Schemas found on live page: ${typeInv || '<em>none</em>'} · ${audit.jsonld_block_count} JSON-LD block(s) · ${(audit.html_bytes/1024).toFixed(0)} KB HTML</div>
+                ${critHtml}
+                ${warnHtml}
+              </div>`;
+            }
           } catch (e) {
             slot.innerHTML = `<span style="color:var(--warn);">⚠ Live-page audit threw: ${esc(e.message)}</span>`;
           }
