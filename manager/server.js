@@ -642,14 +642,29 @@ function validateShopifyPatch(patch, context = {}) {
     if (/aggregaterating|"AggregateRating"/i.test(bodyHtml)) {
       if (!context.hasReviewData) pushCrit('fabricated_agg_rating', 'body_html includes AggregateRating schema but no real review data was provided in the request — cannot be validated as truthful');
     }
-    // Competitor brand names in copy
+    // Competitor brand names in copy. Filter out the product's OWN vendor —
+    // Cetaphil's page must say "Cetaphil" in prose (product name, brand story,
+    // range comparisons). Live push showed this fire as a false positive:
+    // vendor=Cetaphil + cetaphil.com in top SERPs → 'cetaphil' added to
+    // competitorBrands → own brand rejected as competitor.
+    const ownVendor = String(context.ownVendor || '').toLowerCase().trim();
+    const seenBrands = new Set();
     for (const brand of (Array.isArray(context.competitorBrands) ? context.competitorBrands : [])) {
       if (!brand || brand.length < 3) continue;
+      const brandLc = brand.toLowerCase();
+      // Skip if this brand IS the product's own vendor (case-insensitive).
+      // Also skip substring matches — 'always' would falsely match 'always maxi'.
+      if (ownVendor && (brandLc === ownVendor || ownVendor.includes(brandLc) || brandLc.includes(ownVendor))) continue;
+      // Dedupe — earlier code passed some competitor lists with the same brand
+      // twice (e.g. once from vendor SERP hit, once from marketplace SERP hit),
+      // producing duplicate critical entries.
+      if (seenBrands.has(brandLc)) continue;
+      seenBrands.add(brandLc);
       const rx = new RegExp(`\\b${brand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
       // Allow the brand in JSON-LD (schema.org "brand" field is OUR brand);
       // reject in prose. Rough heuristic: strip <script>...</script> before check.
       const prose = bodyHtml.replace(/<script[\s\S]*?<\/script>/gi, ' ');
-      if (rx.test(prose)) pushCrit(`competitor_brand_${brand}`, `body_html mentions competitor brand "${brand}" in copy`);
+      if (rx.test(prose)) pushCrit(`competitor_brand_${brandLc}`, `body_html mentions competitor brand "${brand}" in copy`);
     }
   }
 
