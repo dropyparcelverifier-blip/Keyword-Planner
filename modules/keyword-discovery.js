@@ -4439,6 +4439,25 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         logKind: 'ok',
       });
 
+      // FAIL-FAST: if we have no seeds AND no KP1 rows, all downstream
+      // stages (R1 SERP cycle, R2 KP re-expansion, Amazon Round, related
+      // search drain) will burn 5-10 min on empty data producing nothing.
+      // Bail early, mark done, move to next product. Common causes: KP
+      // session expired, Google throttling, product name unrecognised.
+      // We DO keep going if kp1RowsArr has some rows even with 0 seeds —
+      // that's a partial win worth pushing through.
+      if (round1Seeds.length === 0 && kp1RowsArr.length === 0) {
+        onProgress?.({
+          currentProduct: productName,
+          currentSource: 'round1',
+          currentAction: `⏭ FAIL-FAST: zero seeds + zero KP rows — bailing early to save ~5-10 min. Product yields nothing without KP or PAA data. Fix Google Ads session or product name and requeue.`,
+          logKind: 'warn',
+        });
+        productsDone++;
+        try { await onProductDone(cleanUrl); } catch {}
+        continue; // to next product in the outer loop
+      }
+
       for (let si = 0; si < round1Seeds.length; si++) {
         if (shouldStop() || report.size >= productCap) break;
         const seedRow = round1Seeds[si];
