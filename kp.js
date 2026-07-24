@@ -489,8 +489,35 @@
     }
     await dismissOverlays();
 
+    // FAST PATH — session-scoped cache: once click strategies have failed
+    // this session (Google's DOM revamp), skip straight to direct URL nav.
+    // Every seed after the first was burning ~65s on the 45s hydrate wait
+    // + 3× click attempts that we know will fail. Now: skip to nav (~5s).
+    // Cache is per-tab-session, so a Google DOM restoration resets it on
+    // next KP tab reload.
+    let clickBroken = false;
+    try { clickBroken = sessionStorage.getItem('kp_click_broken') === '1'; } catch {}
+    if (clickBroken) {
+      kpLog('click strategies known-broken this session — skipping to direct URL nav', 'warn');
+      const target = `${location.origin}/aw/keywordplanner/ideas/new${location.search}`;
+      location.href = target;
+      await sleep(3500);
+      await waitFor(() => document.querySelectorAll('button, [role="button"]').length > 5,
+        { timeoutMs: 20000, name: 'KP shell re-hydration after direct nav' });
+      await humanPause(800);
+      if (isOnIdeasPage()) {
+        kpLog('Discover Keywords pane opened via direct URL navigation (fast path)', 'ok');
+        return;
+      }
+      // Fast path failed too — clear the flag and fall through to full flow.
+      try { sessionStorage.removeItem('kp_click_broken'); } catch {}
+    }
+
+    // Shorter hydrate wait (12s vs 45s). If Google's DOM was going to hydrate
+    // the interactive card, it does so within a few seconds. Waiting 45s
+    // on failure just multiplies wasted time per seed.
     kpLog('waiting for interactive "Discover new keywords" card to hydrate');
-    const card = await waitForInteractiveDiscoverCard(45000);
+    const card = await waitForInteractiveDiscoverCard(12000);
     if (card) {
       // Build a candidate list — nested button/anchor first (usually the real
       // handler), then the target from findRealClickTarget (spatial), then
@@ -529,6 +556,9 @@
     // already on that path (in which case direct navigation wouldn't help).
     if (!/\/ideas\/new(\/|$|\?)/.test(location.pathname + location.search)) {
       try {
+        // Mark click strategies broken so future seeds this session skip
+        // the 12s hydrate wait + click attempts and go straight to nav.
+        try { sessionStorage.setItem('kp_click_broken', '1'); } catch {}
         const target = `${location.origin}/aw/keywordplanner/ideas/new${location.search}`;
         kpLog(`click strategies failed — navigating directly to ${target.slice(0, 100)}`, 'warn');
         location.href = target;
