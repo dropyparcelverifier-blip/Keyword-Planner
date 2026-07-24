@@ -1864,6 +1864,36 @@ async function handleResetProgress() {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const action = msg?.action;
 
+  // Sandbox-origin image fetch relay. Sandbox context is origin: null and
+  // subject to strict CORS; background SW has <all_urls> host_permissions
+  // and can fetch anything. Sandbox posts { action: 'imgFetch', url } to
+  // offscreen, offscreen forwards here, we fetch, return bytes as base64
+  // (structured-clone friendly across the sandbox postMessage boundary).
+  if (action === 'imgFetch') {
+    (async () => {
+      const url = String(msg?.url || '');
+      if (!url) return sendResponse({ ok: false, error: 'no url' });
+      try {
+        const controller = new AbortController();
+        const to = setTimeout(() => controller.abort(), 15_000);
+        const resp = await fetch(url, { credentials: 'omit', signal: controller.signal });
+        clearTimeout(to);
+        if (!resp.ok) return sendResponse({ ok: false, error: `http ${resp.status}` });
+        const type = resp.headers.get('content-type') || '';
+        const buf = await resp.arrayBuffer();
+        // Return as base64 — ArrayBuffer/Blob don't survive extension message serialization.
+        const bytes = new Uint8Array(buf);
+        let bin = '';
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        const b64 = btoa(bin);
+        sendResponse({ ok: true, contentType: type, base64: b64 });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message || 'fetch failed' });
+      }
+    })();
+    return true; // async response
+  }
+
   if (action === 'getState') {
     coldStart.then(() => {
       sendResponse({

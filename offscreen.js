@@ -42,6 +42,20 @@ window.addEventListener('message', (event) => {
     resolveReady();
     return;
   }
+  // Sandbox-initiated image fetch. Sandbox posts { __request: 'imgFetch',
+  // reqId, url } — we forward to background (which has <all_urls> perms
+  // and bypasses CORS), then post the base64 response back to sandbox.
+  if (msg.__request === 'imgFetch' && msg.reqId != null) {
+    (async () => {
+      try {
+        const resp = await chrome.runtime.sendMessage({ action: 'imgFetch', url: msg.url });
+        sandboxFrame().contentWindow.postMessage({ __response: 'imgFetch', reqId: msg.reqId, ...resp }, '*');
+      } catch (e) {
+        sandboxFrame().contentWindow.postMessage({ __response: 'imgFetch', reqId: msg.reqId, ok: false, error: e.message }, '*');
+      }
+    })();
+    return;
+  }
   const { id, ok, error, ...rest } = msg;
   if (!id) return;
   const p = pending.get(id);
