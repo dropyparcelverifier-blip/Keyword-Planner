@@ -5084,7 +5084,7 @@ function renderShopifyModalBody({ currentProduct, productUrl, prompt, impactRows
       <span class="hint">→</span>
       <button class="small" id="shopifyStep3Btn" title="Parses your pasted JSON, shows the before/after diff against your current Shopify listing + preflight rubric. Push button appears if preflight passes.">3️⃣ Preview diff</button>
       <span class="spacer" style="flex:1;"></span>
-      <button class="small secondary" id="shopifyHistoryBtn" title="Show every previous push to this product with a Revert button per row. Only pushes made AFTER snapshot support was deployed can be reverted.">🕘 Push history</button>
+      <button class="small secondary" id="shopifyHistoryBtn" style="display:none;" title="Show every previous push to this product with a Revert button per row. Only pushes made AFTER snapshot support was deployed can be reverted.">🕘 Push history</button>
       <button class="small secondary" id="shopifyDefsBtn" title="Show every metafield definition on your store + which alias our resolver would map each to. Use this when metafields keep coming back blank after push — the mismatch will be visible in one place.">🔍 Inspect metafield definitions</button>
     </div>
     <div id="shopifyHistoryPanel" style="display:none; margin-bottom: 12px; padding: 10px 14px; background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 6px;"></div>
@@ -5323,6 +5323,20 @@ function wireShopifyModalHandlers(productId, allowlist, validationContext = {}, 
       panel.innerHTML = `<div class="hint" style="color:var(--danger);">Failed to load definitions: ${esc(e.message)}. Check that the manager is running the latest code (⚠ RESTART pill?) — this endpoint was added in commit 74da03f.</div>`;
     }
   });
+  // Preflight the push-history count — reveal the button only if this
+  // product has at least one prior push. First-time pushes have nothing
+  // to view, and hiding the button avoids the "🕘 Push history → No push
+  // history recorded" click-dead-end. Runs async on modal open; button
+  // pops in once history count > 0 comes back.
+  (async () => {
+    try {
+      const r = await api.shopifyPushHistory(productId);
+      if ((r?.history || []).length > 0) {
+        const btn = $('shopifyHistoryBtn');
+        if (btn) btn.style.display = '';
+      }
+    } catch {}
+  })();
   // Push-history panel — lists every prior push to this product with a
   // Revert-per-row button. Only pushes made AFTER snapshot support landed
   // (11af892) can be reverted; older ones have empty snapshots and show
