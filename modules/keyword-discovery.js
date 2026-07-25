@@ -3220,10 +3220,36 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       if (skippedSeeds.length > 0) {
         onProgress?.({ currentProduct: productName, currentSource: 'kp', currentAction: `Skipped ${skippedSeeds.length} duplicate seed(s) — already covered by another seed in the list: ${skippedSeeds.join(' | ')}`, logKind: 'ok' });
       }
-      onProgress?.({ currentProduct: productName, currentSource: 'kp', currentAction: `Running Keyword Planner for ${kpSeeds.length} seed(s): "${kpSeeds.join('", "')}"`, keywordCount: report.size });
-      const kpResult = await getKeywordPlannerIdeas(kpSeeds, kpUrl, kpMaxPerProduct,
-        (m) => onProgress?.({ currentProduct: productName, currentAction: m }),
-        { productUrl: cleanUrl });
+      // R1 KP auto-skip. Same streak counter as R2 (adbrainR2DeadStreak);
+      // if >= 2 consecutive KP-dead SKUs on this worker, skip R1 KP entirely
+      // too. Saves ~5-8 min per SKU on a broken Google Ads session. The
+      // engine still runs PAA + autosuggest + Amazon Round, which don't
+      // touch Google Ads at all. Yield drops to ~30-100 kw/SKU (vs 500+
+      // with working KP) but every SKU completes and produces SOME output
+      // instead of 0. Manual opts.skipR1Kp override also honoured.
+      let r1KpStreak = 0;
+      try {
+        if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+          const s = await chrome.storage.local.get('adbrainR2DeadStreak');
+          r1KpStreak = Number(s?.adbrainR2DeadStreak || 0);
+        }
+      } catch {}
+      const skipR1Kp = opts.skipR1Kp === true || r1KpStreak >= 2;
+      let kpResult;
+      if (skipR1Kp) {
+        onProgress?.({
+          currentProduct: productName,
+          currentSource: 'kp',
+          currentAction: `⏭ R1 KP AUTO-SKIP (${opts.skipR1Kp === true ? 'operator flag' : `streak=${r1KpStreak}`}). Google Ads session broken on this worker — engine will run PAA + autosuggest + Amazon only. Yield ~30-100 kw/SKU (vs 500+ with working KP).`,
+          logKind: 'warn',
+        });
+        kpResult = { ok: false, error: 'r1_kp_skipped_auto', keywords: [] };
+      } else {
+        onProgress?.({ currentProduct: productName, currentSource: 'kp', currentAction: `Running Keyword Planner for ${kpSeeds.length} seed(s): "${kpSeeds.join('", "')}"`, keywordCount: report.size });
+        kpResult = await getKeywordPlannerIdeas(kpSeeds, kpUrl, kpMaxPerProduct,
+          (m) => onProgress?.({ currentProduct: productName, currentAction: m }),
+          { productUrl: cleanUrl });
+      }
       const kpKeywords = (kpResult?.ok ? (kpResult.keywords || []) : []).filter(Boolean);
       if (!kpResult?.ok) {
         onProgress?.({

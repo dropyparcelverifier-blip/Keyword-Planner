@@ -1449,6 +1449,12 @@ async function _handleStartInner(msg) {
           // toggle takes effect on the NEXT SKU without a full worker
           // restart.
           skipR2Kp: (await chrome.storage.local.get('adbrainSkipR2Kp')).adbrainSkipR2Kp === true,
+          // Manual R1 KP skip — for operators whose Google Ads account is
+          // known-flagged. Bypasses ALL KP calls (both R1 and R2). Every
+          // SKU runs on PAA + autosuggest + Amazon only. Yield drops but
+          // every SKU still completes with SOMETHING. Auto-armed when the
+          // adbrainR2DeadStreak counter hits 2 (see keyword-discovery.js).
+          skipR1Kp: (await chrome.storage.local.get('adbrainSkipR1Kp')).adbrainSkipR1Kp === true,
           shouldStop: () => state.stopRequested,
           report: reportMap,
           excludeUrls,
