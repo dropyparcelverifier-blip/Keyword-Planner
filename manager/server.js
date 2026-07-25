@@ -2252,7 +2252,19 @@ const server = http.createServer(async (req, res) => {
     }
     if (m === 'POST' && p === '/api/jobs/claim') {
       const b = await readJson(req);
-      const claimed = claimJobs(String(b.workerId || ''), String(b.batchId || ''), Math.max(1, Math.min(50, b.limit || 5)));
+      const workerId = String(b.workerId || '');
+      // Streaming claim policy — give a fresh worker up to 2 SKUs to build
+      // a small buffer, then refill with 1 SKU at a time as it completes.
+      // Keeps in-flight small so a worker crash loses ≤2 SKUs (not 5-8),
+      // and pending queue drains evenly across workers instead of one
+      // worker hoarding 5 while others idle. Overrides the client's
+      // limit request — the server is authoritative on load-balancing.
+      const currentClaims = workerId
+        ? db.prepare(`SELECT COUNT(*) c FROM jobs WHERE status='claimed' AND claimed_by=?`).get(workerId).c
+        : 0;
+      const askedFor = Math.max(1, Math.min(50, b.limit || 5));
+      const streamingLimit = currentClaims === 0 ? Math.min(askedFor, 2) : Math.min(askedFor, 1);
+      const claimed = claimJobs(workerId, String(b.batchId || ''), streamingLimit);
       return send(res, 200, { ok: true, jobs: claimed });
     }
     if (m === 'POST' && p === '/api/jobs/heartbeat') {
