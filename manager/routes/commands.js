@@ -19,7 +19,13 @@ async function insertCommand({ req, res, ctx }) {
 
 function listPending({ res, url, ctx }) {
   const { Q, send } = ctx;
-  const rows = Q.pendingCommands.all(url.searchParams.get('workerId') || '').map(c => ({
+  // Two args to pendingCommands: worker_id and broadcast-TTL cutoff.
+  // Broadcast commands (worker_id NULL) stay pending for all workers
+  // within a 10-min window from created_at. Fixes the bug where the
+  // first worker to ack consumed the broadcast for everyone else.
+  const workerId = url.searchParams.get('workerId') || '';
+  const broadcastTtlCutoff = Date.now() - 10 * 60 * 1000;
+  const rows = Q.pendingCommands.all(workerId, broadcastTtlCutoff).map(c => ({
     ...c,
     payload: c.payload ? JSON.parse(c.payload) : null,
   }));
@@ -29,8 +35,14 @@ function listPending({ res, url, ctx }) {
 async function ackCommands({ req, res, ctx }) {
   const { Q, send, readJson, now } = ctx;
   const b = await readJson(req);
+  const workerId = b.workerId || null;
   for (const id of (Array.isArray(b.ids) ? b.ids : [])) {
-    Q.ackCommand.run(now(), b.workerId || null, id);
+    // Legacy ack (only fires if global acknowledged_at was still NULL —
+    // preserved for backward compat + first-worker-to-ack telemetry).
+    Q.ackCommand.run(now(), workerId, id);
+    // Per-worker ack — this is the authoritative record now. Prevents
+    // the same broadcast being handed to the same worker twice.
+    if (workerId) Q.ackCommandPerWorker.run(id, workerId, now());
   }
   return send(res, 200, { ok: true });
 }

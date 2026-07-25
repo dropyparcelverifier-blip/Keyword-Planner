@@ -959,6 +959,18 @@ CREATE TABLE IF NOT EXISTS worker_commands (
 );
 CREATE INDEX IF NOT EXISTS commands_pending_idx ON worker_commands (worker_id, acknowledged_at);
 
+-- Per-worker command acks. Fixes the broadcast bug where one worker's ack
+-- consumed the command for all others. Every (command_id, worker_id) row
+-- proves that specific worker saw + processed that specific command.
+-- pendingCommands excludes commands already in this table for the polling
+-- worker.
+CREATE TABLE IF NOT EXISTS worker_command_acks (
+  command_id INTEGER NOT NULL,
+  worker_id  TEXT NOT NULL,
+  acked_at   INTEGER DEFAULT (strftime('%s','now')*1000),
+  PRIMARY KEY (command_id, worker_id)
+);
+
 CREATE TABLE IF NOT EXISTS worker_config (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   config TEXT,               -- JSON blob of pushed run options
@@ -1200,8 +1212,25 @@ const Q = {
   recentActivityWorker: db.prepare(`SELECT * FROM activity_log WHERE (?1 IS NULL OR batch_id=?1) AND worker_id=?2 ORDER BY ts DESC LIMIT ?3`),
   recentActivityLevel:  db.prepare(`SELECT * FROM activity_log WHERE (?1 IS NULL OR batch_id=?1) AND level=?2 ORDER BY ts DESC LIMIT ?3`),
   insertCommand: db.prepare(`INSERT INTO worker_commands (worker_id, command, payload, created_by) VALUES (?, ?, ?, ?)`),
-  pendingCommands: db.prepare(`SELECT * FROM worker_commands WHERE acknowledged_at IS NULL AND (worker_id IS NULL OR worker_id=?) ORDER BY id ASC`),
-  ackCommand: db.prepare(`UPDATE worker_commands SET acknowledged_at=?, acknowledged_by=? WHERE id=?`),
+  // Per-worker pending commands. Two clauses:
+  //  (a) targeted (worker_id=?): pending as long as global acknowledged_at
+  //      is null AND this worker hasn't personally acked. (Legacy check kept
+  //      for backward compat with old commands.)
+  //  (b) broadcast (worker_id IS NULL): pending as long as this worker
+  //      hasn't personally acked, ignoring global acknowledged_at
+  //      (which used to consume the broadcast for all other workers when
+  //      the first one acked — the bug we're fixing).
+  // Broadcast TTL: 10 min (created_at > now-10min). Anything older is
+  // considered stale — workers not online during the window miss it.
+  pendingCommands: db.prepare(`SELECT * FROM worker_commands wc
+    WHERE (
+      (wc.worker_id = ?1 AND wc.acknowledged_at IS NULL)
+      OR (wc.worker_id IS NULL AND wc.created_at > ?2)
+    )
+    AND NOT EXISTS (SELECT 1 FROM worker_command_acks a WHERE a.command_id = wc.id AND a.worker_id = ?1)
+    ORDER BY wc.id ASC`),
+  ackCommand: db.prepare(`UPDATE worker_commands SET acknowledged_at=?, acknowledged_by=? WHERE id=? AND acknowledged_at IS NULL`),
+  ackCommandPerWorker: db.prepare(`INSERT OR IGNORE INTO worker_command_acks (command_id, worker_id, acked_at) VALUES (?, ?, ?)`),
   getConfig: db.prepare(`SELECT config, active_batch_id FROM worker_config WHERE id=1`),
   setConfig: db.prepare(`UPDATE worker_config SET config=? WHERE id=1`),
   setActiveBatch: db.prepare(`UPDATE worker_config SET active_batch_id=? WHERE id=1`),
