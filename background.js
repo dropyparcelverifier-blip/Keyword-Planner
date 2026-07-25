@@ -1472,6 +1472,12 @@ async function _handleStartInner(msg) {
           // every SKU still completes with SOMETHING. Auto-armed when the
           // adbrainR2DeadStreak counter hits 2 (see keyword-discovery.js).
           skipR1Kp: (await chrome.storage.local.get('adbrainSkipR1Kp')).adbrainSkipR1Kp === true,
+          // Website-only KP mode — skip the text-seed flow entirely, use
+          // 'Start with a website' directly. Less bot-detected (single
+          // URL submit vs typed keywords with chip commits). Passed to
+          // getKeywordPlannerIdeas via kpOpts.websiteOnly. Enable per-
+          // worker via chrome.storage.local.set({adbrainKpWebsiteOnly:true}).
+          kpWebsiteOnly: (await chrome.storage.local.get('adbrainKpWebsiteOnly')).adbrainKpWebsiteOnly === true,
           shouldStop: () => state.stopRequested,
           report: reportMap,
           excludeUrls,

@@ -892,6 +892,19 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
   const TRANSIENT_RE = /timed out|hydrate|never responded|shell|get results button|discover keywords|message port closed|message channel closed|receiving end does not exist|asynchronous response by returning true/i;
   const SEED_MAX_ATTEMPTS = 2;
 
+  // Website-only mode: skip the text-seed flow entirely and go straight
+  // to KP's "Start with a website" flow. Text-seed input is Google's most
+  // bot-detected KP flow (typing chars + committing chips looks scripted);
+  // URL-input via "Start with a website" is a single form submit and
+  // often survives flags that block the text-seed flow. When enabled,
+  // the website-fallback block below runs as if the text-seed loop
+  // produced zero keywords, sending KP the productUrl directly.
+  const websiteOnly = kpOpts.websiteOnly === true;
+  if (websiteOnly && productUrl) {
+    log(`KP: website-only mode enabled — skipping text-seed flow, going straight to "Start with a website" on ${productUrl.slice(0, 80)}`);
+    // Fall through to the website-fallback block below by leaving
+    // accumulated empty and skipping the seedList loop.
+  } else {
   for (let i = 0; i < seedList.length; i++) {
     const seed = seedList[i];
     if (accumulated.length >= maxResults) break;
@@ -1012,6 +1025,7 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
       }
     }
   }
+  } // close websiteOnly else-block
 
   // Website fallback — when the keyword-based union is thin, run KP's
   // "Start with a website" flow against productUrl on a freshly navigated
@@ -3248,7 +3262,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         onProgress?.({ currentProduct: productName, currentSource: 'kp', currentAction: `Running Keyword Planner for ${kpSeeds.length} seed(s): "${kpSeeds.join('", "')}"`, keywordCount: report.size });
         kpResult = await getKeywordPlannerIdeas(kpSeeds, kpUrl, kpMaxPerProduct,
           (m) => onProgress?.({ currentProduct: productName, currentAction: m }),
-          { productUrl: cleanUrl });
+          { productUrl: cleanUrl, websiteOnly: opts.kpWebsiteOnly === true });
       }
       const kpKeywords = (kpResult?.ok ? (kpResult.keywords || []) : []).filter(Boolean);
       if (!kpResult?.ok) {
