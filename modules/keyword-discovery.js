@@ -3272,6 +3272,27 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           currentAction: `⚠ KP FAILED: ${kpResult.error}. Engine will continue with PAA + autosuggest only (likely < 30 keywords, 2-3 min total). Common fix: re-login to Google Ads in this profile + check the KP URL in Settings.`,
           logKind: 'err',
         });
+        // HARD-CRASH DETECTION — if KP failed with tab-crash / channel-
+        // close / content-script-dead, DON'T just increment the streak
+        // by 1 (needs 2 dead SKUs to arm). Set the streak to 3 (past
+        // the arm threshold) so the very NEXT SKU on this worker skips
+        // R1 KP entirely. Prevents user seeing 'many KP window openings'
+        // when the tab crashes on every attempt.
+        const errStr = String(kpResult?.error || '');
+        const isTabDead = /message (port|channel) closed|receiving end does not exist|asynchronous response by returning true|tab crashed|content script dead|hard timeout|hung mid-flow/i.test(errStr);
+        if (isTabDead) {
+          try {
+            if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+              await chrome.storage.local.set({ adbrainR2DeadStreak: 3 });
+              onProgress?.({
+                currentProduct: productName,
+                currentSource: 'kp',
+                currentAction: `⏭ KP TAB CRASHED — auto-arming skip for next SKU (streak set to 3). No more KP window openings until session recovers (successful R2 anywhere resets streak).`,
+                logKind: 'warn',
+              });
+            }
+          } catch {}
+        }
       } else if (kpKeywords.length === 0) {
         // KP succeeded (HTTP 200) but returned zero ideas. This happens
         // when the seed is too long/specific, when Google has no data
