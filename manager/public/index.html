@@ -322,7 +322,8 @@
               <span class="card-icon">🖥️</span>
               <span class="card-title">Worker fleet</span>
               <span class="card-sub" id="workerCountLabel">—</span>
-              <button class="small secondary" id="copyInstallCmdBtn" style="margin-left:auto;" title="Copy the install one-liner to clipboard. Paste it in PowerShell on each worker PC to (re)install the extension with the current server-side files.">📋 Copy install command</button>
+              <button class="small primary" id="updateAllWorkersBtn" style="margin-left:auto;" title="Broadcast graceful_reload to every worker in the fleet. Each worker finishes its current SKU, then reloads the extension with the latest files from the manager. Zero wall-clock waste — no in-flight work lost.">🔄 Update all workers now</button>
+              <button class="small secondary" id="copyInstallCmdBtn" title="Copy the install one-liner to clipboard. Paste it in PowerShell on each worker PC to (re)install the extension with the current server-side files.">📋 Copy install command</button>
               <details class="wa-legend">
                 <summary title="What each button does">? What do these buttons do?</summary>
                 <div class="wa-legend-body">
