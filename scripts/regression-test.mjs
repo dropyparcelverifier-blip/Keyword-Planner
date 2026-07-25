@@ -2450,9 +2450,13 @@ async function run() {
   assert(appJs.body.includes('_shopifyAutopasteArmed = false'), 'AUTOPASTE.6 disarms on modal close (idempotency)');
   // KP: direct URL nav fallback before manual-user-click waiting.
   const kpJs = readFileSync(resolve(REPO, 'kp.js'), 'utf-8');
-  assert(kpJs.includes('URL-navigation fallback'),            'KP-FIX.1 URL-nav fallback added to openDiscoverKeywords');
-  assert(kpJs.includes('/aw/keywordplanner/ideas/new'),       'KP-FIX.2 hits the direct ideas-new URL');
-  assert(kpJs.includes('KP shell re-hydration after direct nav'), 'KP-FIX.3 waits for shell rehydration after nav');
+  // KP-FIX assertions rewritten 2026-07-25 after root-cause fix removed
+  // all self-navigation from kp.js. Content-script suicide via
+  // location.href assignment was the real cause of 'message channel
+  // closed' errors. Engine now handles all navigation via Worker.navigate.
+  assert(kpJs.includes('KP_NEEDS_FRESH_NAV'),                 'KP-FIX.1 kp.js throws NAV marker instead of self-navigating');
+  assert(kpJs.includes('/aw/keywordplanner/ideas/new'),       'KP-FIX.2 target URL still referenced (in error message)');
+  assert(!/location\.href\s*=\s*[a-zA-Z]/.test(kpJs) || !/location\.href\s*=.*ideas\/new/.test(kpJs), 'KP-FIX.3 no more location.href self-nav to /ideas/new');
   // CLIP: surface the ACTUAL init/embed failure reason instead of '?'.
   const imMatcher = readFileSync(resolve(REPO, 'modules/image-matcher.js'), 'utf-8');
   const kwDisc = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
