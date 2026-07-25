@@ -4667,9 +4667,38 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // Shopping placed our product, or matched destination pages verified.
       // Also exclude brand-other rows and the original R1 KP seeds (no
       // point re-asking KP about a seed it already gave us).
-      const R2_MIN_IMAGE_MATCHES = 3;
-      const R2_MIN_LINK_MATCHES  = 1;
-      const R2_MIN_SHOPPING      = 1;
+      // Adaptive R2 seed thresholds — scale with R1 yield. High-yield SKUs
+      // (200+ keywords already) have plenty of candidates; keep the gate
+      // strict so R2 spends its 5 seeds on the strongest signals. Low-yield
+      // SKUs (fresh from a broken KP session, or narrow categories) need
+      // R2 more than anyone — so we relax the gate to let borderline
+      // candidates through. Keywords that DON'T become R2 seeds still
+      // stay in the final output — we only tune WHICH ones we cycle
+      // through KP again.
+      const R1_YIELD = productRows.size;
+      let R2_MIN_IMAGE_MATCHES, R2_MIN_LINK_MATCHES, R2_MIN_SHOPPING;
+      if (R1_YIELD >= 200) {
+        // Strict — plenty to choose from, only feed KP the best signals
+        R2_MIN_IMAGE_MATCHES = 5;
+        R2_MIN_LINK_MATCHES  = 2;
+        R2_MIN_SHOPPING      = 2;
+      } else if (R1_YIELD >= 50) {
+        // Default — original thresholds
+        R2_MIN_IMAGE_MATCHES = 3;
+        R2_MIN_LINK_MATCHES  = 1;
+        R2_MIN_SHOPPING      = 1;
+      } else {
+        // Loose — starving SKU, accept any weak match to seed R2 anyway
+        R2_MIN_IMAGE_MATCHES = 1;
+        R2_MIN_LINK_MATCHES  = 1;
+        R2_MIN_SHOPPING      = 1;
+      }
+      onProgress?.({
+        currentProduct: productName,
+        currentSource: 'round2',
+        currentAction: `R2 seed gate: R1 yielded ${R1_YIELD} kw → ${R1_YIELD >= 200 ? 'STRICT' : R1_YIELD >= 50 ? 'DEFAULT' : 'LOOSE'} (min images=${R2_MIN_IMAGE_MATCHES}, links=${R2_MIN_LINK_MATCHES}, shopping=${R2_MIN_SHOPPING})`,
+        logKind: 'info',
+      });
       const r2SignalScore = (r) => {
         const img  = Number(r.imageCount || 0);
         const link = Number(r.linkVerifiedCount || 0);
