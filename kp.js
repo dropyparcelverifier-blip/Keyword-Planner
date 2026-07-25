@@ -1311,10 +1311,30 @@
     await humanPause(300);
     kpLog(`pasted URL: "${productUrl.slice(0, 80)}"`);
 
-    // Step 4: pick the "Use only this page" radio. Try a label-text search
-    // first (cleaner click target). Fall back to the second radio (KP
-    // renders "Use the entire site" first, "Use only this page" second).
-    let pageRadio = null;
+    // Step 4: pick the "Use only this page" radio. CRITICAL — we want
+    // keywords for THIS specific product URL only, NOT the whole dropy.in
+    // domain (which would pollute results with hundreds of unrelated
+    // categories). Try label-text click first, verify actual selection,
+    // fall back to positional / direct-input click if needed. Refuses
+    // to proceed if we can't confirm the correct radio is selected.
+    const isOnlyThisPageSelected = () => {
+      // Look for the specific radio button paired with 'Use only this page'
+      // text and check if it's actually checked.
+      const labels = Array.from(document.querySelectorAll('label, span, div, [role="radio"]')).filter(visible);
+      for (const el of labels) {
+        const t = (el.textContent || '').toLowerCase();
+        if (!t.includes('only this page')) continue;
+        // Radio might be a sibling <input>, a nested checked attr, or aria-checked
+        const nearInput = el.querySelector('input[type="radio"]') || el.parentElement?.querySelector('input[type="radio"]');
+        if (nearInput?.checked) return true;
+        if (el.getAttribute('aria-checked') === 'true') return true;
+        // Material radio: check for a checked class on parent or self
+        if ((el.className || '').match(/mdc-radio--checked|checked|active/i)) return true;
+      }
+      return false;
+    };
+    let clicked = false;
+    // Attempt 1: label-text click
     const pageLabel = findByText(
       'label, span, div, [role="radio"]',
       ['Use only this page', 'only this page']
@@ -1322,16 +1342,38 @@
     if (pageLabel) {
       kpLog('clicking "Use only this page" label');
       await aggressiveClick(pageLabel);
-      pageRadio = pageLabel;
-    } else {
+      await humanPause(500);
+      clicked = isOnlyThisPageSelected();
+    }
+    // Attempt 2: direct click on the underlying radio input (if label didn't propagate)
+    if (!clicked) {
+      const radios = Array.from(document.querySelectorAll('input[type="radio"], [role="radio"]')).filter(visible);
+      // Find the radio paired with 'only this page' text (not just position-based)
+      for (const r of radios) {
+        const parentText = (r.closest('label, div')?.textContent || '').toLowerCase();
+        if (parentText.includes('only this page')) {
+          kpLog('clicking radio input paired with "only this page" text');
+          await aggressiveClick(r);
+          await humanPause(500);
+          clicked = isOnlyThisPageSelected();
+          break;
+        }
+      }
+    }
+    // Attempt 3: positional fallback (second radio)
+    if (!clicked) {
       const radios = Array.from(document.querySelectorAll('input[type="radio"], [role="radio"]')).filter(visible);
       if (radios.length >= 2) {
-        kpLog('clicking second visible radio (assumed "Use only this page")');
+        kpLog('positional fallback: clicking second visible radio (assumed "Use only this page")');
         await aggressiveClick(radios[1]);
-        pageRadio = radios[1];
-      } else {
-        kpLog('"Use only this page" radio not found — proceeding with default selection');
+        await humanPause(500);
+        clicked = isOnlyThisPageSelected();
       }
+    }
+    if (clicked) {
+      kpLog('✓ verified "Use only this page" is now selected', 'ok');
+    } else {
+      kpLog('⚠ could not verify "Use only this page" is selected — Google may fall back to "entire site" which pollutes results with unrelated products', 'warn');
     }
     await humanPause(400);
 
