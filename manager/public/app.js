@@ -1235,21 +1235,32 @@ $('activityWorkerFilter')?.addEventListener('change', () => {
   if (sub) sub.textContent = state.workerFilter ? `filtered to ${state.workerFilter}` : 'latest 120 events';
   refreshDashboard();
 });
-// One-click fleet update. Broadcasts graceful_reload (worker_id=null means
-// all workers). Each worker: finishes its current SKU → reloads extension
-// with the latest files from the manager. Zero in-flight work lost.
+// One-click fleet update. Sends graceful_reload FIRST (waits for current
+// SKU to finish, zero work lost). Then 30s later, sends hard_reset as
+// insurance for workers stuck in retry loops that never finish a SKU.
+// Live-observed pattern: KP_NEEDS_FRESH_NAV loops meant workers never
+// reached the SKU boundary, so graceful_reload alone never fired the
+// actual chrome.runtime.reload(). Hard_reset guarantees reload within
+// ~30s regardless of in-flight state.
 $('updateAllWorkersBtn')?.addEventListener('click', async () => {
-  if (!confirm('Update ALL workers now?\n\nBroadcasts graceful_reload to every worker. Each finishes its current SKU (no wasted work), then reloads with the latest bundle. Live workers reload within ~60s; offline workers pick it up when they come back online.')) return;
+  if (!confirm('Update ALL workers now?\n\nStep 1: graceful_reload (workers finishing a good SKU reload cleanly).\nStep 2 (30s later): hard_reset (any worker still stuck in a retry loop force-reloads).\n\nEither way, every worker is running the latest code within ~90s.')) return;
   const btn = $('updateAllWorkersBtn');
   const orig = btn.textContent;
   btn.textContent = '⏳ Broadcasting…'; btn.disabled = true;
   try {
-    const r = await api.commandsSend('', 'graceful_reload', {});
-    if (r?.ok) {
-      toast(`Broadcast sent — every live worker will graceful-reload within ~60s (finishes current SKU first, no in-flight work lost).`, 'ok', { title: '🔄 Fleet update initiated' });
-    } else {
-      throw new Error(r?.error || 'broadcast failed');
-    }
+    const r1 = await api.commandsSend('', 'graceful_reload', {});
+    if (!r1?.ok) throw new Error(r1?.error || 'graceful_reload broadcast failed');
+    toast(`Step 1/2: graceful_reload sent. Idle & finishing workers reload immediately.`, 'ok', { title: '🔄 Fleet update — step 1' });
+    // 30-second escalation: any worker that didn't reload yet is stuck.
+    // hard_reset kills their in-flight (which was producing nothing anyway)
+    // and force-reloads. Fires from the same click so operator doesn't
+    // have to remember a follow-up action.
+    setTimeout(async () => {
+      try {
+        const r2 = await api.commandsSend('', 'hard_reset', {});
+        if (r2?.ok) toast(`Step 2/2: hard_reset sent. Any worker still stuck in a loop force-reloads within ~30s. Every worker on latest code within 60s.`, 'warn', { title: '🔨 Fleet update — step 2 (escalation)' });
+      } catch (e) { toast(`Step 2 failed: ${e.message}`, 'err'); }
+    }, 30_000);
   } catch (e) {
     toast(e.message, 'err', { title: 'Update broadcast failed' });
   } finally {
