@@ -889,7 +889,15 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
   // loop up to parity. Root cause: KP tab navigates from /ideas/new to the
   // results view mid-message; content script tears down before sendResponse
   // fires. Fresh navigate + retry recovers cleanly.
-  const TRANSIENT_RE = /timed out|hydrate|never responded|shell|get results button|discover keywords|message port closed|message channel closed|receiving end does not exist|asynchronous response by returning true/i;
+  // KP_NEEDS_FRESH_NAV added — kp.js now signals via this marker instead
+  // of self-navigating (location.href assignment from inside a running
+  // message handler was killing the content script mid-response, causing
+  // 'message channel closed' errors on every retry). Engine treats it
+  // as transient → retry loop does a fresh Worker.navigate + re-sends
+  // KP_GET_IDEAS. The content script survives because the engine (in
+  // the BG service worker) drives the navigation, not the content
+  // script suiciding itself.
+  const TRANSIENT_RE = /timed out|hydrate|never responded|shell|get results button|discover keywords|message port closed|message channel closed|receiving end does not exist|asynchronous response by returning true|KP_NEEDS_FRESH_NAV/i;
   const SEED_MAX_ATTEMPTS = 2;
 
   // Website-only mode: skip the text-seed flow entirely and go straight
