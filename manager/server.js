@@ -1089,15 +1089,16 @@ const Q = {
   // knows this was a retry-loop bail-out, not a real error signal.
   failMaxAttempts: db.prepare(`UPDATE jobs SET status='failed', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=?, failed_reason='auto-failed: exceeded 3 attempts (retry loop). Fix the root cause and requeue.' WHERE status='claimed' AND (heartbeat_at IS NULL OR heartbeat_at < ?) AND attempts >= 3`),
   // Second-tier force-fail — no stale heartbeat required. Fires when a
-  // job has been claimed 5+ times, meaning the worker itself is stuck in
-  // a retry loop even though its heartbeat looks fresh. Ordinary
-  // failMaxAttempts above only catches STALE claims (heartbeat expired).
-  // This catches the case where a worker keeps re-claiming and failing
-  // fast enough that heartbeat never expires — the failure mode observed
-  // when the KP session is dead but the worker's SW is otherwise healthy.
-  // Threshold 5 (not 3) so we still give the worker some rope before
-  // yanking a fresh claim out from under it.
-  failStuckClaims: db.prepare(`UPDATE jobs SET status='failed', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=?, failed_reason='auto-failed: excessive re-claims (attempts >= 5) — worker is stuck in a retry loop despite fresh heartbeat. Fix Google Ads session on the worker + requeue.' WHERE status='claimed' AND attempts >= 5`),
+  // job has been claimed 5+ times AND the CURRENT claim has been active
+  // for >= 15 min without completing. Original version (3cbf5da) only
+  // checked attempts >= 5, but that force-failed IMMEDIATELY on the next
+  // claim — worker had no chance to complete, and any actual work done
+  // during that claim was silently orphaned (worker kept processing,
+  // manager already released the claim). Adding the claimed_at >= 15m
+  // ago condition ensures the current claim gets a fair shot before
+  // being yanked. Fresh claims (< 15 min old) are always safe from
+  // force-fail, even if the historical attempts count is high.
+  failStuckClaims: db.prepare(`UPDATE jobs SET status='failed', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=?, failed_reason='auto-failed: excessive re-claims (attempts >= 5) AND current claim active >= 15 min — worker is stuck in a retry loop. Fix Google Ads session on the worker + requeue.' WHERE status='claimed' AND attempts >= 5 AND claimed_at IS NOT NULL AND claimed_at < ?`),
   // Retry-loops diagnostic — surface every job with attempts >= 3 so the
   // operator sees which SKUs are stuck. done_at is populated when a job
   // was auto-failed, so we can distinguish 'still in flight but retried a
@@ -2341,7 +2342,9 @@ const server = http.createServer(async (req, res) => {
       // auto-fail predicate no longer sees it as 'claimed' so it never
       // fires. Auto-fail-then-release runs both cleanly.
       const failed = Q.failMaxAttempts.run(now(), cutoff);
-      const stuck = Q.failStuckClaims.run(now());   // no cutoff — attempts>=5 regardless of heartbeat
+      // 15-min claim-age floor so fresh claims aren't yanked while worker
+      // is still legitimately processing — see failStuckClaims comment.
+      const stuck = Q.failStuckClaims.run(now(), now() - 15 * 60 * 1000);
       const released = Q.releaseStale.run(cutoff);
       return send(res, 200, { ok: true, released: released.changes, auto_failed: failed.changes, force_failed_stuck: stuck.changes });
     }
@@ -2625,7 +2628,7 @@ const server = http.createServer(async (req, res) => {
       // so the worker stops hammering broken SKUs and moves to fresh work).
       const staleCutoff = now() - 5 * 60000;
       Q.failMaxAttempts.run(now(), staleCutoff);
-      Q.failStuckClaims.run(now());   // no heartbeat cutoff — attempts>=5 gets force-failed
+      Q.failStuckClaims.run(now(), now() - 15 * 60 * 1000);   // 15-min claim-age floor — see failStuckClaims comment
       Q.releaseStale.run(staleCutoff);
       return send(res, 200, { ok: true, workers: Q.workerStats.all() });
     }
