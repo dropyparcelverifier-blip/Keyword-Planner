@@ -1235,6 +1235,27 @@ $('activityWorkerFilter')?.addEventListener('change', () => {
   if (sub) sub.textContent = state.workerFilter ? `filtered to ${state.workerFilter}` : 'latest 120 events';
   refreshDashboard();
 });
+// One-click fleet update. Broadcasts graceful_reload (worker_id=null means
+// all workers). Each worker: finishes its current SKU → reloads extension
+// with the latest files from the manager. Zero in-flight work lost.
+$('updateAllWorkersBtn')?.addEventListener('click', async () => {
+  if (!confirm('Update ALL workers now?\n\nBroadcasts graceful_reload to every worker. Each finishes its current SKU (no wasted work), then reloads with the latest bundle. Live workers reload within ~60s; offline workers pick it up when they come back online.')) return;
+  const btn = $('updateAllWorkersBtn');
+  const orig = btn.textContent;
+  btn.textContent = '⏳ Broadcasting…'; btn.disabled = true;
+  try {
+    const r = await api.commandsSend('', 'graceful_reload', {});
+    if (r?.ok) {
+      toast(`Broadcast sent — every live worker will graceful-reload within ~60s (finishes current SKU first, no in-flight work lost).`, 'ok', { title: '🔄 Fleet update initiated' });
+    } else {
+      throw new Error(r?.error || 'broadcast failed');
+    }
+  } catch (e) {
+    toast(e.message, 'err', { title: 'Update broadcast failed' });
+  } finally {
+    btn.textContent = orig; btn.disabled = false;
+  }
+});
 $('wakeAllBtn').addEventListener('click', async () => {
   // Manager commands are POLLED by workers every 30s. If a worker's SW
   // is dead (Chrome closed, PC asleep, extension crashed), Wake alone
