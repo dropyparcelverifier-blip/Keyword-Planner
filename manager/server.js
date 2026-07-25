@@ -1105,7 +1105,18 @@ const Q = {
   // ago condition ensures the current claim gets a fair shot before
   // being yanked. Fresh claims (< 15 min old) are always safe from
   // force-fail, even if the historical attempts count is high.
-  failStuckClaims: db.prepare(`UPDATE jobs SET status='failed', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=?, failed_reason='auto-failed: excessive re-claims (attempts >= 5) AND current claim active >= 15 min — worker is stuck in a retry loop. Fix Google Ads session on the worker + requeue.' WHERE status='claimed' AND attempts >= 5 AND claimed_at IS NOT NULL AND claimed_at < ?`),
+  // failStuckClaims — force-fails jobs stuck in a retry loop. Requires
+  // BOTH attempts>=5 AND (stale heartbeat OR very old claim). Previous
+  // version (7f1e3f4) killed on 15-min claim age alone, which caught
+  // legitimate slow SKUs (many products need 15-25 min for full R1+R2
+  // + Amazon Round). Now needs one of:
+  //   (a) heartbeat gone stale (worker died or SW abandoned) — the real
+  //       retry-loop signal, OR
+  //   (b) claim age > 30 min (extreme case — no legitimate SKU should
+  //       hold a claim that long)
+  // Fresh claims with healthy heartbeats always survive regardless of
+  // historic attempts count.
+  failStuckClaims: db.prepare(`UPDATE jobs SET status='failed', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=?, failed_reason='auto-failed: attempts >= 5 AND (stale heartbeat OR claim age > 30 min) — worker abandoned or genuinely stuck. Fix worker + requeue.' WHERE status='claimed' AND attempts >= 5 AND ((heartbeat_at IS NULL OR heartbeat_at < ?) OR (claimed_at IS NOT NULL AND claimed_at < ?))`),
   // Retry-loops diagnostic — surface every job with attempts >= 3 so the
   // operator sees which SKUs are stuck. done_at is populated when a job
   // was auto-failed, so we can distinguish 'still in flight but retried a
@@ -2351,7 +2362,7 @@ const server = http.createServer(async (req, res) => {
       const failed = Q.failMaxAttempts.run(now(), cutoff);
       // 15-min claim-age floor so fresh claims aren't yanked while worker
       // is still legitimately processing — see failStuckClaims comment.
-      const stuck = Q.failStuckClaims.run(now(), now() - 15 * 60 * 1000);
+      const stuck = Q.failStuckClaims.run(now(), now() - 5 * 60 * 1000, now() - 30 * 60 * 1000);
       const released = Q.releaseStale.run(cutoff);
       return send(res, 200, { ok: true, released: released.changes, auto_failed: failed.changes, force_failed_stuck: stuck.changes });
     }
@@ -2635,7 +2646,7 @@ const server = http.createServer(async (req, res) => {
       // so the worker stops hammering broken SKUs and moves to fresh work).
       const staleCutoff = now() - 5 * 60000;
       Q.failMaxAttempts.run(now(), staleCutoff);
-      Q.failStuckClaims.run(now(), now() - 15 * 60 * 1000);   // 15-min claim-age floor — see failStuckClaims comment
+      Q.failStuckClaims.run(now(), now() - 5 * 60 * 1000, now() - 30 * 60 * 1000);   // 15-min claim-age floor — see failStuckClaims comment
       Q.releaseStale.run(staleCutoff);
       return send(res, 200, { ok: true, workers: Q.workerStats.all() });
     }
