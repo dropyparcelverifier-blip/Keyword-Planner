@@ -527,24 +527,17 @@
     }
     await dismissOverlays();
 
-    // FAST PATH — chrome.storage.local cache (survives KP tab navigation,
-    // unlike sessionStorage which resets every page load). Once click
-    // strategies have failed once, we know Google's DOM revamped; skip
-    // straight to direct URL nav on every subsequent seed (~5s instead of
-    // ~65s hydrate wait + 3× click attempts). Reset by clearing storage
-    // or by fresh worker install.
-    let clickBroken = false;
-    try {
-      const s = await chrome.storage.local.get('kp_click_broken');
-      clickBroken = s?.kp_click_broken === true;
-    } catch {}
+    // Cache reset — previous 'fast path' was actively hurting: throwing
+    // KP_NEEDS_FRESH_NAV on every subsequent seed regardless of whether
+    // we're on /home (needs click) or /ideas/new (needs direct probe).
+    // Just let the normal click flow attempt every time. If it genuinely
+    // fails, the outer engine retry + hard-crash streak arm still
+    // handles worker-level KP disable.
+    try { await chrome.storage.local.remove('kp_click_broken'); } catch {}
+    const clickBroken = false;
     if (clickBroken) {
-      // Was: location.href = target (kills content script, engine gets
-      // "message channel closed"). New: throw a marker error the engine
-      // recognises. Engine's retry loop does Worker.navigate + fresh
-      // KP_GET_IDEAS on the new page (content script never dies mid-flow).
-      kpLog('click strategies known-broken — signalling engine to re-navigate cleanly', 'warn');
-      throw new Error('KP_NEEDS_FRESH_NAV: click strategies broken, engine must re-navigate to /ideas/new');
+      kpLog('unreachable', 'warn');
+      throw new Error('KP_NEEDS_FRESH_NAV: unreachable');
       // Fast path failed too — clear the flag and fall through to full flow.
       try { await chrome.storage.local.remove('kp_click_broken'); } catch {}
     }
