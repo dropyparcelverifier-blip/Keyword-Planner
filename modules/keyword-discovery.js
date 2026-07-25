@@ -4617,10 +4617,48 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         continue; // to next product in the outer loop
       }
 
+      // Fast pre-cycle relevance gate — skip SERP cycling on keywords that
+      // clearly don't match the product (saves ~30-60 sec per keyword).
+      // Row STILL gets stored in productRows so nothing is dropped from
+      // output — we just don't waste SERP + CLIP compute on it. Two-signal
+      // check: (a) at least ONE strong product token AND (b) not on a
+      // universal blacklist (job listings, downloads, movies, etc).
+      const strongTokens = productContext
+        ? [...new Set([
+            ...(productContext.brandAliases || []),
+            ...(productContext.categoryTerms || []),
+            ...String(productContext.productName || '').toLowerCase().split(/\s+/).filter(w => w.length >= 4)
+          ])].filter(Boolean).slice(0, 8)
+        : [];
+      const UNRELATED_BLACKLIST = /\b(job|jobs|salary|salaries|resume|hiring|career|careers|movie|watch online|download|torrent|apk|hack|crack|free download|nude|xxx|porn|manga|anime|lottery)\b/i;
+      // Long-term (evergreen) vs short-term (time-bound) tagger. Both are
+      // kept — long-term is the SEO backbone, short-term captures
+      // trending / seasonal spikes. Just for operator visibility in logs.
+      const isShortTerm = kw => /\b(20[12]\d|20[12]\d-20[12]\d|sale|deal|coupon|discount|today|new|latest|upcoming|christmas|diwali|holi|black friday|monsoon|summer)\b/i.test(kw);
+      const isRelevantForCycle = (kw) => {
+        if (!strongTokens.length) return true;    // no context signals available → don't gate
+        if (UNRELATED_BLACKLIST.test(kw)) return false;
+        const lo = String(kw).toLowerCase();
+        return strongTokens.some(t => t && lo.includes(t));
+      };
+
+      let cycledCount = 0, skippedCount = 0;
+      let ltCount = 0, stCount = 0;
       for (let si = 0; si < round1Seeds.length; si++) {
         if (shouldStop() || report.size >= productCap) break;
         const seedRow = round1Seeds[si];
         const seedLabel = `R1 ${si + 1}/${round1Seeds.length} (${seedRow.source}):`;
+        if (isShortTerm(seedRow.keyword)) stCount++; else ltCount++;
+        if (!isRelevantForCycle(seedRow.keyword)) {
+          skippedCount++;
+          onProgress?.({
+            currentProduct: productName,
+            currentAction: `⏭ ${seedLabel} skipping SERP cycle for unrelated seed "${seedRow.keyword.slice(0, 60)}" — kept in output rows though`,
+            logKind: 'info',
+          });
+          continue;
+        }
+        cycledCount++;
         const suggestions = await safeCycle(seedRow, seedLabel);
 
         // Expand each relevance-passing suggestion as its own row, then
@@ -4631,9 +4669,18 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           if (!isRelevantKeyword(s, relevanceSet)) continue;
           const child = addRow(s, 'autosuggest', seedRow.keyword);
           if (!child) continue;
+          if (isShortTerm(s)) stCount++; else ltCount++;
+          if (!isRelevantForCycle(s)) { skippedCount++; continue; }
+          cycledCount++;
           await safeCycle(child, `R1-leaf:`, { leaf: true });
         }
       }
+      onProgress?.({
+        currentProduct: productName,
+        currentSource: 'round1',
+        currentAction: `Round 1 cycle summary: ${cycledCount} cycled (SERP+CLIP ran), ${skippedCount} skipped as unrelated (still in output). Temporal split: ${ltCount} long-term (evergreen), ${stCount} short-term (trending/seasonal).`,
+        logKind: 'ok',
+      });
 
       // ----- ROUND 2: KP re-expansion driven by R1 PERFORMERS -----
       //
