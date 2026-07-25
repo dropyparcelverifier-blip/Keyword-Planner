@@ -1071,6 +1071,23 @@ async function pollWorkerCommands() {
           }).catch(() => {});
           bufferActivity({ level: 'ok', source: 'cmd', message: `Reconnect command received — force-armed (userStoppedArm cleared). Will auto-claim next chunk.` });
           setTimeout(() => workerAutoPollTick().catch(() => {}), 200);
+        } else if (c.command === 'set_config') {
+          // Bulk-set chrome.storage.local keys on this worker. Payload
+          // shape: { keys: { adbrainSkipR1Kp: true, adbrainSkipR2Kp: true,
+          //   ... } }. Used by the manager to flip config on all workers
+          // at once without operator going to DevTools on each PC.
+          try { await acknowledgeCommand(c.id, state.workerId); } catch {}
+          let payload = {};
+          try { payload = typeof c.payload === 'string' ? JSON.parse(c.payload) : (c.payload || {}); } catch {}
+          const keys = payload?.keys || {};
+          if (typeof keys === 'object' && Object.keys(keys).length > 0) {
+            try { await chrome.storage.local.set(keys); } catch {}
+            const summary = Object.entries(keys).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
+            bufferActivity({ level: 'ok', source: 'cmd', message: `set_config applied: ${summary}` });
+          } else {
+            bufferActivity({ level: 'warn', source: 'cmd', message: `set_config received with empty payload — nothing set` });
+          }
+          continue;
         } else if (c.command === 'graceful_reload') {
           // NON-DESTRUCTIVE update path. Same effect as hard_reset
           // (chrome.runtime.reload picks up new files) BUT waits for the
