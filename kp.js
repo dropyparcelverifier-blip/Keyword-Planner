@@ -539,17 +539,12 @@
       clickBroken = s?.kp_click_broken === true;
     } catch {}
     if (clickBroken) {
-      kpLog('click strategies known-broken this session — skipping to direct URL nav', 'warn');
-      const target = `${location.origin}/aw/keywordplanner/ideas/new${location.search}`;
-      location.href = target;
-      await sleep(3500);
-      await waitFor(() => document.querySelectorAll('button, [role="button"]').length > 5,
-        { timeoutMs: 20000, name: 'KP shell re-hydration after direct nav' });
-      await humanPause(800);
-      if (isOnIdeasPage()) {
-        kpLog('Discover Keywords pane opened via direct URL navigation (fast path)', 'ok');
-        return;
-      }
+      // Was: location.href = target (kills content script, engine gets
+      // "message channel closed"). New: throw a marker error the engine
+      // recognises. Engine's retry loop does Worker.navigate + fresh
+      // KP_GET_IDEAS on the new page (content script never dies mid-flow).
+      kpLog('click strategies known-broken — signalling engine to re-navigate cleanly', 'warn');
+      throw new Error('KP_NEEDS_FRESH_NAV: click strategies broken, engine must re-navigate to /ideas/new');
       // Fast path failed too — clear the flag and fall through to full flow.
       try { await chrome.storage.local.remove('kp_click_broken'); } catch {}
     }
@@ -596,26 +591,13 @@
     // Google restructures the intermediate cards. Only skipped if we're
     // already on that path (in which case direct navigation wouldn't help).
     if (!/\/ideas\/new(\/|$|\?)/.test(location.pathname + location.search)) {
-      try {
-        // Mark click strategies broken so future seeds this session skip
-        // the 12s hydrate wait + click attempts and go straight to nav.
-        try { await chrome.storage.local.set({ kp_click_broken: true }); } catch {}
-        const target = `${location.origin}/aw/keywordplanner/ideas/new${location.search}`;
-        kpLog(`click strategies failed — navigating directly to ${target.slice(0, 100)}`, 'warn');
-        location.href = target;
-        // Wait for the fresh page to hydrate + re-check.
-        await sleep(3500);
-        await waitFor(() => document.querySelectorAll('button, [role="button"]').length > 5,
-          { timeoutMs: 20000, name: 'KP shell re-hydration after direct nav' });
-        await humanPause(800);
-        if (isOnIdeasPage()) {
-          kpLog('Discover Keywords pane opened via direct URL navigation', 'ok');
-          return;
-        }
-        kpLog('direct URL navigation loaded but seed input still not visible — falling through to manual', 'warn');
-      } catch (e) {
-        kpLog(`direct URL navigation failed: ${e.message}`, 'warn');
-      }
+      // Was: location.href = target. Same content-script-suicide problem.
+      // Cache the broken-click marker (so next session skips clicks fast)
+      // then throw to signal the engine to re-navigate. Engine's outer
+      // retry handles the Worker.navigate cleanly + re-sends KP_GET_IDEAS.
+      try { await chrome.storage.local.set({ kp_click_broken: true }); } catch {}
+      kpLog(`click strategies failed — signalling engine to re-navigate to /ideas/new (no self-nav = no content-script suicide)`, 'warn');
+      throw new Error('KP_NEEDS_FRESH_NAV: click strategies exhausted, engine must re-navigate to /ideas/new');
     }
 
     // ----- Manual fallback -----
@@ -707,16 +689,12 @@
       if (findSeedInput()) return true;
     }
 
-    // Strategy 4 (last resort): reload the KP ideas URL. This drops us back
-    // onto a clean Discover Keywords pane, but pays a ~5s page-load cost.
-    try {
-      const u = new URL(location.href);
-      const fresh = `${u.origin}${u.pathname.replace(/\/ideas\/.*/, '/ideas/new')}${u.search}`;
-      kpLog(`reloading KP ideas page to recover input: ${fresh.slice(0, 80)}`);
-      location.href = fresh;
-    } catch {
-      location.reload();
-    }
+    // Strategy 4 (last resort): request engine re-navigation. Was
+    // location.href = fresh (kills content script mid-message). Now
+    // throws so engine's outer retry can Worker.navigate cleanly.
+    kpLog(`no seed input available — signalling engine to re-navigate to /ideas/new`, 'warn');
+    throw new Error('KP_NEEDS_FRESH_NAV: seed input recovery required, engine must re-navigate to /ideas/new');
+    // eslint-disable-next-line no-unreachable
     await sleep(3500);
     await waitFor(() => document.querySelectorAll('button, [role="button"]').length > 5,
       { timeoutMs: 30000, name: 'KP shell re-hydration' });
