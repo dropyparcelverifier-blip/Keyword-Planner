@@ -486,7 +486,14 @@ function validateShopifyPatch(patch, context = {}) {
     const jsonLdCount = scriptMatches.filter(s => /application\/ld\+json/i.test(s)).length;
     const nonLdScripts = scriptMatches.length - jsonLdCount;
     if (nonLdScripts > 0) pushCrit('body_has_scripts', `body_html has ${nonLdScripts} non-JSON-LD <script> tag(s) — page-speed + XSS risk`);
-    if (jsonLdCount === 0) pushCrit('body_no_json_ld', 'body_html has NO JSON-LD schema block — misses FAQPage/HowTo rich snippets');
+    // Old rule ('no JSON-LD is critical') flipped 2026-07-25 after live
+    // audits confirmed the theme emits Product + FAQPage + BreadcrumbList
+    // schemas natively. Any body_html JSON-LD creates duplicates AND is
+    // at risk of the theme's text-highlighter corrupting it. Now a
+    // WARNING when body_html has a JSON-LD block (instead of critical
+    // when missing). Duplicate Product / FAQPage detection is handled
+    // in the post-push live-page audit separately.
+    if (jsonLdCount > 0) pushWarn('body_has_jsonld', 'body_html contains a JSON-LD script block — theme already emits Product + FAQPage + BreadcrumbList schemas natively. Any body_html schema creates duplicates AND risks corruption by the theme text-highlighter. Regenerate without the <script type="application/ld+json"> block.');
     // Actually PARSE the JSON-LD block(s). Google Rich Results Test flagged
     // 'Unparsable structured data' on Cetaphil because the theme's text-
     // transform highlighter injected a <span> inside our <script> block,
