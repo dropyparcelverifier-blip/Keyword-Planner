@@ -2653,6 +2653,22 @@ async function run() {
   // got 401 and exited 0 — silently, every run, for hours. It never reached
   // the auto-update or the Chrome relaunch, so workers sat on stale code
   // with an empty log. Every manager call must carry the token.
+  // ── KP landing-page diagnosis ─────────────────────────────────────────
+  // kp.js only injects on ads.google.com/aw/keywordplanner/*. When Google
+  // bounces the tab to an account chooser or sign-in page (the KP URL pins a
+  // specific authuser, and being "logged in" doesn't mean logged in as THAT
+  // account), the content script legitimately never loads. The engine's only
+  // symptom was "KP content script never responded", which reads like a
+  // scraping bug and sends you hunting in the wrong place.
+  assert(kwDisc.includes('async function explainKpLandingPage'), 'KPLAND.1 landing-page explainer exists');
+  assert(/accounts\\.google\\.com/.test(kwDisc), 'KPLAND.2 detects the account-chooser redirect');
+  assert(/ACCOUNT CHOOSER \/ SIGN-IN/.test(kwDisc), 'KPLAND.3 surfaces a human-readable cause');
+  // Every ping-failure site must consult it, or the misleading message
+  // survives on whichever path we forgot.
+  assert((kwDisc.match(/explainKpLandingPage\(/g) || []).length >= 4, 'KPLAND.4 all ping-failure paths use it');
+  // A chooser redirect will not resolve itself, so don't burn retries on it.
+  assert(/if \(why\) \{[\s\S]{0,700}break;/.test(kwDisc), 'KPLAND.5 redirect fails the seed immediately instead of retrying');
+
   const wdTpl = readFileSync(resolve(REPO, 'scripts/chrome-watchdog-template.ps1'), 'utf-8');
   assert(/\$healthBody = Mgr-Get '\/api\/health'/.test(wdTpl), 'WATCHDOG-AUTH.1 health probe goes through Mgr-Get (which attaches the token)');
   assert(!/Create\(\$managerUrl \+ '\/api\/health'\)/.test(wdTpl), 'WATCHDOG-AUTH.2 no hand-rolled unauthenticated health request');

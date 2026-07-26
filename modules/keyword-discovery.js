@@ -920,6 +920,43 @@ async function ensureContentScriptReady(tabId, pingType, scriptFile) {
   return { ok: false, url: tabUrl, error: 'content script did not respond even after programmatic injection' };
 }
 
+// Why didn't kp.js answer?
+//
+// kp.js only injects on https://ads.google.com/aw/keywordplanner/*. If Google
+// bounces the tab somewhere else — an account chooser, a sign-in page, a
+// consent interstitial, a "no access to this account" page — the content
+// script legitimately never loads, and the engine's only symptom was the
+// generic "KP content script never responded", which reads like a scraping
+// bug and sent us hunting in the wrong place for hours.
+//
+// The account chooser is the common one: the KP URL pins authuser=N, and if
+// the Google Ads account isn't account N in that Chrome profile, Google asks
+// which account to use. Being "already logged in" doesn't help — it's WHICH
+// login the URL points at that matters.
+//
+// Returns a human-readable explanation, or null if the tab is where we want
+// it (in which case the failure really is kp.js or the page).
+async function explainKpLandingPage(tabId) {
+  let url = '';
+  try { url = String((await chrome.tabs.get(tabId))?.url || ''); } catch { return null; }
+  if (!url) return null;
+  if (/^https:\/\/ads\.google\.com\/aw\/keywordplanner\//i.test(url)) return null;   // where we wanted to be
+  if (/accounts\.google\.com/i.test(url)) {
+    const au = (() => { try { return new URL(url).searchParams.get('authuser'); } catch { return null; } })();
+    return `Google redirected the KP tab to an ACCOUNT CHOOSER / SIGN-IN page (${url.slice(0, 120)}). `
+         + `Being signed in isn't enough — the KP URL pins a specific account via authuser, and that account `
+         + `either isn't signed in to this Chrome profile or has no Google Ads access${au != null ? ` (authuser=${au})` : ''}. `
+         + `Fix: open the KP URL manually in the profile the extension runs in, let it settle on the keyword-ideas page, `
+         + `then copy the URL from the address bar and save that as the KP URL in the manager Config tab.`;
+  }
+  if (/ads\.google\.com/i.test(url)) {
+    return `KP tab landed on a different Google Ads page instead of Keyword Planner (${url.slice(0, 120)}). `
+         + `Usually a wrong/expired ocid (account id) in the KP URL, or the account lacks Keyword Planner access.`;
+  }
+  return `KP tab ended up on an unexpected page (${url.slice(0, 120)}) — kp.js only runs on `
+       + `ads.google.com/aw/keywordplanner/*, so it could not load there.`;
+}
+
 // ============ KP step (separate from Google SERP) ============
 // Uses the user's own ads.google.com KP tab — does NOT load a Google search
 // results page, so it isn't subject to the per-product SERP budget.
@@ -1065,6 +1102,16 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
         await sleep(randInt(2500, 4000));
         const ready = await pingContentScript(tabId, 'KP_PING', 15, 1000);
         if (!ready) {
+          // Find out WHERE the tab actually is before blaming kp.js.
+          const why = await explainKpLandingPage(tabId);
+          if (why) {
+            // A redirect to a chooser/sign-in page will not fix itself on a
+            // retry, so fail this seed immediately with the real reason
+            // rather than burning another navigate + 15s ping.
+            log(`⚠ KP BLOCKED: ${why}`);
+            seedErrors.push(`seed ${i + 1}: ${why}`);
+            break;
+          }
           if (attempt < SEED_MAX_ATTEMPTS) {
             log(`KP seed ${i + 1}: content script never responded — retrying in 5s`);
             await sleep(5000);
@@ -1189,7 +1236,10 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
         await sleep(randInt(2500, 4000));
         const ready = await pingContentScript(tabId, 'KP_PING', 15, 1000);
         if (!ready) {
-          seedErrors.push(`website fallback: KP content script never responded after fresh navigate${attemptLabel}`);
+          const whyWeb = await explainKpLandingPage(tabId);
+          seedErrors.push(whyWeb
+            ? `website fallback: ${whyWeb}`
+            : `website fallback: KP content script never responded after fresh navigate${attemptLabel}`);
           if (websiteAttempt < WEBSITE_MAX_ATTEMPTS) { await sleep(5000); continue; }
           break;
         }
@@ -1308,7 +1358,10 @@ async function getKeywordPlannerMetrics(keywords, kpUrl, log) {
     const tabId = await Worker.navigate(kpUrl);
     await sleep(randInt(2500, 4000));
     const ready = await pingContentScript(tabId, 'KP_PING', 15, 1000);
-    if (!ready) return { ok: false, error: 'KP content script never responded', metrics: [] };
+    if (!ready) {
+      const whyMetrics = await explainKpLandingPage(tabId);
+      return { ok: false, error: whyMetrics || 'KP content script never responded', metrics: [] };
+    }
     const resp = await chrome.tabs.sendMessage(tabId, {
       type: 'KP_GET_METRICS',
       keywords: list,
