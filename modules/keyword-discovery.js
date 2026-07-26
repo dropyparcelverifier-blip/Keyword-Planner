@@ -830,6 +830,35 @@ function waitForNavigationComplete(tabId) {
 
 const Worker = (() => {
   let tabId = null;
+  // Every tab and window this engine has ever opened.
+  //
+  // Tracking them is what stops tabs piling up. `tabId` alone is not enough:
+  // if chrome.tabs.get() throws transiently, or the service worker is
+  // recycled mid-run and comes back with tabId = null, the old tab is
+  // orphaned — still open, no longer referenced, never closed. Over a long
+  // run that leaves a trail of abandoned Google/KP/Amazon tabs (and, on a
+  // machine with no normal window, a trail of minimized windows too).
+  //
+  // Invariant: at most ONE engine tab is open at a time. Anything opened
+  // earlier is closed before a replacement is created.
+  const ownedTabs = new Set();
+  const ownedWindows = new Set();
+
+  async function closeOwned({ except = null } = {}) {
+    for (const id of [...ownedTabs]) {
+      if (id === except) continue;
+      try { await chrome.tabs.remove(id); } catch { /* already gone */ }
+      ownedTabs.delete(id);
+    }
+    // Only close windows WE created, and only once they hold none of our
+    // tabs — never touch a window the operator opened.
+    for (const wid of [...ownedWindows]) {
+      try {
+        const w = await chrome.windows.get(wid, { populate: true });
+        if (!w?.tabs?.length) { await chrome.windows.remove(wid); ownedWindows.delete(wid); }
+      } catch { ownedWindows.delete(wid); }
+    }
+  }
 
   // Open a tab for the engine to drive.
   //
@@ -843,13 +872,22 @@ const Worker = (() => {
   // one. Minimized + unfocused because this is unattended background work on
   // a machine someone may be using.
   async function createWorkerTab(url) {
+    // Close whatever we had open first, so a new tab replaces the old one
+    // rather than joining it.
+    await closeOwned();
     try {
       const wins = await chrome.windows.getAll({ windowTypes: ['normal'] });
-      if (wins.length) return await chrome.tabs.create({ url, active: false, windowId: wins[0].id });
+      if (wins.length) {
+        const t = await chrome.tabs.create({ url, active: false, windowId: wins[0].id });
+        ownedTabs.add(t.id);
+        return t;
+      }
     } catch { /* fall through to creating one */ }
     const win = await chrome.windows.create({ url, focused: false, state: 'minimized' });
     const tab = win?.tabs?.[0];
     if (!tab) throw new Error('could not create a window for the engine tab');
+    ownedWindows.add(win.id);
+    ownedTabs.add(tab.id);
     return tab;
   }
 
@@ -862,6 +900,11 @@ const Worker = (() => {
   return {
     async navigate(url) {
       if (await existsAndAlive()) {
+        // Reuse is the normal path — one tab, navigated repeatedly. Still
+        // sweep any strays (e.g. a tab orphaned by a service-worker
+        // recycle) so we converge back to exactly one.
+        await closeOwned({ except: tabId });
+        ownedTabs.add(tabId);
         await chrome.tabs.update(tabId, { url });
       } else {
         tabId = (await createWorkerTab(url)).id;
@@ -870,9 +913,7 @@ const Worker = (() => {
       return tabId;
     },
     async close() {
-      if (await existsAndAlive()) {
-        try { await chrome.tabs.remove(tabId); } catch {}
-      }
+      await closeOwned();
       tabId = null;
     },
     getId() { return tabId; },
@@ -965,8 +1006,23 @@ function transformToIdeasUrl(kpUrl) {
     const u = new URL(kpUrl);
     if (/\/aw\/keywordplanner\b/.test(u.pathname)) {
       u.pathname = '/aw/keywordplanner/ideas/new';
+      // Keep ONLY the two stable identifiers.
+      //
+      //   ocid     — the Google Ads account. Stable, and the one thing that
+      //              actually has to be right.
+      //   authuser — which signed-in Google profile to use. Stable.
+      //
+      // Everything else that appears in a copied KP URL (euid, __u, uscid,
+      // __c) is SESSION-scoped. Replaying stale values makes Google Ads
+      // reject the deep link and bounce to /nav/login, which surfaces as an
+      // account chooser even on a profile with exactly one signed-in
+      // account — and when Ads can't honour the deep link it drops the tab
+      // on the account's default page (/aw/campaigns) instead of Keyword
+      // Planner. Both symptoms were being reported from the fleet while the
+      // same URL opened fine by hand, because a human click builds fresh
+      // session params and this was replaying month-old ones.
       const keep = new URLSearchParams();
-      for (const k of ['ocid', 'euid', '__u', 'uscid', '__c', 'authuser']) {
+      for (const k of ['ocid', 'authuser']) {
         if (u.searchParams.has(k)) keep.set(k, u.searchParams.get(k));
       }
       u.search = keep.toString();
@@ -1216,7 +1272,7 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
     log(`KP: ${accumulated.length} ideas (< ${KP_WEBSITE_FALLBACK_THRESHOLD}), skipping website fallback (disabled for this call — usually R2 expansion)`);
   }
   if (allowWebsiteFallback && productUrl && accumulated.length < KP_WEBSITE_FALLBACK_THRESHOLD && accumulated.length < maxResults) {
-    log(`KP: only ${accumulated.length} ideas (< ${KP_WEBSITE_FALLBACK_THRESHOLD}), running "Start with a website" fallback on fresh tab`);
+    log(`KP: only ${accumulated.length} ideas (< ${KP_WEBSITE_FALLBACK_THRESHOLD}), running "Start with a website" fallback (re-navigating the same worker tab)`);
     // The website flow can take 60-90s. During that time, the KP page
     // navigates from /ideas/new → results view — the content script for
     // the old page gets torn down before it can sendResponse, so

@@ -2692,6 +2692,20 @@ async function run() {
   assert(/\/api\/config\$\{q\}/.test(djKpAcct),          'KPACCT.8 workerId is sent to /api/config');
   assert(!/fetchWorkerConfig\(\)/.test(bgSpiral),     'KPACCT.9 no call site omits the workerId');
 
+  // ── KP URL hygiene ────────────────────────────────────────────────────
+  // A copied Keyword Planner URL carries SESSION-scoped params (euid, __u,
+  // uscid, __c) alongside the stable account id. Replaying stale ones makes
+  // Google Ads reject the deep link and bounce to /nav/login — which shows
+  // as an account chooser even on a profile with exactly ONE signed-in
+  // account, and lands the tab on /aw/campaigns instead of Keyword Planner.
+  // Only ocid (account) and authuser (profile index) may be forwarded.
+  assert(/for \(const k of \['ocid', 'authuser'\]\)/.test(kwDisc), 'KPURL.1 only ocid + authuser are forwarded');
+  for (const volatileParam of ['euid', '__u', 'uscid', '__c']) {
+    assert(!new RegExp(`'${volatileParam.replace(/_/g, '_')}'[^\\n]*\\]`).test(
+      (kwDisc.match(/for \(const k of \[[^\]]*\]/) || [''])[0]),
+      `KPURL.2.${volatileParam} session param ${volatileParam} is not replayed`);
+  }
+
   assert(kwDisc.includes('async function explainKpLandingPage'), 'KPLAND.1 landing-page explainer exists');
   assert(/accounts\\.google\\.com/.test(kwDisc), 'KPLAND.2 detects the account-chooser redirect');
   assert(/ACCOUNT CHOOSER \/ SIGN-IN/.test(kwDisc), 'KPLAND.3 surfaces a human-readable cause');
