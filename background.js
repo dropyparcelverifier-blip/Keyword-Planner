@@ -837,6 +837,57 @@ function _persistPendingPushes() {
   }, 1500);
 }
 
+// ---- Incremental keyword flush --------------------------------------
+// Sends rows to the manager DURING a product run instead of only when the
+// product finishes. Rationale in the onRowAdded comment: a SKU that never
+// reaches completion (30-min claim reaper, service-worker recycle, browser
+// restart) used to lose everything it had found.
+//
+// Throttled on both axes so this never becomes chatty: at most one push per
+// INCREMENTAL_FLUSH_MS, and only once at least INCREMENTAL_FLUSH_ROWS new
+// rows have accumulated. Sends only rows not already sent, tracked by
+// productUrl|keyword — cheap, and survives nothing, which is fine: the
+// worst case after a restart is re-sending rows the manager already has,
+// and those upsert harmlessly.
+const INCREMENTAL_FLUSH_MS   = 45 * 1000;
+const INCREMENTAL_FLUSH_ROWS = 25;
+let _incrementalSent = new Set();
+let _lastIncrementalAt = 0;
+let _incrementalInFlight = false;
+
+function _rowKey(r) { return `${r.productUrl}|${(r.keyword || '').toLowerCase()}`; }
+
+async function maybeFlushIncremental(force = false) {
+  if (_incrementalInFlight) return;
+  const unsent = state.report.filter(r => r && r.keyword && !_incrementalSent.has(_rowKey(r)));
+  if (unsent.length === 0) return;
+  const dueByTime = Date.now() - _lastIncrementalAt >= INCREMENTAL_FLUSH_MS;
+  if (!force && !dueByTime && unsent.length < INCREMENTAL_FLUSH_ROWS) return;
+
+  _incrementalInFlight = true;
+  try {
+    const r = await pushToAdBrain(unsent);
+    // Only mark rows as sent when the manager actually accepted them.
+    // An orphan-batch rejection means our cached batch id is stale; leave
+    // them unsent so the completion path can resync and retry properly.
+    if (r && r.rejectedOrphan > 0) {
+      pushLog(`Incremental push: ${r.rejectedOrphan} row(s) rejected (stale batch id) — leaving them for the completion-time resync.`, 'warn');
+    } else {
+      for (const row of unsent) _incrementalSent.add(_rowKey(row));
+      _lastIncrementalAt = Date.now();
+      if ((r?.success || 0) > 0) {
+        pushLog(`Incremental push: ${r.success} row(s) landed mid-product (${_incrementalSent.size} sent so far this run) — work is now safe from a claim timeout or SW restart.`, 'ok');
+      }
+    }
+  } catch (e) {
+    // Non-fatal by design: the completion-time push and the pending-push
+    // retry queue remain the backstop. Don't let a blip abort the run.
+    pushLog(`Incremental push failed (will retry at product completion): ${e.message}`, 'warn');
+  } finally {
+    _incrementalInFlight = false;
+  }
+}
+
 function enqueuePendingPush(productUrl, rows, batchId) {
   if (!productUrl || !Array.isArray(rows) || rows.length === 0) return;
   // Dedupe — if the same product is already in the queue, replace its
@@ -1148,6 +1199,7 @@ async function pollWorkerCommands() {
           try { await acknowledgeCommand(c.id, state.workerId); } catch {}
           const inFlight = state.claimedJobs.length > 0 && state.running;
           if (!inFlight) {
+            if (state.workerId) { try { await maybeFlushIncremental(true); } catch {} }
             bufferActivity({ level: 'ok', source: 'cmd', message: `Graceful-reload received (no SKU in flight) — reloading extension now.` });
             try { await flushActivityBuffer(); } catch {}
             setTimeout(() => { try { chrome.runtime.reload(); } catch {} }, 200);
@@ -1172,6 +1224,11 @@ async function pollWorkerCommands() {
           // Ack the command BEFORE reloading, otherwise the ack never
           // sends and the manager will re-send this every poll cycle.
           try { await acknowledgeCommand(c.id, state.workerId); } catch {}
+          // Salvage first. chrome.runtime.reload() destroys the service
+          // worker and every row the in-flight SKU has found so far. A
+          // forced flush here means an operator-triggered reset costs at
+          // most the current keyword, not the whole product's work.
+          if (state.workerId) { try { await maybeFlushIncremental(true); } catch {} }
           bufferActivity({ level: 'warn', source: 'cmd', message: `Hard-reset command received — reloading extension to unstick frozen engine.` });
           // Flush the activity buffer so the manager sees the reload
           // event before the SW dies.
@@ -1249,6 +1306,10 @@ async function pollWorkerCommands() {
           state.lastPushedCount = 0;
           state.batchId = '';
           _pendingPushes.length = 0;
+          // Drop the incremental-flush ledger too — it tracks rows already
+          // sent for THIS run's report, and the report is being cleared.
+          _incrementalSent = new Set();
+          _lastIncrementalAt = 0;
           await setRunIntent(false);
           await chrome.storage.local.remove([
             STORAGE_KEY_QUEUE_BATCH_ID, STORAGE_KEY_CLAIMED_JOBS,
@@ -1572,6 +1633,22 @@ async function _handleStartInner(msg) {
           onRowAdded: async () => {
             state.report = Array.from(reportMap.values());
             await persistReport();
+            // Push as we go, not only at product completion.
+            //
+            // A SKU's rows used to live in worker memory until onProductDone
+            // fired. If the SKU never got there — the manager force-fails a
+            // claim at 30 min (failStuckClaims), the MV3 service worker gets
+            // recycled, Chrome restarts — every row it had found was lost.
+            // With KP retrying, SKUs routinely ran past that 30-minute cap,
+            // which is how the fleet produced ZERO keyword rows in an hour
+            // while the workers looked busy.
+            //
+            // Safe to call repeatedly: the manager's insertKeyword is
+            // ON CONFLICT(batch_id, product_url, keyword) DO UPDATE, so a
+            // re-push of an already-sent row is an idempotent update, and
+            // anything that fails still falls through to the existing
+            // pending-push retry queue at product completion.
+            if (runOpts.autoExport && state.workerId) await maybeFlushIncremental();
           },
           onProductDone: async (cleanUrl) => {
             if (!state.doneProducts.includes(cleanUrl)) {

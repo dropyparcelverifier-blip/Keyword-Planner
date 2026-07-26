@@ -2641,6 +2641,32 @@ async function run() {
     }
   }
 
+  // ── Incremental keyword flush ─────────────────────────────────────────
+  // Rows used to live in worker memory until onProductDone. A SKU that
+  // never got there — the manager's 30-min claim reaper, an MV3 service
+  // worker recycle, a browser restart — lost everything it had found. With
+  // KP retrying, SKUs routinely ran past that cap, which is how the fleet
+  // produced ZERO keyword rows in an hour while looking busy.
+  assert(bgSpiral.includes('maybeFlushIncremental'),        'INCPUSH.1 incremental flush helper exists');
+  assert(/onRowAdded[\s\S]{0,1200}maybeFlushIncremental\(\)/.test(bgSpiral), 'INCPUSH.2 flush is driven from onRowAdded');
+  assert(bgSpiral.includes('INCREMENTAL_FLUSH_MS'),         'INCPUSH.3 time-based throttle');
+  assert(bgSpiral.includes('INCREMENTAL_FLUSH_ROWS'),       'INCPUSH.4 row-count threshold');
+  assert(bgSpiral.includes('_incrementalInFlight'),         'INCPUSH.5 guards against overlapping pushes');
+  // Rejected rows must NOT be marked sent, or a stale batch id would make
+  // the completion-time resync skip them and the data would be lost.
+  assert(/rejectedOrphan > 0[\s\S]{0,400}else \{[\s\S]{0,200}_incrementalSent\.add/.test(bgSpiral),
+    'INCPUSH.6 rows are only marked sent when the manager accepted them');
+  // A forced flush must precede anything that destroys the service worker.
+  assert((bgSpiral.match(/maybeFlushIncremental\(true\)/g) || []).length >= 2,
+    'INCPUSH.7 forced flush before reload paths');
+  // The ledger is per-run; it must be cleared when the report is cleared.
+  assert(/state\.report = \[\][\s\S]{0,400}_incrementalSent = new Set\(\)/.test(bgSpiral),
+    'INCPUSH.8 flush ledger reset when the report is reset');
+  // Re-pushing must be safe on the manager side, or incremental flushing
+  // would throw on the UNIQUE(batch_id, product_url, keyword) constraint.
+  assert(/insertKeyword[\s\S]{0,300}ON CONFLICT\(batch_id, product_url, keyword\) DO UPDATE/.test(srvFull),
+    'INCPUSH.9 manager upserts keywords so repeated pushes are idempotent');
+
   assert(kwDisc.includes('createWorkerTab'), 'TABWIN.1 engine routes tab creation through a helper');
   assert(/chrome\.windows\.getAll\(\{ windowTypes: \['normal'\] \}\)/.test(kwDisc), 'TABWIN.2 binds to an existing normal window when one exists');
   assert(/chrome\.windows\.create\(\{ url, focused: false/.test(kwDisc), 'TABWIN.3 creates a window when none exists');
