@@ -4936,309 +4936,318 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             kp1ForR2.some(picked => opts.seedsAreSimilar(cand.keyword, [picked.keyword]))) continue;
         kp1ForR2.push(cand);
       }
-      // Opt-out: manual `opts.skipR2Kp` OR auto-detected persistent KP
-      // failure, via the shared health counter. 2+ consecutive KP-dead SKUs
-      // means the session is flat, so keep bailing — but the streak now
-      // expires on its own (30 min) and is reset by a successful Round 1,
-      // so this can no longer wedge the worker permanently.
-      const r2DeadStreak = await readKpDeadStreak();
-      const autoSkip = kpDeadStreakIsArmed(r2DeadStreak);
-      if (opts.skipR2Kp || autoSkip) {
-        const reason = opts.skipR2Kp
-          ? 'operator flag adbrainSkipR2Kp=true'
-          : `auto-detected: ${r2DeadStreak} consecutive R2-dead SKU(s) on this worker — KP session appears broken`;
-        onProgress?.({
-          currentProduct: productName,
-          currentSource: 'round2',
-          currentAction: `⏭ R2 KP AUTO-SKIP (${reason}). R1 data (${kp1RowsArr.length} row(s)) preserved. R2 will retry automatically on the SKU after the KP session recovers (or a successful R2 anywhere in the fleet resets the streak).`,
-          logKind: 'warn',
-        });
-        kp1ForR2.length = 0; // clear so the R2 for-loop below runs 0 iterations
-      }
-      if (kp1ForR2.length > 0) {
-        onProgress?.({
-          currentProduct: productName,
-          currentSource: 'round2',
-          currentAction: `Round 2 seeds from top R1 performers: ${kp1ForR2.map(r => `"${r.keyword}"`).join(', ')}`,
-          logKind: 'ok',
-        });
-      }
-      const totalKp1 = kp1ForR2.length;
-      const AVG_KP_REEXPAND_SECONDS = 50;
-      const round2StartedAt = Date.now();
-      if (!shouldStop() && report.size < productCap && totalKp1 > 0) {
-        const estMin = Math.max(1, Math.round((totalKp1 * AVG_KP_REEXPAND_SECONDS) / 60));
-        onProgress?.({
-          currentProduct: productName,
-          currentSource: 'round2',
-          currentAction: `Round 2 starting: re-running KP on ${totalKp1} top KP1 keyword(s) (out of ${kp1RowsArr.length} stored). Estimated ~${estMin} min for KP scrapes alone.`,
-          logKind: 'ok',
-        });
-      }
-      let kp1Idx = 0;
-      let kp2RowCount = 0;
-      // R2 degradation tracking. Each seed that exhausts retries increments
-      // this; the per-product completion summary surfaces the count so a
-      // silently-degraded run is visible without grepping the log.
-      let r2DegradedSeeds = 0;
-      // R2 fast-bail counter. If 2 consecutive R2 seeds fail with the same
-      // channel-closed / tab-crashed error, the KP session is dead for
-      // this SKU. Every subsequent seed will burn ~4 min hitting the same
-      // wall (3-min storage poll × 2 attempts). Bail to save wall clock —
-      // R1 data is already stored and the phantom-done post-mortem will
-      // flag the SKU for requeue.
-      let r2ConsecutiveKpDead = 0;
-      for (const seedRow of kp1ForR2) {
-        kp1Idx++;
-        if (shouldStop() || report.size >= productCap) break;
-        if (r2ConsecutiveKpDead >= 2) {
+      // Round 2 — re-run Keyword Planner on the best Round 1 keywords.
+      // Extracted as a named CLOSURE for the same reason as runAmazonRound:
+      // it keeps closing over the per-product state, so naming the phase
+      // cannot change behaviour. This is the phase the KP dead-streak
+      // counter disables, which is why its streak-reset could never run.
+      const runRound2Kp = async () => {
+        // Opt-out: manual `opts.skipR2Kp` OR auto-detected persistent KP
+        // failure, via the shared health counter. 2+ consecutive KP-dead SKUs
+        // means the session is flat, so keep bailing — but the streak now
+        // expires on its own (30 min) and is reset by a successful Round 1,
+        // so this can no longer wedge the worker permanently.
+        const r2DeadStreak = await readKpDeadStreak();
+        const autoSkip = kpDeadStreakIsArmed(r2DeadStreak);
+        if (opts.skipR2Kp || autoSkip) {
+          const reason = opts.skipR2Kp
+            ? 'operator flag adbrainSkipR2Kp=true'
+            : `auto-detected: ${r2DeadStreak} consecutive R2-dead SKU(s) on this worker — KP session appears broken`;
           onProgress?.({
             currentProduct: productName,
             currentSource: 'round2',
-            currentAction: `⏭ R2 BAIL: 2 consecutive KP failures on this SKU — KP session degraded, skipping remaining ${kp1ForR2.length - kp1Idx + 1} R2 seed(s) to save wall clock. R1 data preserved. Retry the SKU later or fix KP session.`,
+            currentAction: `⏭ R2 KP AUTO-SKIP (${reason}). R1 data (${kp1RowsArr.length} row(s)) preserved. R2 will retry automatically on the SKU after the KP session recovers (or a successful R2 anywhere in the fleet resets the streak).`,
             logKind: 'warn',
           });
-          r2DegradedSeeds += (kp1ForR2.length - kp1Idx + 1);
-          break;
+          kp1ForR2.length = 0; // clear so the R2 for-loop below runs 0 iterations
         }
-        const expandSeed = simplifyForKP(seedRow.keyword);
-        const elapsedS  = (Date.now() - round2StartedAt) / 1000;
-        const observedAvg = kp1Idx > 1 ? elapsedS / (kp1Idx - 1) : AVG_KP_REEXPAND_SECONDS;
-        const remaining = Math.max(0, totalKp1 - kp1Idx + 1);
-        const etaMin = Math.max(1, Math.round((remaining * observedAvg) / 60));
-        onProgress?.({
-          currentProduct: productName,
-          currentSource: 'kp expand',
-          currentAction: `Round 2 (${kp1Idx}/${totalKp1}): re-expanding KP for "${expandSeed}" — ~${etaMin} min KP work remaining`,
-          keywordCount: report.size,
-          productKeywordCount: productRows.length,
-        });
-        // R2 KP with up to 2 retries. The KP UI is brittle after R1's long
-        // idle (Discover-card click hangs, results table times out, content
-        // script disconnects). Without retry, a transient failure on the
-        // first attempt makes us skip the entire R2 branch — which is
-        // exactly the high-value re-expansion stage. We back off between
-        // attempts so the KP tab has time to settle / hydrate.
-        const R2_KP_MAX_ATTEMPTS = 3; // 1 initial + 2 retries
-        let expansion = null;
-        let r2SeedAttempts = 0;
-        let r2SeedDegraded = false;
-        for (let attempt = 1; attempt <= R2_KP_MAX_ATTEMPTS; attempt++) {
-          r2SeedAttempts = attempt;
-          if (attempt > 1) {
-            const backoff = randInt(8000, 15000) * (attempt - 1); // 8-15s, then 16-30s
-            onProgress?.({
-              currentProduct: productName,
-              currentSource: 'kp expand',
-              currentAction: `Round 2 (${kp1Idx}/${totalKp1}): KP attempt ${attempt}/${R2_KP_MAX_ATTEMPTS} for "${expandSeed}" — backing off ${Math.round(backoff/1000)}s before retry`,
-            });
-            const ok = await sleepInterruptible(backoff, shouldStop);
-            if (!ok) break;
-          }
-          expansion = await getKeywordPlannerIdeas(expandSeed, kpUrl, kpMaxPerProduct,
-            (m) => onProgress?.({ currentProduct: productName, currentAction: m }),
-            { productUrl: cleanUrl, allowWebsiteFallback: false });
-          if (expansion?.ok) break;
-        }
-
-        // "Google returned no ideas for this seed" is now ok:true + empty:true.
-        // It's not a failure; the seed just has no useful expansion. Log softly
-        // (not as R2_DEGRADED) and move on to the next seed.
-        if (expansion?.ok && expansion?.empty) {
+        if (kp1ForR2.length > 0) {
           onProgress?.({
             currentProduct: productName,
-            currentAction: `Round 2 (${kp1Idx}/${totalKp1}): "${seedRow.keyword}" — Google returned no keyword ideas (empty seed, not an error)`,
-            logKind: 'info',
+            currentSource: 'round2',
+            currentAction: `Round 2 seeds from top R1 performers: ${kp1ForR2.map(r => `"${r.keyword}"`).join(', ')}`,
+            logKind: 'ok',
           });
-          continue;
         }
-
-        if (!expansion?.ok) {
-          r2SeedDegraded = true;
-          r2DegradedSeeds++;
-          // Bump the consecutive-dead counter ONLY on channel-close / tab-crash
-          // errors — the R2 bail is specifically for 'KP tab is broken', not
-          // for legitimate 'this seed returned nothing' failures.
-          if (isKpSessionDeadError(expansion?.error)) {
-            r2ConsecutiveKpDead++;
-          } else {
-            r2ConsecutiveKpDead = 0;
-          }
+        const totalKp1 = kp1ForR2.length;
+        const AVG_KP_REEXPAND_SECONDS = 50;
+        const round2StartedAt = Date.now();
+        if (!shouldStop() && report.size < productCap && totalKp1 > 0) {
+          const estMin = Math.max(1, Math.round((totalKp1 * AVG_KP_REEXPAND_SECONDS) / 60));
           onProgress?.({
             currentProduct: productName,
-            currentAction: `Round 2 (${kp1Idx}/${totalKp1}): "${seedRow.keyword}" KP failed after ${r2SeedAttempts} attempt(s): ${expansion?.error || 'unknown'} — flagging R2 as degraded for this product`,
-            logKind: 'err',
+            currentSource: 'round2',
+            currentAction: `Round 2 starting: re-running KP on ${totalKp1} top KP1 keyword(s) (out of ${kp1RowsArr.length} stored). Estimated ~${estMin} min for KP scrapes alone.`,
+            logKind: 'ok',
           });
-        } else {
-          // Successful R2 KP call resets the consecutive-dead counter.
-          r2ConsecutiveKpDead = 0;
-          // Filter R2 KP output against the product-relevance gate BEFORE
-          // any per-row cycle. KP re-expansion on a category-broad seed like
-          // "alfalfa supplement" returns farming / livestock ideas mixed in.
-          // We store all R2 ideas as rows (addRow's own gate decides), but
-          // for SERP cycling we apply an extra strict relevance pass here.
-          const rawR2 = expansion.keywords || [];
-          const relevantR2 = (typeof opts.isRelevantToProduct === 'function' && productContext)
-            ? rawR2.filter(item => {
-                const kw = typeof item === 'string' ? item : item?.kw;
-                return kw && opts.isRelevantToProduct(kw, productContext);
-              })
-            : rawR2;
-          if (rawR2.length !== relevantR2.length) {
+        }
+        let kp1Idx = 0;
+        let kp2RowCount = 0;
+        // R2 degradation tracking. Each seed that exhausts retries increments
+        // this; the per-product completion summary surfaces the count so a
+        // silently-degraded run is visible without grepping the log.
+        let r2DegradedSeeds = 0;
+        // R2 fast-bail counter. If 2 consecutive R2 seeds fail with the same
+        // channel-closed / tab-crashed error, the KP session is dead for
+        // this SKU. Every subsequent seed will burn ~4 min hitting the same
+        // wall (3-min storage poll × 2 attempts). Bail to save wall clock —
+        // R1 data is already stored and the phantom-done post-mortem will
+        // flag the SKU for requeue.
+        let r2ConsecutiveKpDead = 0;
+        for (const seedRow of kp1ForR2) {
+          kp1Idx++;
+          if (shouldStop() || report.size >= productCap) break;
+          if (r2ConsecutiveKpDead >= 2) {
             onProgress?.({
               currentProduct: productName,
               currentSource: 'round2',
-              currentAction: `R2 KP "${seedRow.keyword}": ${rawR2.length} ideas, ${relevantR2.length} relevant after filter (${rawR2.length - relevantR2.length} off-product dropped)`,
-              logKind: 'ok',
+              currentAction: `⏭ R2 BAIL: 2 consecutive KP failures on this SKU — KP session degraded, skipping remaining ${kp1ForR2.length - kp1Idx + 1} R2 seed(s) to save wall clock. R1 data preserved. Retry the SKU later or fix KP session.`,
+              logKind: 'warn',
             });
+            r2DegradedSeeds += (kp1ForR2.length - kp1Idx + 1);
+            break;
           }
-
-          let kp2Added = 0;
-          // Cap KP output per seed — KP can return 300+ ideas for a
-          // borderline seed like "alfalfa 650 mg benefits", and most are
-          // competitor-brand noise. Raised 20→40 to feed the 100-300
-          // kw/SKU target; relevance filter still gates the wide net.
-          const R2_KP_CAP_PER_SEED = 40;
-          const cappedR2 = relevantR2.slice(0, R2_KP_CAP_PER_SEED);
-          if (relevantR2.length > R2_KP_CAP_PER_SEED) {
-            onProgress?.({
-              currentProduct: productName,
-              currentSource: 'round2',
-              currentAction: `R2 KP cap: "${seedRow.keyword}" took top ${R2_KP_CAP_PER_SEED} of ${relevantR2.length} relevant ideas`,
-            });
-          }
-          // 3-strike rule: after 3 consecutive 0-match KP2 children, the
-          // remaining ideas from this seed are almost certainly competitor
-          // brands. Skip the rest and move on to the next R2 seed.
-          let consecutiveZeroMatch = 0;
-          const R2_ZERO_BREAK = 3;
-          for (const item of cappedR2) {
-            if (shouldStop() || report.size >= productCap) break;
-            const k = toKpItem(item);
-            if (!k) continue;
-            const child = addRow(k.kw, 'kp_reexpand', seedRow.keyword, k);
-            if (!child) continue;
-            kp2Added++;
-            kp2RowCount++;
-            const childLabel = `R2 kp${kp1Idx}/${totalKp1} kw${kp2Added}:`;
-            const suggestions = await safeCycle(child, childLabel);
-            if ((child.imageCount || 0) === 0) {
-              consecutiveZeroMatch++;
-              if (consecutiveZeroMatch >= R2_ZERO_BREAK) {
-                onProgress?.({
-                  currentProduct: productName,
-                  currentSource: 'round2',
-                  currentAction: `R2 strike: 3 consecutive 0-match KP2 keywords for "${seedRow.keyword}" — skipping remaining`,
-                  logKind: 'ok',
-                });
-                break;
-              }
-            } else {
-              consecutiveZeroMatch = 0;
-            }
-
-            for (const s of suggestions) {
-              if (shouldStop() || report.size >= productCap) break;
-              if (!isRelevantKeyword(s, relevanceSet)) continue;
-              const leaf = addRow(s, 'autosuggest', child.keyword);
-              if (!leaf) continue;
-              await safeCycle(leaf, `R2-leaf:`, { leaf: true });
-            }
-          }
+          const expandSeed = simplifyForKP(seedRow.keyword);
+          const elapsedS  = (Date.now() - round2StartedAt) / 1000;
+          const observedAvg = kp1Idx > 1 ? elapsedS / (kp1Idx - 1) : AVG_KP_REEXPAND_SECONDS;
+          const remaining = Math.max(0, totalKp1 - kp1Idx + 1);
+          const etaMin = Math.max(1, Math.round((remaining * observedAvg) / 60));
           onProgress?.({
             currentProduct: productName,
-            currentAction: `Round 2 (${kp1Idx}/${totalKp1}): "${seedRow.keyword}" → ${kp2Added} KP2 keyword(s) processed (${expansion.cached ? 'cache hit' : 'fresh scrape'})`,
-            logKind: kp2Added > 0 ? 'ok' : undefined,
+            currentSource: 'kp expand',
+            currentAction: `Round 2 (${kp1Idx}/${totalKp1}): re-expanding KP for "${expandSeed}" — ~${etaMin} min KP work remaining`,
             keywordCount: report.size,
+            productKeywordCount: productRows.length,
           });
-        }
-        await sleep(randInt(3000, 8000));
-      }
-      if (totalKp1 > 0 && !shouldStop()) {
-        const wholeMin = Math.round((Date.now() - round2StartedAt) / 60000);
-        onProgress?.({
-          currentProduct: productName,
-          currentSource: 'round2',
-          currentAction: `Round 2 complete: ${kp1Idx}/${totalKp1} KP1 keywords re-expanded, ${kp2RowCount} KP2 rows processed in ${wholeMin} min`,
-          logKind: 'ok',
-        });
-      }
-      // Update the cross-SKU R2 health streak: if we bailed with
-      // r2ConsecutiveKpDead >= 2 OR ended with ALL seeds dead, this SKU
-      // counts as R2-dead. If ANY R2 seed succeeded (kp2RowCount > 0),
-      // reset the streak — KP is back. Skipped when we didn't attempt R2
-      // this SKU (totalKp1 === 0 with autoSkip active — see block above).
-      try {
-        if (totalKp1 > 0) {
-          const wasR2Dead = kp2RowCount === 0 && r2DegradedSeeds >= Math.min(2, totalKp1);
-          if (wasR2Dead) {
-            const next = await bumpKpDeadStreak();
-            if (next === KP_DEAD_ARM_THRESHOLD) {
+          // R2 KP with up to 2 retries. The KP UI is brittle after R1's long
+          // idle (Discover-card click hangs, results table times out, content
+          // script disconnects). Without retry, a transient failure on the
+          // first attempt makes us skip the entire R2 branch — which is
+          // exactly the high-value re-expansion stage. We back off between
+          // attempts so the KP tab has time to settle / hydrate.
+          const R2_KP_MAX_ATTEMPTS = 3; // 1 initial + 2 retries
+          let expansion = null;
+          let r2SeedAttempts = 0;
+          let r2SeedDegraded = false;
+          for (let attempt = 1; attempt <= R2_KP_MAX_ATTEMPTS; attempt++) {
+            r2SeedAttempts = attempt;
+            if (attempt > 1) {
+              const backoff = randInt(8000, 15000) * (attempt - 1); // 8-15s, then 16-30s
               onProgress?.({
                 currentProduct: productName,
-                currentSource: 'round2',
-                currentAction: `⏭ AUTO-SKIP ARMED: ${next} consecutive KP-dead SKU(s) on this worker. Next SKU will skip KP entirely. Auto-expires in 30 min, or on the next successful KP scrape. No operator action needed — worker is self-healing.`,
-                logKind: 'warn',
+                currentSource: 'kp expand',
+                currentAction: `Round 2 (${kp1Idx}/${totalKp1}): KP attempt ${attempt}/${R2_KP_MAX_ATTEMPTS} for "${expandSeed}" — backing off ${Math.round(backoff/1000)}s before retry`,
               });
+              const ok = await sleepInterruptible(backoff, shouldStop);
+              if (!ok) break;
             }
-          } else if (kp2RowCount > 0) {
-            // R2 succeeded — reset the streak. KP session is back.
-            if (await resetKpDeadStreak()) {
+            expansion = await getKeywordPlannerIdeas(expandSeed, kpUrl, kpMaxPerProduct,
+              (m) => onProgress?.({ currentProduct: productName, currentAction: m }),
+              { productUrl: cleanUrl, allowWebsiteFallback: false });
+            if (expansion?.ok) break;
+          }
+
+          // "Google returned no ideas for this seed" is now ok:true + empty:true.
+          // It's not a failure; the seed just has no useful expansion. Log softly
+          // (not as R2_DEGRADED) and move on to the next seed.
+          if (expansion?.ok && expansion?.empty) {
+            onProgress?.({
+              currentProduct: productName,
+              currentAction: `Round 2 (${kp1Idx}/${totalKp1}): "${seedRow.keyword}" — Google returned no keyword ideas (empty seed, not an error)`,
+              logKind: 'info',
+            });
+            continue;
+          }
+
+          if (!expansion?.ok) {
+            r2SeedDegraded = true;
+            r2DegradedSeeds++;
+            // Bump the consecutive-dead counter ONLY on channel-close / tab-crash
+            // errors — the R2 bail is specifically for 'KP tab is broken', not
+            // for legitimate 'this seed returned nothing' failures.
+            if (isKpSessionDeadError(expansion?.error)) {
+              r2ConsecutiveKpDead++;
+            } else {
+              r2ConsecutiveKpDead = 0;
+            }
+            onProgress?.({
+              currentProduct: productName,
+              currentAction: `Round 2 (${kp1Idx}/${totalKp1}): "${seedRow.keyword}" KP failed after ${r2SeedAttempts} attempt(s): ${expansion?.error || 'unknown'} — flagging R2 as degraded for this product`,
+              logKind: 'err',
+            });
+          } else {
+            // Successful R2 KP call resets the consecutive-dead counter.
+            r2ConsecutiveKpDead = 0;
+            // Filter R2 KP output against the product-relevance gate BEFORE
+            // any per-row cycle. KP re-expansion on a category-broad seed like
+            // "alfalfa supplement" returns farming / livestock ideas mixed in.
+            // We store all R2 ideas as rows (addRow's own gate decides), but
+            // for SERP cycling we apply an extra strict relevance pass here.
+            const rawR2 = expansion.keywords || [];
+            const relevantR2 = (typeof opts.isRelevantToProduct === 'function' && productContext)
+              ? rawR2.filter(item => {
+                  const kw = typeof item === 'string' ? item : item?.kw;
+                  return kw && opts.isRelevantToProduct(kw, productContext);
+                })
+              : rawR2;
+            if (rawR2.length !== relevantR2.length) {
               onProgress?.({
                 currentProduct: productName,
                 currentSource: 'round2',
-                currentAction: `✅ R2 KP RECOVERED: streak reset to 0. Full R2 re-expansion re-enabled for this worker.`,
+                currentAction: `R2 KP "${seedRow.keyword}": ${rawR2.length} ideas, ${relevantR2.length} relevant after filter (${rawR2.length - relevantR2.length} off-product dropped)`,
                 logKind: 'ok',
               });
             }
+
+            let kp2Added = 0;
+            // Cap KP output per seed — KP can return 300+ ideas for a
+            // borderline seed like "alfalfa 650 mg benefits", and most are
+            // competitor-brand noise. Raised 20→40 to feed the 100-300
+            // kw/SKU target; relevance filter still gates the wide net.
+            const R2_KP_CAP_PER_SEED = 40;
+            const cappedR2 = relevantR2.slice(0, R2_KP_CAP_PER_SEED);
+            if (relevantR2.length > R2_KP_CAP_PER_SEED) {
+              onProgress?.({
+                currentProduct: productName,
+                currentSource: 'round2',
+                currentAction: `R2 KP cap: "${seedRow.keyword}" took top ${R2_KP_CAP_PER_SEED} of ${relevantR2.length} relevant ideas`,
+              });
+            }
+            // 3-strike rule: after 3 consecutive 0-match KP2 children, the
+            // remaining ideas from this seed are almost certainly competitor
+            // brands. Skip the rest and move on to the next R2 seed.
+            let consecutiveZeroMatch = 0;
+            const R2_ZERO_BREAK = 3;
+            for (const item of cappedR2) {
+              if (shouldStop() || report.size >= productCap) break;
+              const k = toKpItem(item);
+              if (!k) continue;
+              const child = addRow(k.kw, 'kp_reexpand', seedRow.keyword, k);
+              if (!child) continue;
+              kp2Added++;
+              kp2RowCount++;
+              const childLabel = `R2 kp${kp1Idx}/${totalKp1} kw${kp2Added}:`;
+              const suggestions = await safeCycle(child, childLabel);
+              if ((child.imageCount || 0) === 0) {
+                consecutiveZeroMatch++;
+                if (consecutiveZeroMatch >= R2_ZERO_BREAK) {
+                  onProgress?.({
+                    currentProduct: productName,
+                    currentSource: 'round2',
+                    currentAction: `R2 strike: 3 consecutive 0-match KP2 keywords for "${seedRow.keyword}" — skipping remaining`,
+                    logKind: 'ok',
+                  });
+                  break;
+                }
+              } else {
+                consecutiveZeroMatch = 0;
+              }
+
+              for (const s of suggestions) {
+                if (shouldStop() || report.size >= productCap) break;
+                if (!isRelevantKeyword(s, relevanceSet)) continue;
+                const leaf = addRow(s, 'autosuggest', child.keyword);
+                if (!leaf) continue;
+                await safeCycle(leaf, `R2-leaf:`, { leaf: true });
+              }
+            }
+            onProgress?.({
+              currentProduct: productName,
+              currentAction: `Round 2 (${kp1Idx}/${totalKp1}): "${seedRow.keyword}" → ${kp2Added} KP2 keyword(s) processed (${expansion.cached ? 'cache hit' : 'fresh scrape'})`,
+              logKind: kp2Added > 0 ? 'ok' : undefined,
+              keywordCount: report.size,
+            });
+          }
+          await sleep(randInt(3000, 8000));
+        }
+        if (totalKp1 > 0 && !shouldStop()) {
+          const wholeMin = Math.round((Date.now() - round2StartedAt) / 60000);
+          onProgress?.({
+            currentProduct: productName,
+            currentSource: 'round2',
+            currentAction: `Round 2 complete: ${kp1Idx}/${totalKp1} KP1 keywords re-expanded, ${kp2RowCount} KP2 rows processed in ${wholeMin} min`,
+            logKind: 'ok',
+          });
+        }
+        // Update the cross-SKU R2 health streak: if we bailed with
+        // r2ConsecutiveKpDead >= 2 OR ended with ALL seeds dead, this SKU
+        // counts as R2-dead. If ANY R2 seed succeeded (kp2RowCount > 0),
+        // reset the streak — KP is back. Skipped when we didn't attempt R2
+        // this SKU (totalKp1 === 0 with autoSkip active — see block above).
+        try {
+          if (totalKp1 > 0) {
+            const wasR2Dead = kp2RowCount === 0 && r2DegradedSeeds >= Math.min(2, totalKp1);
+            if (wasR2Dead) {
+              const next = await bumpKpDeadStreak();
+              if (next === KP_DEAD_ARM_THRESHOLD) {
+                onProgress?.({
+                  currentProduct: productName,
+                  currentSource: 'round2',
+                  currentAction: `⏭ AUTO-SKIP ARMED: ${next} consecutive KP-dead SKU(s) on this worker. Next SKU will skip KP entirely. Auto-expires in 30 min, or on the next successful KP scrape. No operator action needed — worker is self-healing.`,
+                  logKind: 'warn',
+                });
+              }
+            } else if (kp2RowCount > 0) {
+              // R2 succeeded — reset the streak. KP session is back.
+              if (await resetKpDeadStreak()) {
+                onProgress?.({
+                  currentProduct: productName,
+                  currentSource: 'round2',
+                  currentAction: `✅ R2 KP RECOVERED: streak reset to 0. Full R2 re-expansion re-enabled for this worker.`,
+                  logKind: 'ok',
+                });
+              }
+            }
+          }
+        } catch {}
+
+        // ----- Related-search drain -----
+        // Process the related-searches discovered during R1/R2 SERPs as
+        // additional 'related_search' rows. Each gets the same per-row cycle
+        // (own SERP + own image-match + own autosuggest).
+        if (relatedSearchQueue.length > 0 && !shouldStop() && report.size < productCap) {
+          const uniqueRs = Array.from(new Set(relatedSearchQueue.map(s => s.trim()))).filter(Boolean);
+          onProgress?.({
+            currentProduct: productName,
+            currentSource: 'related',
+            currentAction: `Related-search drain: processing ${uniqueRs.length} unique seed(s) discovered during R1/R2`,
+          });
+          for (const rs of uniqueRs) {
+            if (shouldStop() || report.size >= productCap) break;
+            const row = addRow(rs, 'related_search', '');
+            if (!row) continue;
+            await safeCycle(row, `RS:`, { leaf: true });
           }
         }
-      } catch {}
 
-      // ----- Related-search drain -----
-      // Process the related-searches discovered during R1/R2 SERPs as
-      // additional 'related_search' rows. Each gets the same per-row cycle
-      // (own SERP + own image-match + own autosuggest).
-      if (relatedSearchQueue.length > 0 && !shouldStop() && report.size < productCap) {
-        const uniqueRs = Array.from(new Set(relatedSearchQueue.map(s => s.trim()))).filter(Boolean);
-        onProgress?.({
-          currentProduct: productName,
-          currentSource: 'related',
-          currentAction: `Related-search drain: processing ${uniqueRs.length} unique seed(s) discovered during R1/R2`,
-        });
-        for (const rs of uniqueRs) {
-          if (shouldStop() || report.size >= productCap) break;
-          const row = addRow(rs, 'related_search', '');
-          if (!row) continue;
-          await safeCycle(row, `RS:`, { leaf: true });
-        }
-      }
-
-      // ----- CAPTCHA retry drain -----
-      // Re-run SERPs for keywords that hit a verification page during R1/R2.
-      // Longer pre-SERP pauses (15-30 s) since the IP / session got flagged
-      // before. Capped to MAX_CAPTCHA_RETRIES attempts per keyword.
-      if (captchaRetryQueue.length > 0 && !shouldStop()) {
-        const _retries = captchaRetryQueue.splice(0); // drain
-        onProgress?.({
-          currentProduct: productName,
-          currentSource: 'retry',
-          currentAction: `CAPTCHA retry: re-running ${_retries.length} keyword(s) flagged earlier`,
-          logKind: 'ok',
-        });
-        for (const item of _retries) {
-          if (shouldStop()) break;
-          const restMs = randInt(15_000, 30_000);
+        // ----- CAPTCHA retry drain -----
+        // Re-run SERPs for keywords that hit a verification page during R1/R2.
+        // Longer pre-SERP pauses (15-30 s) since the IP / session got flagged
+        // before. Capped to MAX_CAPTCHA_RETRIES attempts per keyword.
+        if (captchaRetryQueue.length > 0 && !shouldStop()) {
+          const _retries = captchaRetryQueue.splice(0); // drain
           onProgress?.({
             currentProduct: productName,
             currentSource: 'retry',
-            currentAction: `Retry pause: ${Math.round(restMs/1000)} s before re-attempting "${item.row.keyword}"`,
+            currentAction: `CAPTCHA retry: re-running ${_retries.length} keyword(s) flagged earlier`,
+            logKind: 'ok',
           });
-          const ok = await sleepInterruptible(restMs, shouldStop);
-          if (!ok) break;
-          await safeCycle(item.row, `RETRY${item.attempts}:`, { leaf: true, isRetry: true });
+          for (const item of _retries) {
+            if (shouldStop()) break;
+            const restMs = randInt(15_000, 30_000);
+            onProgress?.({
+              currentProduct: productName,
+              currentSource: 'retry',
+              currentAction: `Retry pause: ${Math.round(restMs/1000)} s before re-attempting "${item.row.keyword}"`,
+            });
+            const ok = await sleepInterruptible(restMs, shouldStop);
+            if (!ok) break;
+            await safeCycle(item.row, `RETRY${item.attempts}:`, { leaf: true, isRetry: true });
+          }
         }
-      }
+      };
+      await runRound2Kp();
+
 
       // ----- Amazon Round (R3) — browser-driven -----
       //
@@ -5252,417 +5261,426 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       //   4. Record top competitor listings.
       //   5. For each Amazon-suggested keyword that passes the relevance
       //      gate, run the standard per-row cycle (Google SERP + match).
-      const MAX_AMAZON_TOP_KEYWORDS = maxAmazonKeywords;
-      const AMAZON_PER_SUGGEST_CAP   = 6;
-      if (!shouldStop() && report.size < productCap) {
-        // Amazon search list: product name first, then every KP keyword that
-        // passed the relevance filter. KP ideas already carry real search
-        // volume and KP's own product gate, so they're a better starting
-        // point than picking by adRating (which was biased toward keywords
-        // that happened to find image matches on Google).
-        const topForAmazon = [];
-        const seen = new Set();
-        const pushParent = (row) => {
-          if (!row || !row.keyword) return;
-          const k = String(row.keyword).toLowerCase().trim();
-          if (!k || seen.has(k)) return;
-          if (row.tier === 'brand_other' || row._brandOnly) return;
-          seen.add(k);
-          topForAmazon.push(row);
-        };
+      // Extracted as a named phase. This is a CLOSURE, not a module-level
+      // function: it still closes over the per-product state above it
+      // (report, productContext, addRow, keyFor, shouldStop, ...), so the
+      // extraction cannot change behaviour by dropping a binding. Lifting it
+      // to module scope needs those ~10 dependencies made explicit first,
+      // and that step wants engine-level behavioural tests to back it.
+      const runAmazonRound = async () => {
+        const MAX_AMAZON_TOP_KEYWORDS = maxAmazonKeywords;
+        const AMAZON_PER_SUGGEST_CAP   = 6;
+        if (!shouldStop() && report.size < productCap) {
+          // Amazon search list: product name first, then every KP keyword that
+          // passed the relevance filter. KP ideas already carry real search
+          // volume and KP's own product gate, so they're a better starting
+          // point than picking by adRating (which was biased toward keywords
+          // that happened to find image matches on Google).
+          const topForAmazon = [];
+          const seen = new Set();
+          const pushParent = (row) => {
+            if (!row || !row.keyword) return;
+            const k = String(row.keyword).toLowerCase().trim();
+            if (!k || seen.has(k)) return;
+            if (row.tier === 'brand_other' || row._brandOnly) return;
+            seen.add(k);
+            topForAmazon.push(row);
+          };
 
-        // 1) Product name itself — find an existing row for it, otherwise
-        // synthesize one so the Amazon search still runs. Synthesized rows
-        // are stored in the report so amazon_* fields land in the CSV.
-        const pnQuery = (productContext?.fullProductName || productName || '').trim();
-        if (pnQuery) {
-          const pnKey = pnQuery.toLowerCase();
-          // Composite key — see `keyFor` defined in addRow above. The report
-          // map is now keyed per (product, keyword) pair so multiple SKUs
-          // can share the same headline keyword.
-          let pnRow = report.get(keyFor(pnKey));
-          if (!pnRow) {
-            pnRow = addRow(pnQuery, 'product_name', '');
+          // 1) Product name itself — find an existing row for it, otherwise
+          // synthesize one so the Amazon search still runs. Synthesized rows
+          // are stored in the report so amazon_* fields land in the CSV.
+          const pnQuery = (productContext?.fullProductName || productName || '').trim();
+          if (pnQuery) {
+            const pnKey = pnQuery.toLowerCase();
+            // Composite key — see `keyFor` defined in addRow above. The report
+            // map is now keyed per (product, keyword) pair so multiple SKUs
+            // can share the same headline keyword.
+            let pnRow = report.get(keyFor(pnKey));
+            if (!pnRow) {
+              pnRow = addRow(pnQuery, 'product_name', '');
+            }
+            // addRow returns null if the row was rejected (junk/relevance gate
+            // /cap). When that happens, fall back to a transient parent — the
+            // Amazon data won't persist but the search still runs.
+            if (!pnRow) {
+              pnRow = { keyword: pnQuery, source: 'product_name', _transient: true };
+            }
+            pushParent(pnRow);
           }
-          // addRow returns null if the row was rejected (junk/relevance gate
-          // /cap). When that happens, fall back to a transient parent — the
-          // Amazon data won't persist but the search still runs.
-          if (!pnRow) {
-            pnRow = { keyword: pnQuery, source: 'product_name', _transient: true };
-          }
-          pushParent(pnRow);
-        }
 
-        // 2) All KP rows that survived the relevance filter (both KP1 and KP2).
-        for (const r of productRows) {
-          if (r.source === 'kp_idea' || r.source === 'kp_reexpand') pushParent(r);
-        }
-        // 3) Commercial-modifier seeds — the R1 modifier expansion synthesised
-        // 'buy X / X price / best X / X review' variants that are HIGH commercial
-        // intent by construction. Amazon Round is the perfect place for them:
-        // marketplace queries about buying intent are exactly what these express.
-        // Ranked ahead of autosuggest because intent is more explicit.
-        for (const r of productRows) {
-          if (r.source === 'commercial_modifier') pushParent(r);
-        }
-        // 4) Autosuggest rows — long-tail queries that got past the relevance
-        // filter. Keep them for coverage, but they're the last to enter the cap.
-        for (const r of productRows) {
-          if (r.source === 'autosuggest') pushParent(r);
-        }
-        // 5) Amazon-side modifier synthesis — for the top-3 seeds we've picked
-        // so far, synthesise 4 commercial variants each (12 ephemeral queries).
-        // These NEVER become rows (Amazon-only search, then discarded); the
-        // result rows carry the parent seed as source. Cheap way to squeeze
-        // marketplace-specific queries out of a niche brand where KP was sparse.
-        const AMAZON_MODIFIERS = ['buy', 'best', 'price', 'review'];
-        const AMAZON_MOD_TOP = 3;
-        const topSoFar = topForAmazon.slice(0, AMAZON_MOD_TOP);
-        for (const base of topSoFar) {
-          for (const mod of AMAZON_MODIFIERS) {
-            for (const variant of [`${mod} ${base.keyword}`, `${base.keyword} ${mod}`]) {
-              // Reuse pushParent's dedupe/tier guards. Synthesised rows are
-              // transient (never persist) and carry the parent's tier.
-              pushParent({
-                keyword: variant,
-                source: 'amazon_mod',
-                tier: base.tier,
-                _transient: true,
-                _amazonModifier: mod,
-                _amazonModifierParent: base.keyword,
-              });
+          // 2) All KP rows that survived the relevance filter (both KP1 and KP2).
+          for (const r of productRows) {
+            if (r.source === 'kp_idea' || r.source === 'kp_reexpand') pushParent(r);
+          }
+          // 3) Commercial-modifier seeds — the R1 modifier expansion synthesised
+          // 'buy X / X price / best X / X review' variants that are HIGH commercial
+          // intent by construction. Amazon Round is the perfect place for them:
+          // marketplace queries about buying intent are exactly what these express.
+          // Ranked ahead of autosuggest because intent is more explicit.
+          for (const r of productRows) {
+            if (r.source === 'commercial_modifier') pushParent(r);
+          }
+          // 4) Autosuggest rows — long-tail queries that got past the relevance
+          // filter. Keep them for coverage, but they're the last to enter the cap.
+          for (const r of productRows) {
+            if (r.source === 'autosuggest') pushParent(r);
+          }
+          // 5) Amazon-side modifier synthesis — for the top-3 seeds we've picked
+          // so far, synthesise 4 commercial variants each (12 ephemeral queries).
+          // These NEVER become rows (Amazon-only search, then discarded); the
+          // result rows carry the parent seed as source. Cheap way to squeeze
+          // marketplace-specific queries out of a niche brand where KP was sparse.
+          const AMAZON_MODIFIERS = ['buy', 'best', 'price', 'review'];
+          const AMAZON_MOD_TOP = 3;
+          const topSoFar = topForAmazon.slice(0, AMAZON_MOD_TOP);
+          for (const base of topSoFar) {
+            for (const mod of AMAZON_MODIFIERS) {
+              for (const variant of [`${mod} ${base.keyword}`, `${base.keyword} ${mod}`]) {
+                // Reuse pushParent's dedupe/tier guards. Synthesised rows are
+                // transient (never persist) and carry the parent's tier.
+                pushParent({
+                  keyword: variant,
+                  source: 'amazon_mod',
+                  tier: base.tier,
+                  _transient: true,
+                  _amazonModifier: mod,
+                  _amazonModifierParent: base.keyword,
+                });
+              }
             }
           }
-        }
-        // Cap: bounded so Amazon Round doesn't take 10+ minutes per product.
-        // Default 80 = ~4min at 3s/seed.
-        if (topForAmazon.length > MAX_AMAZON_TOP_KEYWORDS) {
-          topForAmazon.length = MAX_AMAZON_TOP_KEYWORDS;
-        }
+          // Cap: bounded so Amazon Round doesn't take 10+ minutes per product.
+          // Default 80 = ~4min at 3s/seed.
+          if (topForAmazon.length > MAX_AMAZON_TOP_KEYWORDS) {
+            topForAmazon.length = MAX_AMAZON_TOP_KEYWORDS;
+          }
 
-        if (topForAmazon.length > 0) {
-          onProgress?.({
-            currentProduct: productName,
-            currentSource: 'amazon',
-            currentAction: `Amazon Round: ${topForAmazon.length} keyword(s) — product name + KP ideas`,
-            logKind: 'ok',
-          });
+          if (topForAmazon.length > 0) {
+            onProgress?.({
+              currentProduct: productName,
+              currentSource: 'amazon',
+              currentAction: `Amazon Round: ${topForAmazon.length} keyword(s) — product name + KP ideas`,
+              logKind: 'ok',
+            });
 
-          // Open a single Amazon tab; keep it across all top keywords.
-          let amazonTabId = null;
-          try {
-            amazonTabId = await Worker.navigate('https://www.amazon.in/');
-            await sleep(randInt(2500, 4000));
-            const ready = await pingContentScript(amazonTabId, 'AMAZON_PING', 15, 1000);
-            if (!ready) {
+            // Open a single Amazon tab; keep it across all top keywords.
+            let amazonTabId = null;
+            try {
+              amazonTabId = await Worker.navigate('https://www.amazon.in/');
+              await sleep(randInt(2500, 4000));
+              const ready = await pingContentScript(amazonTabId, 'AMAZON_PING', 15, 1000);
+              if (!ready) {
+                onProgress?.({
+                  currentProduct: productName,
+                  currentSource: 'amazon',
+                  currentAction: `Amazon Round: amazon-reader content script never responded — skipping`,
+                  logKind: 'err',
+                });
+                amazonTabId = null;
+              }
+            } catch (e) {
               onProgress?.({
                 currentProduct: productName,
                 currentSource: 'amazon',
-                currentAction: `Amazon Round: amazon-reader content script never responded — skipping`,
+                currentAction: `Amazon Round: failed to open tab — ${e.message}`,
                 logKind: 'err',
               });
               amazonTabId = null;
             }
-          } catch (e) {
+
+            let amazonStored = 0, amazonRejected = 0;
+            if (amazonTabId !== null) {
+              const brandAliases = (productContext?.brandAliases || []).filter(a => a && a.length > 2);
+              const handleWords  = (productContext?.handleWords  || []).filter(w => w && w.length > 3);
+              // Query-relevance guard — if a query has ZERO overlap with our
+              // brand aliases AND ZERO overlap with anchor/handle words, we
+              // literally can't rank on it and there's no point burning 5-10s
+              // on Amazon SERP for a hopeless query. User's log showed the
+              // Always Maxi Pads worker hammering 'best over the counter fish
+              // oil price' etc — 100% off-topic queries that came in via KP
+              // then got modifier-multiplied. Skip them cheaply.
+              let amazonSkippedIrrelevant = 0;
+              const isAmazonRelevant = (kw) => {
+                const lo = String(kw || '').toLowerCase();
+                if (!lo) return false;
+                const hasBrand = brandAliases.some(a => lo.includes(a));
+                if (hasBrand) return true;
+                const hasAnchor = handleWords.some(w => lo.includes(w));
+                return hasAnchor;
+              };
+
+              for (const parent of topForAmazon) {
+                if (shouldStop() || report.size >= productCap) break;
+                // Skip queries with no product-context overlap. Product-name
+                // seeds and PAA questions always pass (they carry either the
+                // brand or an anchor word by construction). Rejects the
+                // "fish oil for pads" class of drift-during-modifier-expansion.
+                if (!isAmazonRelevant(parent.keyword)) {
+                  amazonSkippedIrrelevant++;
+                  continue;
+                }
+
+                // --- Step 1: autosuggest from Amazon ---
+                let amazonSugs = [];
+                try {
+                  const r = await chrome.tabs.sendMessage(amazonTabId, {
+                    type: 'AMAZON_GET_SUGGESTIONS', keyword: parent.keyword,
+                  });
+                  amazonSugs = Array.isArray(r?.suggestions) ? r.suggestions : [];
+                } catch (e) {
+                  onProgress?.({
+                    currentProduct: productName, currentSource: 'amazon',
+                    currentAction: `Amazon suggest error for "${parent.keyword}": ${e.message}`,
+                    logKind: 'err',
+                  });
+                }
+                parent.amazon_suggest_count = amazonSugs.length;
+                onProgress?.({
+                  currentProduct: productName, currentSource: 'amazon',
+                  currentAction: `Amazon suggest "${parent.keyword}" → ${amazonSugs.length} suggestion(s)`,
+                  logKind: amazonSugs.length > 0 ? 'ok' : undefined,
+                });
+
+                // --- Step 2: navigate to Amazon search results ---
+                let amazonResults = [];
+                try {
+                  await chrome.tabs.update(amazonTabId, {
+                    url: `https://www.amazon.in/s?k=${encodeURIComponent(parent.keyword)}`,
+                  });
+                  await sleep(randInt(2500, 4500));
+                  const ready = await pingContentScript(amazonTabId, 'AMAZON_PING', 10, 800);
+                  if (ready) {
+                    const r = await chrome.tabs.sendMessage(amazonTabId, { type: 'AMAZON_GET_RESULTS' });
+                    amazonResults = Array.isArray(r?.results) ? r.results : [];
+                  }
+                } catch (e) {
+                  onProgress?.({
+                    currentProduct: productName, currentSource: 'amazon',
+                    currentAction: `Amazon SERP error for "${parent.keyword}": ${e.message}`,
+                    logKind: 'err',
+                  });
+                }
+                onProgress?.({
+                  currentProduct: productName, currentSource: 'amazon',
+                  currentAction: `Amazon SERP "${parent.keyword}" → ${amazonResults.length} product listing(s)`,
+                });
+
+                // Diagnostic — surface what we got back from amazon-reader so
+                // we can see WHY matches succeed or fail (brand/anchor presence).
+                // Combine title + brand field — Amazon's card often puts the
+                // brand in a SEPARATE element ("Now Foods"), with the title only
+                // showing the product type ("Alfalfa 10 Grain, 650mg, 500 Tabs").
+                // Checking only title misses the brand on every such card.
+                if (amazonResults.length > 0) {
+                  const previewLines = amazonResults.slice(0, 5).map(r => {
+                    const tl = `${r.title || ''} ${r.brand || ''}`.toLowerCase();
+                    const b = brandAliases.some(a => tl.includes(a));
+                    const a = handleWords.some(w => tl.includes(w));
+                    return `  #${r.position} brand=${b} anchor=${a} "${(r.title || '').slice(0, 80)}" brand_field="${(r.brand || '').slice(0, 30)}"`;
+                  });
+                  onProgress?.({
+                    currentProduct: productName, currentSource: 'amazon',
+                    currentAction:
+                      `Amazon match-debug brandAliases=[${brandAliases.slice(0, 5).join(',')}] anchors=[${handleWords.slice(0, 5).join(',')}]\n` +
+                      previewLines.join('\n'),
+                  });
+                } else {
+                  onProgress?.({
+                    currentProduct: productName, currentSource: 'amazon',
+                    currentAction: `Amazon match-debug: 0 listings scraped — check amazon-reader log for selector breakage`,
+                    logKind: 'err',
+                  });
+                }
+
+                // --- Step 3 & 4: find our product + record competitors ---
+                let ourRank = 0, ourPrice = '', ourRating = '', ourReviews = '', ourTitle = '';
+                const competitors = [];
+                for (const r of amazonResults.slice(0, 20)) {
+                  // Brand lives in `result.brand` on most current Amazon cards;
+                  // only checking `title` misses every card where the title is
+                  // just the product line. Combine both fields for the check.
+                  const tl = `${r.title || ''} ${r.brand || ''}`.toLowerCase();
+                  const hasBrand  = brandAliases.some(a => tl.includes(a));
+                  const hasAnchor = handleWords.some(w => tl.includes(w));
+                  // Three-layer match: brand → product identity → variant.
+                  //   • brand fails           → competitor (different brand)
+                  //   • brand ✓ identity ✗    → competitor (sibling product:
+                  //                              "Plant Enzymes" not "Super
+                  //                              Enzymes" even though both
+                  //                              are NOW Foods + "enzymes")
+                  //   • brand ✓ identity ✓ variant ✗ → competitor (wrong SKU)
+                  //   • brand ✓ identity ✓ variant ✓ → OURS
+                  let identity = { tier: 'full', match: true, missingWords: [] };
+                  if (hasBrand && hasAnchor && productContext?.checkProductIdentity) {
+                    identity = productContext.checkProductIdentity(tl);
+                  }
+                  // Tiered identity for Amazon: partial-tier requires spec
+                  // confirmation to claim, otherwise treat as competitor.
+                  if (identity.tier === 'partial') {
+                    const specConf = typeof productContext.hasSpecConfirmation === 'function'
+                      ? productContext.hasSpecConfirmation(tl)
+                      : { confirmed: false };
+                    // Promote partial-tier to "match" only if spec confirms.
+                    // Without spec confirmation, treat as identity miss
+                    // (downstream logic uses identity.match).
+                    if (specConf.confirmed) {
+                      identity = { ...identity, match: true, specConfirmation: specConf };
+                    }
+                  }
+                  const lineMod = (hasBrand && hasAnchor && identity.match && productContext?.checkProductLineModifier)
+                    ? productContext.checkProductLineModifier(tl)
+                    : null;
+                  const variantConflicts = (hasBrand && hasAnchor && identity.match && !lineMod && productContext?.checkVariantConflict)
+                    ? productContext.checkVariantConflict(tl)
+                    : [];
+                  const siblingMatchAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && productContext?.checkSiblingProduct)
+                    ? productContext.checkSiblingProduct(tl)
+                    : null;
+                  const slotMatchAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && productContext?.checkVariantSlot)
+                    ? productContext.checkVariantSlot(tl)
+                    : null;
+                  const colorMatchAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && productContext?.checkColorConflict)
+                    ? productContext.checkColorConflict(tl)
+                    : null;
+                  const swapMatchAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && productContext?.checkNameSwap)
+                    ? productContext.checkNameSwap(tl)
+                    : null;
+                  const sibAmbAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && productContext?.checkSiblingAmbiguity)
+                    ? productContext.checkSiblingAmbiguity(tl)
+                    : null;
+                  const attrFamAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && !sibAmbAmz && productContext?.checkAttributeFamily)
+                    ? productContext.checkAttributeFamily(tl)
+                    : null;
+                  const brandMateAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && !sibAmbAmz && !attrFamAmz && productContext?.checkBrandMate)
+                    ? productContext.checkBrandMate(tl)
+                    : null;
+                  const ourProduct = hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && !sibAmbAmz && !attrFamAmz && !brandMateAmz;
+                  if (ourProduct) {
+                    if (!ourRank) {
+                      ourRank    = r.position;
+                      ourPrice   = r.price || '';
+                      ourRating  = r.rating || '';
+                      ourReviews = r.reviewCount || '';
+                      ourTitle   = r.title || '';
+                    }
+                  } else if (competitors.length < 5) {
+                    if (hasBrand && hasAnchor && !identity.match) {
+                      onProgress?.({
+                        currentProduct: productName, currentSource: 'amazon',
+                        currentAction: `  ⚠ Amazon #${r.position}: brand match but WRONG PRODUCT (missing: ${identity.missingWords.join(', ')} from identity [${(productContext.coreTypeWords || []).join(' ')}])`,
+                      });
+                    } else if (hasBrand && hasAnchor && lineMod) {
+                      onProgress?.({
+                        currentProduct: productName, currentSource: 'amazon',
+                        currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but WRONG PRODUCT LINE (modifier "${lineMod.modifier}" not in our product name)`,
+                      });
+                    } else if (siblingMatchAmz) {
+                      onProgress?.({
+                        currentProduct: productName, currentSource: 'amazon',
+                        currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING PRODUCT ("${siblingMatchAmz.term}", ${siblingMatchAmz.type})`,
+                      });
+                    } else if (slotMatchAmz) {
+                      onProgress?.({
+                        currentProduct: productName, currentSource: 'amazon',
+                        currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but VARIANT SLOT MISMATCH (ours="${slotMatchAmz.ours}", theirs="${slotMatchAmz.theirs}")`,
+                      });
+                    } else if (colorMatchAmz) {
+                      onProgress?.({
+                        currentProduct: productName, currentSource: 'amazon',
+                        currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but COLOR MISMATCH (ours="${colorMatchAmz.ours}", theirs="${colorMatchAmz.theirs}")`,
+                      });
+                    } else if (swapMatchAmz) {
+                      onProgress?.({
+                        currentProduct: productName, currentSource: 'amazon',
+                        currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but SHADE/MODEL SWAP (+${swapMatchAmz.extras.join(',')} / -${swapMatchAmz.missing.join(',')})`,
+                      });
+                    } else if (sibAmbAmz) {
+                      let msg;
+                      if (sibAmbAmz.ambiguous) {
+                        msg = `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING AMBIGUOUS — listing has no confirmation of any discriminator we own; cannot pin to our SKU`;
+                      } else if (sibAmbAmz.kind === 'raw') {
+                        msg = `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING TOKEN MISMATCH (listing has "${sibAmbAmz.token}" which is another sibling's discriminator)`;
+                      } else if (sibAmbAmz.kind === 'attr') {
+                        msg = `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING ATTR MISMATCH (${sibAmbAmz.family}: ours=${sibAmbAmz.ours ?? '—'}, theirs=${sibAmbAmz.theirs})`;
+                      } else {
+                        msg = `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING DIM MISMATCH (${sibAmbAmz.dim}: ours=${sibAmbAmz.ours}, theirs=${sibAmbAmz.theirs})`;
+                      }
+                      onProgress?.({ currentProduct: productName, currentSource: 'amazon', currentAction: msg });
+                    } else if (attrFamAmz) {
+                      onProgress?.({
+                        currentProduct: productName, currentSource: 'amazon',
+                        currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but ATTRIBUTE MISMATCH (${attrFamAmz.family}: ours=${attrFamAmz.ours}, theirs=${attrFamAmz.theirs})`,
+                      });
+                    } else if (brandMateAmz) {
+                      onProgress?.({
+                        currentProduct: productName, currentSource: 'amazon',
+                        currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but BRAND-MATE TOKEN (listing has "${brandMateAmz.token}", which belongs to a sibling SKU in this batch)`,
+                      });
+                    } else if (variantConflicts.length > 0) {
+                      const c = variantConflicts[0];
+                      onProgress?.({
+                        currentProduct: productName, currentSource: 'amazon',
+                        currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but WRONG VARIANT (${c.type}: ${c.ours} vs ${c.theirs})`,
+                      });
+                    }
+                    competitors.push(
+                      `#${r.position} ${(r.title || '').slice(0, 60)}${r.price ? ' (' + r.price + ')' : ''}`
+                    );
+                  }
+                }
+                parent.amazon_rank          = ourRank;
+                parent.amazon_price         = ourPrice;
+                parent.amazon_rating        = ourRating;
+                parent.amazon_reviews       = ourReviews;
+                parent.amazon_title         = ourTitle;
+                parent.amazon_competitors   = competitors.join(' | ');
+                parent.amazon_total_results = amazonResults.length;
+                onProgress?.({
+                  currentProduct: productName, currentSource: 'amazon',
+                  currentAction: ourRank
+                    ? `  ✓ Our product at #${ourRank} on Amazon (${ourPrice || 'no price'})`
+                    : `  ✗ Our product NOT in top ${amazonResults.length} Amazon results`,
+                  logKind: ourRank ? 'ok' : undefined,
+                });
+
+                // --- Step 5: queue Amazon suggestions through the standard cycle ---
+                let processed = 0;
+                for (const sug of amazonSugs) {
+                  if (processed >= AMAZON_PER_SUGGEST_CAP) break;
+                  if (shouldStop() || report.size >= productCap) break;
+                  if (typeof opts.shouldKeepKeyword === 'function' &&
+                      !opts.shouldKeepKeyword(sug, productName)) { amazonRejected++; continue; }
+                  if (typeof opts.classifyKeyword === 'function' && productContext) {
+                    const cls = opts.classifyKeyword(sug, productContext);
+                    if (!cls.relevant || !cls.loadSERP) { amazonRejected++; continue; }
+                  }
+                  const row = addRow(sug, 'amazon_suggest', parent.keyword);
+                  if (!row) { amazonRejected++; continue; }
+                  row.amazon_parent_rating = parent.adRating || 0;
+                  await safeCycle(row, `AMZN:`, { leaf: true });
+                  amazonStored++;
+                  processed++;
+                }
+
+                // Polite pause before the next Amazon keyword.
+                await sleep(randInt(2000, 4000));
+              }
+            }
+
+            const skipNote = amazonSkippedIrrelevant > 0
+              ? ` · skipped ${amazonSkippedIrrelevant} irrelevant query(ies) (no brand/anchor overlap — saved ~${(amazonSkippedIrrelevant * 6).toFixed(0)}s of runtime)`
+              : '';
             onProgress?.({
               currentProduct: productName,
               currentSource: 'amazon',
-              currentAction: `Amazon Round: failed to open tab — ${e.message}`,
-              logKind: 'err',
+              currentAction: `Amazon Round complete: ${amazonStored} new keyword(s) added, ${amazonRejected} filtered${skipNote}`,
+              logKind: 'ok',
             });
-            amazonTabId = null;
           }
-
-          let amazonStored = 0, amazonRejected = 0;
-          if (amazonTabId !== null) {
-            const brandAliases = (productContext?.brandAliases || []).filter(a => a && a.length > 2);
-            const handleWords  = (productContext?.handleWords  || []).filter(w => w && w.length > 3);
-            // Query-relevance guard — if a query has ZERO overlap with our
-            // brand aliases AND ZERO overlap with anchor/handle words, we
-            // literally can't rank on it and there's no point burning 5-10s
-            // on Amazon SERP for a hopeless query. User's log showed the
-            // Always Maxi Pads worker hammering 'best over the counter fish
-            // oil price' etc — 100% off-topic queries that came in via KP
-            // then got modifier-multiplied. Skip them cheaply.
-            let amazonSkippedIrrelevant = 0;
-            const isAmazonRelevant = (kw) => {
-              const lo = String(kw || '').toLowerCase();
-              if (!lo) return false;
-              const hasBrand = brandAliases.some(a => lo.includes(a));
-              if (hasBrand) return true;
-              const hasAnchor = handleWords.some(w => lo.includes(w));
-              return hasAnchor;
-            };
-
-            for (const parent of topForAmazon) {
-              if (shouldStop() || report.size >= productCap) break;
-              // Skip queries with no product-context overlap. Product-name
-              // seeds and PAA questions always pass (they carry either the
-              // brand or an anchor word by construction). Rejects the
-              // "fish oil for pads" class of drift-during-modifier-expansion.
-              if (!isAmazonRelevant(parent.keyword)) {
-                amazonSkippedIrrelevant++;
-                continue;
-              }
-
-              // --- Step 1: autosuggest from Amazon ---
-              let amazonSugs = [];
-              try {
-                const r = await chrome.tabs.sendMessage(amazonTabId, {
-                  type: 'AMAZON_GET_SUGGESTIONS', keyword: parent.keyword,
-                });
-                amazonSugs = Array.isArray(r?.suggestions) ? r.suggestions : [];
-              } catch (e) {
-                onProgress?.({
-                  currentProduct: productName, currentSource: 'amazon',
-                  currentAction: `Amazon suggest error for "${parent.keyword}": ${e.message}`,
-                  logKind: 'err',
-                });
-              }
-              parent.amazon_suggest_count = amazonSugs.length;
-              onProgress?.({
-                currentProduct: productName, currentSource: 'amazon',
-                currentAction: `Amazon suggest "${parent.keyword}" → ${amazonSugs.length} suggestion(s)`,
-                logKind: amazonSugs.length > 0 ? 'ok' : undefined,
-              });
-
-              // --- Step 2: navigate to Amazon search results ---
-              let amazonResults = [];
-              try {
-                await chrome.tabs.update(amazonTabId, {
-                  url: `https://www.amazon.in/s?k=${encodeURIComponent(parent.keyword)}`,
-                });
-                await sleep(randInt(2500, 4500));
-                const ready = await pingContentScript(amazonTabId, 'AMAZON_PING', 10, 800);
-                if (ready) {
-                  const r = await chrome.tabs.sendMessage(amazonTabId, { type: 'AMAZON_GET_RESULTS' });
-                  amazonResults = Array.isArray(r?.results) ? r.results : [];
-                }
-              } catch (e) {
-                onProgress?.({
-                  currentProduct: productName, currentSource: 'amazon',
-                  currentAction: `Amazon SERP error for "${parent.keyword}": ${e.message}`,
-                  logKind: 'err',
-                });
-              }
-              onProgress?.({
-                currentProduct: productName, currentSource: 'amazon',
-                currentAction: `Amazon SERP "${parent.keyword}" → ${amazonResults.length} product listing(s)`,
-              });
-
-              // Diagnostic — surface what we got back from amazon-reader so
-              // we can see WHY matches succeed or fail (brand/anchor presence).
-              // Combine title + brand field — Amazon's card often puts the
-              // brand in a SEPARATE element ("Now Foods"), with the title only
-              // showing the product type ("Alfalfa 10 Grain, 650mg, 500 Tabs").
-              // Checking only title misses the brand on every such card.
-              if (amazonResults.length > 0) {
-                const previewLines = amazonResults.slice(0, 5).map(r => {
-                  const tl = `${r.title || ''} ${r.brand || ''}`.toLowerCase();
-                  const b = brandAliases.some(a => tl.includes(a));
-                  const a = handleWords.some(w => tl.includes(w));
-                  return `  #${r.position} brand=${b} anchor=${a} "${(r.title || '').slice(0, 80)}" brand_field="${(r.brand || '').slice(0, 30)}"`;
-                });
-                onProgress?.({
-                  currentProduct: productName, currentSource: 'amazon',
-                  currentAction:
-                    `Amazon match-debug brandAliases=[${brandAliases.slice(0, 5).join(',')}] anchors=[${handleWords.slice(0, 5).join(',')}]\n` +
-                    previewLines.join('\n'),
-                });
-              } else {
-                onProgress?.({
-                  currentProduct: productName, currentSource: 'amazon',
-                  currentAction: `Amazon match-debug: 0 listings scraped — check amazon-reader log for selector breakage`,
-                  logKind: 'err',
-                });
-              }
-
-              // --- Step 3 & 4: find our product + record competitors ---
-              let ourRank = 0, ourPrice = '', ourRating = '', ourReviews = '', ourTitle = '';
-              const competitors = [];
-              for (const r of amazonResults.slice(0, 20)) {
-                // Brand lives in `result.brand` on most current Amazon cards;
-                // only checking `title` misses every card where the title is
-                // just the product line. Combine both fields for the check.
-                const tl = `${r.title || ''} ${r.brand || ''}`.toLowerCase();
-                const hasBrand  = brandAliases.some(a => tl.includes(a));
-                const hasAnchor = handleWords.some(w => tl.includes(w));
-                // Three-layer match: brand → product identity → variant.
-                //   • brand fails           → competitor (different brand)
-                //   • brand ✓ identity ✗    → competitor (sibling product:
-                //                              "Plant Enzymes" not "Super
-                //                              Enzymes" even though both
-                //                              are NOW Foods + "enzymes")
-                //   • brand ✓ identity ✓ variant ✗ → competitor (wrong SKU)
-                //   • brand ✓ identity ✓ variant ✓ → OURS
-                let identity = { tier: 'full', match: true, missingWords: [] };
-                if (hasBrand && hasAnchor && productContext?.checkProductIdentity) {
-                  identity = productContext.checkProductIdentity(tl);
-                }
-                // Tiered identity for Amazon: partial-tier requires spec
-                // confirmation to claim, otherwise treat as competitor.
-                if (identity.tier === 'partial') {
-                  const specConf = typeof productContext.hasSpecConfirmation === 'function'
-                    ? productContext.hasSpecConfirmation(tl)
-                    : { confirmed: false };
-                  // Promote partial-tier to "match" only if spec confirms.
-                  // Without spec confirmation, treat as identity miss
-                  // (downstream logic uses identity.match).
-                  if (specConf.confirmed) {
-                    identity = { ...identity, match: true, specConfirmation: specConf };
-                  }
-                }
-                const lineMod = (hasBrand && hasAnchor && identity.match && productContext?.checkProductLineModifier)
-                  ? productContext.checkProductLineModifier(tl)
-                  : null;
-                const variantConflicts = (hasBrand && hasAnchor && identity.match && !lineMod && productContext?.checkVariantConflict)
-                  ? productContext.checkVariantConflict(tl)
-                  : [];
-                const siblingMatchAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && productContext?.checkSiblingProduct)
-                  ? productContext.checkSiblingProduct(tl)
-                  : null;
-                const slotMatchAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && productContext?.checkVariantSlot)
-                  ? productContext.checkVariantSlot(tl)
-                  : null;
-                const colorMatchAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && productContext?.checkColorConflict)
-                  ? productContext.checkColorConflict(tl)
-                  : null;
-                const swapMatchAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && productContext?.checkNameSwap)
-                  ? productContext.checkNameSwap(tl)
-                  : null;
-                const sibAmbAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && productContext?.checkSiblingAmbiguity)
-                  ? productContext.checkSiblingAmbiguity(tl)
-                  : null;
-                const attrFamAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && !sibAmbAmz && productContext?.checkAttributeFamily)
-                  ? productContext.checkAttributeFamily(tl)
-                  : null;
-                const brandMateAmz = (hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && !sibAmbAmz && !attrFamAmz && productContext?.checkBrandMate)
-                  ? productContext.checkBrandMate(tl)
-                  : null;
-                const ourProduct = hasBrand && hasAnchor && identity.match && !lineMod && variantConflicts.length === 0 && !siblingMatchAmz && !slotMatchAmz && !colorMatchAmz && !swapMatchAmz && !sibAmbAmz && !attrFamAmz && !brandMateAmz;
-                if (ourProduct) {
-                  if (!ourRank) {
-                    ourRank    = r.position;
-                    ourPrice   = r.price || '';
-                    ourRating  = r.rating || '';
-                    ourReviews = r.reviewCount || '';
-                    ourTitle   = r.title || '';
-                  }
-                } else if (competitors.length < 5) {
-                  if (hasBrand && hasAnchor && !identity.match) {
-                    onProgress?.({
-                      currentProduct: productName, currentSource: 'amazon',
-                      currentAction: `  ⚠ Amazon #${r.position}: brand match but WRONG PRODUCT (missing: ${identity.missingWords.join(', ')} from identity [${(productContext.coreTypeWords || []).join(' ')}])`,
-                    });
-                  } else if (hasBrand && hasAnchor && lineMod) {
-                    onProgress?.({
-                      currentProduct: productName, currentSource: 'amazon',
-                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but WRONG PRODUCT LINE (modifier "${lineMod.modifier}" not in our product name)`,
-                    });
-                  } else if (siblingMatchAmz) {
-                    onProgress?.({
-                      currentProduct: productName, currentSource: 'amazon',
-                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING PRODUCT ("${siblingMatchAmz.term}", ${siblingMatchAmz.type})`,
-                    });
-                  } else if (slotMatchAmz) {
-                    onProgress?.({
-                      currentProduct: productName, currentSource: 'amazon',
-                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but VARIANT SLOT MISMATCH (ours="${slotMatchAmz.ours}", theirs="${slotMatchAmz.theirs}")`,
-                    });
-                  } else if (colorMatchAmz) {
-                    onProgress?.({
-                      currentProduct: productName, currentSource: 'amazon',
-                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but COLOR MISMATCH (ours="${colorMatchAmz.ours}", theirs="${colorMatchAmz.theirs}")`,
-                    });
-                  } else if (swapMatchAmz) {
-                    onProgress?.({
-                      currentProduct: productName, currentSource: 'amazon',
-                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but SHADE/MODEL SWAP (+${swapMatchAmz.extras.join(',')} / -${swapMatchAmz.missing.join(',')})`,
-                    });
-                  } else if (sibAmbAmz) {
-                    let msg;
-                    if (sibAmbAmz.ambiguous) {
-                      msg = `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING AMBIGUOUS — listing has no confirmation of any discriminator we own; cannot pin to our SKU`;
-                    } else if (sibAmbAmz.kind === 'raw') {
-                      msg = `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING TOKEN MISMATCH (listing has "${sibAmbAmz.token}" which is another sibling's discriminator)`;
-                    } else if (sibAmbAmz.kind === 'attr') {
-                      msg = `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING ATTR MISMATCH (${sibAmbAmz.family}: ours=${sibAmbAmz.ours ?? '—'}, theirs=${sibAmbAmz.theirs})`;
-                    } else {
-                      msg = `  ⚠ Amazon #${r.position}: brand+identity match but SIBLING DIM MISMATCH (${sibAmbAmz.dim}: ours=${sibAmbAmz.ours}, theirs=${sibAmbAmz.theirs})`;
-                    }
-                    onProgress?.({ currentProduct: productName, currentSource: 'amazon', currentAction: msg });
-                  } else if (attrFamAmz) {
-                    onProgress?.({
-                      currentProduct: productName, currentSource: 'amazon',
-                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but ATTRIBUTE MISMATCH (${attrFamAmz.family}: ours=${attrFamAmz.ours}, theirs=${attrFamAmz.theirs})`,
-                    });
-                  } else if (brandMateAmz) {
-                    onProgress?.({
-                      currentProduct: productName, currentSource: 'amazon',
-                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but BRAND-MATE TOKEN (listing has "${brandMateAmz.token}", which belongs to a sibling SKU in this batch)`,
-                    });
-                  } else if (variantConflicts.length > 0) {
-                    const c = variantConflicts[0];
-                    onProgress?.({
-                      currentProduct: productName, currentSource: 'amazon',
-                      currentAction: `  ⚠ Amazon #${r.position}: brand+identity match but WRONG VARIANT (${c.type}: ${c.ours} vs ${c.theirs})`,
-                    });
-                  }
-                  competitors.push(
-                    `#${r.position} ${(r.title || '').slice(0, 60)}${r.price ? ' (' + r.price + ')' : ''}`
-                  );
-                }
-              }
-              parent.amazon_rank          = ourRank;
-              parent.amazon_price         = ourPrice;
-              parent.amazon_rating        = ourRating;
-              parent.amazon_reviews       = ourReviews;
-              parent.amazon_title         = ourTitle;
-              parent.amazon_competitors   = competitors.join(' | ');
-              parent.amazon_total_results = amazonResults.length;
-              onProgress?.({
-                currentProduct: productName, currentSource: 'amazon',
-                currentAction: ourRank
-                  ? `  ✓ Our product at #${ourRank} on Amazon (${ourPrice || 'no price'})`
-                  : `  ✗ Our product NOT in top ${amazonResults.length} Amazon results`,
-                logKind: ourRank ? 'ok' : undefined,
-              });
-
-              // --- Step 5: queue Amazon suggestions through the standard cycle ---
-              let processed = 0;
-              for (const sug of amazonSugs) {
-                if (processed >= AMAZON_PER_SUGGEST_CAP) break;
-                if (shouldStop() || report.size >= productCap) break;
-                if (typeof opts.shouldKeepKeyword === 'function' &&
-                    !opts.shouldKeepKeyword(sug, productName)) { amazonRejected++; continue; }
-                if (typeof opts.classifyKeyword === 'function' && productContext) {
-                  const cls = opts.classifyKeyword(sug, productContext);
-                  if (!cls.relevant || !cls.loadSERP) { amazonRejected++; continue; }
-                }
-                const row = addRow(sug, 'amazon_suggest', parent.keyword);
-                if (!row) { amazonRejected++; continue; }
-                row.amazon_parent_rating = parent.adRating || 0;
-                await safeCycle(row, `AMZN:`, { leaf: true });
-                amazonStored++;
-                processed++;
-              }
-
-              // Polite pause before the next Amazon keyword.
-              await sleep(randInt(2000, 4000));
-            }
-          }
-
-          const skipNote = amazonSkippedIrrelevant > 0
-            ? ` · skipped ${amazonSkippedIrrelevant} irrelevant query(ies) (no brand/anchor overlap — saved ~${(amazonSkippedIrrelevant * 6).toFixed(0)}s of runtime)`
-            : '';
-          onProgress?.({
-            currentProduct: productName,
-            currentSource: 'amazon',
-            currentAction: `Amazon Round complete: ${amazonStored} new keyword(s) added, ${amazonRejected} filtered${skipNote}`,
-            logKind: 'ok',
-          });
         }
-      }
+      };
+      await runAmazonRound();
 
       // ----- R3.5: THIN-YIELD FALLBACK — RE-ADMIT rejected KP ideas -----
       // Kicks in when the pipeline came back thin — typical for products
