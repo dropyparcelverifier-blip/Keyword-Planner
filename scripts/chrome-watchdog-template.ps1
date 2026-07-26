@@ -167,11 +167,14 @@ try {
     if ($tplBody) {
         # Build the placeholder tokens at RUNTIME rather than writing them as
         # literals. The installer does a global find-and-replace over this
-        # whole file, so a literal '__PROFILE__' here would itself be
+        # whole file, so a literal placeholder here would itself be
         # substituted at install time and this code would then be replacing
-        # the wrong string. That is precisely how the token guard broke:
-        # `$token -ne '__TOKEN__'` became `$token -ne '<the real token>'`,
-        # i.e. never true, so no request was ever authenticated.
+        # the wrong string. That is exactly how the token guard broke: it
+        # compared $token against the token placeholder, the installer
+        # rewrote that placeholder too, and the check became "send the token
+        # only if it differs from itself" — never true, so nothing was ever
+        # authenticated. This comment avoids spelling the placeholders out
+        # for the same reason.
         $u = '__'
         # .Replace() is LITERAL. PowerShell's -replace is regex, and these
         # values are Windows paths full of backslashes, which regex would
