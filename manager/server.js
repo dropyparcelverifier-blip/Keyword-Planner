@@ -38,6 +38,11 @@ const commandsRoutes    = require('./routes/commands.js');
 const configRoutes      = require('./routes/config.js');
 const backupsRoutes     = require('./routes/backups.js');
 const destructiveRoutes = require('./routes/destructive.js');
+const workersRoutes     = require('./routes/workers.js');
+const keywordsRoutes    = require('./routes/keywords.js');
+const batchesRoutes     = require('./routes/batches.js');
+const jobsRoutes        = require('./routes/jobs.js');
+const jobsUploadRoutes  = require('./routes/jobs-upload.js');
 
 // ---------- Shopify Admin API helpers ----------
 // STRICT ALLOWLIST for Shopify product updates. Everything NOT in this list
@@ -913,6 +918,12 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status, priority DESC, id ASC);
 CREATE INDEX IF NOT EXISTS jobs_batch_idx  ON jobs (batch_id);
+-- Cross-batch duplicate check (Q.existsActiveUrl) runs once per uploaded
+-- SKU. Without this the planner falls back to jobs_status_idx and, because
+-- status has only four distinct values, effectively scans every 'done' job
+-- for every row being uploaded — making bulk upload O(rows x table).
+-- Measured on 50k existing jobs / 2000 new SKUs: 9829 ms -> 8 ms.
+CREATE INDEX IF NOT EXISTS jobs_product_url_idx ON jobs (product_url, status);
 
 CREATE TABLE IF NOT EXISTS keywords (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -924,7 +935,11 @@ CREATE TABLE IF NOT EXISTS keywords (
   created_at   INTEGER DEFAULT (strftime('%s','now')*1000),
   UNIQUE (batch_id, product_url, keyword)
 );
-CREATE INDEX IF NOT EXISTS keywords_batch_idx ON keywords (batch_id);
+-- No keywords(batch_id) index: UNIQUE (batch_id, product_url, keyword)
+-- already creates one with batch_id leftmost, which the planner uses for
+-- batch lookups (and as a covering index for COUNT). A second index only
+-- added write cost on the highest-volume insert path in the system.
+DROP INDEX IF EXISTS keywords_batch_idx;
 
 CREATE TABLE IF NOT EXISTS activity_log (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1021,11 +1036,29 @@ function send(res, code, body, headers) {
   }, headers || {}));
   res.end(data);
 }
+const MAX_BODY_BYTES = 60 * 1024 * 1024;
+// Accumulate BUFFERS and decode once at the end. The previous version did
+// `buf += chunk`, which calls chunk.toString('utf8') per chunk — so any
+// multi-byte character straddling a chunk boundary decoded as two U+FFFD
+// replacement chars. JSON.parse still succeeded, so the corruption was
+// silent. That hits every non-ASCII product name and keyword (Devanagari
+// especially, at 3 bytes/char), which is most of this product's data.
+// Chunk boundaries only land mid-character on large bodies, which is
+// exactly what the keyword-push endpoint sends.
 function readJson(req) {
   return new Promise((resolve) => {
-    let buf = '';
-    req.on('data', c => { buf += c; if (buf.length > 60 * 1024 * 1024) req.destroy(); });
-    req.on('end', () => { try { resolve(buf ? JSON.parse(buf) : {}); } catch { resolve({}); } });
+    const chunks = [];
+    let bytes = 0;
+    req.on('data', c => {
+      bytes += c.length;                  // byte length, not string length
+      if (bytes > MAX_BODY_BYTES) { req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      if (!chunks.length) return resolve({});
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
+      catch { resolve({}); }
+    });
     req.on('error', () => resolve({}));
   });
 }
@@ -1340,7 +1373,13 @@ function runBackup() {
   try {
     if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
     const ts = new Date().toISOString().replace(/[-:T]/g, '').split('.')[0]; // YYYYMMDDTHHMMSS
-    const target = path.join(BACKUP_DIR, `adbrain-${ts}.db`);
+    let target = path.join(BACKUP_DIR, `adbrain-${ts}.db`);
+    // The stamp only has 1-second resolution, and VACUUM INTO refuses to
+    // overwrite. Two backups in the same second (dev restarts, tests) would
+    // otherwise fail with 'output file already exists'.
+    for (let n = 2; fs.existsSync(target); n++) {
+      target = path.join(BACKUP_DIR, `adbrain-${ts}-${n}.db`);
+    }
     // Escape single quotes for SQL literal.
     const safePath = target.replace(/'/g, "''");
     db.exec(`VACUUM INTO '${safePath}'`);
@@ -1373,6 +1412,18 @@ if (BACKUP_KEEP_N > 0) {
   // Run once on startup so the first backup lands within seconds of the
   // manager coming up (users can verify the mechanism works without waiting).
   setTimeout(() => {
+    // Only if we don't already have a recent snapshot. The supervisor
+    // restarts the manager on every file save, and this used to fire a full
+    // copy of the DB each time — three restarts inside two minutes wrote
+    // 312 MB of near-identical backups and evicted the genuinely old ones
+    // from the keep-N window. A backup younger than the normal interval is
+    // as good as one taken right now.
+    const newest = listBackups()[0];
+    const age = newest ? Date.now() - newest.mtime : Infinity;
+    if (age < BACKUP_INTERVAL_MS) {
+      console.log(`[manager] Startup backup skipped — ${Math.round(age / 60000)} min old snapshot already exists (${newest.name}).`);
+      return;
+    }
     const r = runBackup();
     if (r.ok) console.log(`[manager] Initial backup written: ${r.path} (${r.size} bytes)`);
     else console.error(`[manager] Initial backup FAILED: ${r.error}`);
@@ -1822,12 +1873,29 @@ Write-Host '==================================================================='
 // modules destructure only what they need; nothing here is hot-path
 // enough to matter. Kept in one place so route modules never need to
 // reach for closures declared far above.
+// Reclaim disk after a mass delete. SQLite marks freed pages reusable but
+// never returns them to the filesystem, and the WAL keeps growing until
+// something checkpoints it — so a DB that had been wiped down to ~150 KB of
+// live rows was still occupying 116 MB on disk with a 17 MB WAL. Must run
+// OUTSIDE a transaction (VACUUM cannot run inside one), so callers invoke
+// this after COMMIT. Best-effort: a failure here is not worth failing the
+// user's delete over.
+function reclaimSpace() {
+  try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch {}
+  try { db.exec('VACUUM'); } catch (e) {
+    console.error('[manager] VACUUM after delete failed (non-fatal):', e.message);
+  }
+}
+
 const routerCtx = {
   db, Q,
   send, readJson, now,
+  reclaimSpace,
   currentManagerVersion,
   bootCommit: _bootCommit,
   runBackup, listBackups,
+  currentWorkerBundleHash, sendWolPacket,
+  claimJobs, shopifyRequest,
   BACKUP_KEEP_N, BACKUP_DIR,
 };
 const router = createRouter();
@@ -1837,6 +1905,11 @@ commandsRoutes.register(router);
 configRoutes.register(router);
 backupsRoutes.register(router);
 destructiveRoutes.register(router);
+workersRoutes.register(router);
+keywordsRoutes.register(router);
+batchesRoutes.register(router);
+jobsRoutes.register(router);
+jobsUploadRoutes.register(router);
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -1910,1120 +1983,10 @@ const server = http.createServer(async (req, res) => {
     // to the legacy if-ladder below for un-migrated sections.
     if (await router.dispatch(req, res, url, routerCtx)) return;
 
-    // ----- Jobs / queue -----
-    // Bulk-import SKUs from a plaintext list (one SKU per line). Handles
-    // Dropy-<ASIN> format used by dropy.in — the trailing 10-char token
-    // is the Amazon ASIN. Client sends:
-    //   { batchId, skus: ['Dropy-B002OTT3US', ...], resolve: 'amazon' | 'shopify' | 'both', dryRun?: true }
-    // Server:
-    //   - Parses each line, trims whitespace, skips blanks/comments (# ...)
-    //   - Extracts ASIN via /^(?:Dropy-)?([A-Z0-9]{10})$/i
-    //   - resolve='amazon': generates https://www.amazon.in/dp/<ASIN>
-    //   - resolve='shopify': calls Shopify Admin API to find the variant
-    //     by SKU (needs Shopify creds configured), then builds the
-    //     dropy.in product URL from the returned handle
-    //   - resolve='both': tries shopify first, falls back to amazon
-    //   - dryRun=true: parses + resolves + returns the preview WITHOUT
-    //     inserting rows (so the UI can show 'we'll add these 25')
-    if (m === 'POST' && p === '/api/jobs/upload-by-sku') {
-      const b = await readJson(req);
-      const batchId = String(b.batchId || '').trim();
-      const skus    = Array.isArray(b.skus) ? b.skus : [];
-      const resolveMode = ['amazon', 'shopify', 'both'].includes(b.resolve) ? b.resolve : 'amazon';
-      const dryRun = !!b.dryRun;
-      if (!batchId) return send(res, 400, { ok: false, error: 'batchId required' });
-      if (skus.length === 0) return send(res, 400, { ok: false, error: 'skus (array) required' });
-      // Parse: trim, drop blanks + '#' comments, dedup case-insensitively.
-      const parsed = new Map();
-      const badFormat = [];
-      for (const raw of skus) {
-        const line = String(raw || '').trim();
-        if (!line || line.startsWith('#')) continue;
-        // Accept 'Dropy-BXXXXXXXXX', 'dropy-bXXXXXXXXX', or just 'BXXXXXXXXX'
-        const m2 = line.match(/^(?:Dropy-)?([A-Z0-9]{10})$/i);
-        if (!m2) { badFormat.push(line); continue; }
-        const asin = m2[1].toUpperCase();
-        const key = asin;
-        if (!parsed.has(key)) parsed.set(key, { sku: line, asin });
-      }
-      // Resolve each SKU to a URL. Uses ONE GraphQL query per lookup
-      // round (SKU / barcode / handle) with OR'd search values —
-      // 3 API calls per 250-SKU batch instead of 750.
-      const cfgRow = Q.getConfig.get();
-      const cfg = cfgRow?.config ? JSON.parse(cfgRow.config) : {};
-      const shop = cfg.shopify || {};
-      const apiVer = shop.apiVersion || '2024-10';
-      const shopifyConfigured = !!(shop.shopDomain && shop.adminToken);
-      const shopifyDomain = shop.shopDomain ? String(shop.shopDomain).replace(/^https?:\/\//, '').replace(/\/+$/, '') : null;
-      // Build the batch search value: field:"a" OR field:"b" OR ...
-      const batchGqlLookup = async (field, values) => {
-        if (values.length === 0) return {};
-        // Shopify's OR operator + double-quoted values (hyphens preserved).
-        // 'first' clamps to actual value count so we don't over-request.
-        const clauses = values.map(v => `${field}:\\"${String(v).replace(/"/g, '')}\\"`).join(' OR ');
-        const first = Math.min(250, values.length * 3);  // some SKUs may have multiple variants
-        const graphqlText = `{
-          productVariants(first: ${first}, query: "${clauses}") {
-            edges { node { id sku barcode product { id handle title tags vendor productType } } }
-          }
-        }`;
-        const r = await shopifyRequest({
-          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
-          method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`, body: { query: graphqlText },
-        });
-        if (!r.ok) return {};
-        // Return a map keyed by the field-value (lowercased) so the
-        // per-SKU loop can look up matches locally in O(1). Ignore
-        // fuzzy hits — the returned field must equal what we asked.
-        const byKey = {};
-        for (const edge of (r?.data?.data?.productVariants?.edges || [])) {
-          const key = String(edge?.node?.[field] || '').toLowerCase();
-          if (!key) continue;
-          if (!byKey[key]) byKey[key] = edge.node;   // first exact match wins
-        }
-        return byKey;
-      };
-      const batchGqlHandleWildcard = async (asinTokens) => {
-        if (asinTokens.length === 0) return {};
-        // Handle wildcards — 'handle:*asin* OR handle:*asin2*'. Slower
-        // than exact lookup on Shopify's side but still one round-trip.
-        const clauses = asinTokens.map(a => `handle:*${a}*`).join(' OR ');
-        const first = Math.min(250, asinTokens.length * 2);
-        const graphqlText = `{
-          products(first: ${first}, query: "${clauses}") {
-            edges { node { id handle title tags vendor productType } }
-          }
-        }`;
-        const r = await shopifyRequest({
-          shopDomain: shop.shopDomain, adminToken: shop.adminToken,
-          method: 'POST', apiPath: `/admin/api/${apiVer}/graphql.json`, body: { query: graphqlText },
-        });
-        if (!r.ok) return {};
-        const byAsin = {};
-        for (const edge of (r?.data?.data?.products?.edges || [])) {
-          const h = String(edge?.node?.handle || '').toLowerCase();
-          for (const a of asinTokens) {
-            if (h.includes(a) && !byAsin[a]) byAsin[a] = edge.node;
-          }
-        }
-        return byAsin;
-      };
-      // Look up the STOREFRONT host (the public dropy.in domain, NOT
-      // the *.myshopify.com admin host). Shopify's /admin/api/shop.json
-      // returns .primary_domain.host which is what customers browse.
-      // Cache for the duration of this request only.
-      let storefrontHost = shop.storefrontDomain
-        ? String(shop.storefrontDomain).replace(/^https?:\/\//, '').replace(/\/+$/, '')
-        : null;
-      if (!storefrontHost && shopifyConfigured) {
-        try {
-          const sr = await shopifyRequest({
-            shopDomain: shop.shopDomain, adminToken: shop.adminToken,
-            method: 'GET', apiPath: `/admin/api/${apiVer}/shop.json?fields=primary_domain`,
-          });
-          if (sr.ok && sr.data?.shop?.primary_domain?.host) {
-            storefrontHost = sr.data.shop.primary_domain.host;
-          }
-        } catch { /* fall back to shopifyDomain below */ }
-      }
-      // Fall back to the admin domain if we couldn't get the primary_domain.
-      const publicHost = storefrontHost || shopifyDomain;
-      // BATCH pre-lookup — one Shopify query per round covers every SKU.
-      let skuMap = {}, barcodeMap = {}, handleMap = {};
-      const wantShopifyForBatch = (resolveMode === 'shopify' || resolveMode === 'both') && shopifyConfigured;
-      if (wantShopifyForBatch) {
-        const allSkuCandidates = [];
-        const allBarcodeCandidates = [];
-        const allAsinTokens = [];
-        for (const [asin, e] of parsed) {
-          allSkuCandidates.push(e.sku);
-          allSkuCandidates.push(asin);
-          allSkuCandidates.push(`Dropy-${asin}`);
-          allBarcodeCandidates.push(e.sku, asin);
-          allAsinTokens.push(asin.toLowerCase());
-        }
-        const uniq = arr => [...new Set(arr.filter(Boolean))];
-        try {
-          skuMap     = await batchGqlLookup('sku',     uniq(allSkuCandidates));
-        } catch (e) { /* skuMap stays empty */ }
-        try {
-          barcodeMap = await batchGqlLookup('barcode', uniq(allBarcodeCandidates));
-        } catch (e) { /* barcodeMap stays empty */ }
-        try {
-          handleMap  = await batchGqlHandleWildcard(uniq(allAsinTokens));
-        } catch (e) { /* handleMap stays empty */ }
-      }
-      const enrichFromProduct = (entry, p, matchedVia) => {
-        if (!p?.handle) return false;
-        entry._url = `https://${publicHost}/products/${p.handle}`;
-        entry._source = 'shopify';
-        entry._matchedVia = matchedVia;
-        entry.product_name = p.title || null;
-        const handleParts = [
-          p.handle,
-          ...(String(p.tags || '').split(',').map(t => t.trim()).filter(Boolean)),
-          p.productType,
-        ].filter(Boolean);
-        entry.handles = handleParts.length ? handleParts.join('|') : null;
-        entry.brands  = p.vendor || null;
-        return true;
-      };
-      const resolved = [];
-      for (const [asin, entry] of parsed) {
-        let url = null, source = null, note = null;
-        let shopifyTried = false;
-        let matchedVia = null;
-        // Consume the batched maps built ABOVE the loop. Each SKU makes
-        // three O(1) local lookups instead of 3-9 Shopify roundtrips.
-        if (wantShopifyForBatch) {
-          shopifyTried = true;
-          const asinUpper = entry.asin.toUpperCase();
-          const asinLower = entry.asin.toLowerCase();
-          const candidates = [entry.sku, asinUpper, `Dropy-${asinUpper}`];
-          for (const c of candidates) {
-            const node = skuMap[String(c).toLowerCase()];
-            if (node?.product?.handle && enrichFromProduct(entry, node.product, `variant.sku="${c}"`)) {
-              url = entry._url; source = entry._source; matchedVia = entry._matchedVia; break;
-            }
-          }
-          if (!url) {
-            for (const c of candidates) {
-              const node = barcodeMap[String(c).toLowerCase()];
-              if (node?.product?.handle && enrichFromProduct(entry, node.product, `variant.barcode="${c}"`)) {
-                url = entry._url; source = entry._source; matchedVia = entry._matchedVia; break;
-              }
-            }
-          }
-          if (!url) {
-            const p = handleMap[asinLower];
-            if (p?.handle && enrichFromProduct(entry, p, `product.handle contains "${asinLower}"`)) {
-              url = entry._url; source = entry._source; matchedVia = entry._matchedVia;
-            }
-          }
-        }
-        // If Shopify matched, surface WHICH variant matched.
-        if (matchedVia) note = `matched via ${matchedVia}`;
-        // If Shopify was tried but didn't match, explain the exhausted paths.
-        if (shopifyTried && !url && !note) {
-          note = `no Shopify variant/product found (tried SKU as-is + ASIN upper/lower + Dropy- prefix variants + barcode + handle-by-ASIN)`;
-        }
-        if (!url && (resolveMode === 'amazon' || resolveMode === 'both')) {
-          url = `https://www.amazon.in/dp/${entry.asin}`;
-          source = 'amazon';
-        }
-        resolved.push({
-          sku: entry.sku, asin: entry.asin, url, source, note,
-          product_name: entry.product_name || null,
-          handles: entry.handles || null,
-          brands: entry.brands || null,
-        });
-      }
-      const withUrl = resolved.filter(r => r.url);
-      const withoutUrl = resolved.filter(r => !r.url);
-      // Dry-run: return preview, do not insert.
-      if (dryRun) {
-        return send(res, 200, {
-          ok: true, dryRun: true, batchId,
-          parsed: parsed.size, badFormat: badFormat.length, resolved: withUrl.length,
-          unresolved: withoutUrl.length,
-          preview: resolved.slice(0, 200),
-          badFormatSamples: badFormat.slice(0, 20),
-          shopifyConfigured,
-        });
-      }
-      // UPSERT semantics — 25 SKUs that all resolve to the same dropy.in
-      // product page (variants) become ONE job row whose 'sku' column
-      // holds all 25 SKUs comma-separated. That way the user sees every
-      // SKU they provided in the UI, and the engine still only scrapes
-      // the product page ONCE (the whole point of scraping).
-      //
-      // Two dedup paths:
-      //   (a) Cross-batch — skip URLs already active in ANOTHER batch.
-      //   (b) In-batch    — INSERT ... ON CONFLICT DO UPDATE appends the
-      //                     new SKU to the existing row's sku field.
-      //                     No-op if the SKU is already listed
-      //                     (guarded by NOT LIKE).
-      let inserted = 0, skippedActive = 0, linkedToExisting = 0;
-      const skippedSkus = [];
-      const seenInThisCall = new Set();
-      const upsertJob = db.prepare(`INSERT INTO jobs
-        (batch_id, sku, product_url, product_name, priority, handles, brands)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(batch_id, product_url) DO UPDATE SET
-          sku = CASE
-            WHEN sku IS NULL OR sku = '' THEN excluded.sku
-            WHEN (',' || sku || ',') LIKE '%,' || excluded.sku || ',%' THEN sku
-            ELSE sku || ',' || excluded.sku
-          END`);
-      const existsInBatch = db.prepare(`SELECT 1 FROM jobs WHERE batch_id=? AND product_url=?`);
-      db.exec('BEGIN');
-      try {
-        for (const r of withUrl) {
-          if (Q.existsActiveUrl.get(r.url, batchId)) { skippedActive++; skippedSkus.push(r.sku); continue; }
-          // Second (or Nth) time we see this URL in this call — it will
-          // hit the UPSERT UPDATE branch and merge into the row we
-          // just inserted.
-          if (seenInThisCall.has(r.url)) {
-            upsertJob.run(batchId, r.sku, r.url, r.product_name, 100, r.handles, r.brands);
-            linkedToExisting++;
-            continue;
-          }
-          seenInThisCall.add(r.url);
-          // First time in this call — check if the URL was already in
-          // the batch from a PREVIOUS upload to decide inserted vs merged.
-          const preExists = !!existsInBatch.get(batchId, r.url);
-          upsertJob.run(batchId, r.sku, r.url, r.product_name, 100, r.handles, r.brands);
-          if (preExists) linkedToExisting++;
-          else inserted++;
-        }
-        db.exec('COMMIT');
-      } catch (e) { db.exec('ROLLBACK'); throw e; }
-      return send(res, 200, {
-        ok: true, dryRun: false, batchId, inserted,
-        parsed: parsed.size, badFormat: badFormat.length,
-        unresolved: withoutUrl.length,
-        skippedActive, skippedSkus: skippedSkus.slice(0, 20),
-        // linkedToExisting = SKUs merged into another row's sku column
-        // because they resolved to a URL already in this batch. The
-        // engine still scrapes each URL once; every SKU is preserved
-        // for downstream lookup / display.
-        linkedToExisting,
-        badFormatSamples: badFormat.slice(0, 20),
-        shopifyConfigured,
-      });
-    }
-    // Bulk mutate: apply the same {status|priority} update to N job IDs.
-    // Used by the queue-manager multi-select toolbar. Force gate on
-    // claimed jobs (server refuses claimed unless {force:true}).
-    if (m === 'POST' && p === '/api/jobs/bulk-update') {
-      const b = await readJson(req);
-      const ids = Array.isArray(b.jobIds) ? b.jobIds.map(Number).filter(Number.isFinite) : [];
-      const patch = b.patch || {};
-      const force = !!b.force;
-      if (ids.length === 0) return send(res, 400, { ok: false, error: 'jobIds required' });
-      const allowed = ['priority', 'status', 'failed_reason'];
-      const setCols = [];
-      const args = [];
-      for (const col of allowed) {
-        if (col in patch) { setCols.push(`${col} = ?`); args.push(patch[col]); }
-      }
-      if (setCols.length === 0) return send(res, 400, { ok: false, error: 'patch must set at least one of: priority, status, failed_reason' });
-      // Status=pending resets claim + heartbeat too (same as jobReset semantics).
-      let extraCols = '';
-      if (patch.status === 'pending') extraCols = ', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, failed_reason=NULL';
-      let sql = `UPDATE jobs SET ${setCols.join(', ')}${extraCols} WHERE id IN (${ids.map(() => '?').join(',')})`;
-      if (!force) sql += ` AND status != 'claimed'`;
-      const info = db.prepare(sql).run(...args, ...ids);
-      return send(res, 200, { ok: true, updated: info.changes, requested: ids.length });
-    }
-    // Bulk delete: same semantics as jobDelete but for N IDs.
-    if (m === 'POST' && p === '/api/jobs/bulk-delete') {
-      const b = await readJson(req);
-      const ids = Array.isArray(b.jobIds) ? b.jobIds.map(Number).filter(Number.isFinite) : [];
-      const force = !!b.force;
-      if (ids.length === 0) return send(res, 400, { ok: false, error: 'jobIds required' });
-      db.exec('BEGIN');
-      let deleted = 0, keywordsDeleted = 0;
-      try {
-        for (const id of ids) {
-          const row = db.prepare('SELECT id, batch_id, product_url, status FROM jobs WHERE id=?').get(id);
-          if (!row) continue;
-          if (row.status === 'claimed' && !force) continue;
-          keywordsDeleted += Q.deleteKeywordsForProduct.run(row.batch_id, row.product_url).changes;
-          Q.deleteJob.run(id);
-          deleted++;
-        }
-        db.exec('COMMIT');
-      } catch (e) { db.exec('ROLLBACK'); throw e; }
-      return send(res, 200, { ok: true, deleted, keywordsDeleted, requested: ids.length });
-    }
-    if (m === 'POST' && p === '/api/jobs/upload') {
-      const b = await readJson(req);
-      const batchId = String(b.batchId || b.batch_id || '');
-      const products = Array.isArray(b.products) ? b.products : [];
-      if (!batchId || products.length === 0) return send(res, 400, { ok: false, error: 'batchId + products required' });
-      // Dedup within this upload (last occurrence wins).
-      const seen = new Map();
-      for (const pr of products) { const u = String(pr.url || pr.product_url || '').trim(); if (u) seen.set(u, pr); }
-      const dupDropped = products.filter(p => (p.url || p.product_url || '').trim()).length - seen.size;
-      // Same UPSERT semantics as /api/jobs/upload-by-sku — an append-to-
-      // existing-batch upload where the URL was already there merges the
-      // new SKU into the existing row's sku column instead of throwing
-      // UNIQUE. Idempotent re-uploads become a no-op.
-      let n = 0, skippedActive = 0, linkedToExisting = 0;
-      const skippedSkus = [];
-      const upsertJobExcel = db.prepare(`INSERT INTO jobs
-        (batch_id, sku, product_url, product_name, priority, handles, brands)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(batch_id, product_url) DO UPDATE SET
-          sku = CASE
-            WHEN sku IS NULL OR sku = '' THEN excluded.sku
-            WHEN excluded.sku IS NULL OR excluded.sku = '' THEN sku
-            WHEN (',' || sku || ',') LIKE '%,' || excluded.sku || ',%' THEN sku
-            ELSE sku || ',' || excluded.sku
-          END`);
-      const seenUrlsExcel = new Set();
-      db.exec('BEGIN');
-      try {
-        for (const [urlv, pr] of seen) {
-          // Cross-batch dedup: skip URLs already pending/claimed/done in ANOTHER batch.
-          if (Q.existsActiveUrl.get(urlv, batchId)) { skippedActive++; if (pr.sku) skippedSkus.push(pr.sku); continue; }
-          upsertJobExcel.run(batchId, pr.sku || null, urlv, pr.product_name || pr.name || null,
-            Number.isFinite(pr.priority) ? pr.priority : 100,
-            Array.isArray(pr.handles) ? pr.handles.join('|') : (pr.handles || null),
-            Array.isArray(pr.brands) ? pr.brands.join('|') : (pr.brands || null));
-          if (!seenUrlsExcel.has(urlv)) { n++; seenUrlsExcel.add(urlv); }
-          else linkedToExisting++;
-        }
-        db.exec('COMMIT');
-      } catch (e) { db.exec('ROLLBACK'); throw e; }
-      return send(res, 200, { ok: true, uploaded: n, total: seen.size, batchId, duplicatesDropped: dupDropped, skippedActive, skippedSkus: skippedSkus.slice(0, 10), linkedToExisting });
-    }
-    if (m === 'POST' && p === '/api/jobs/claim') {
-      const b = await readJson(req);
-      const workerId = String(b.workerId || '');
-      // Streaming claim policy — give a fresh worker up to 2 SKUs to build
-      // a small buffer, then refill with 1 SKU at a time as it completes.
-      // Keeps in-flight small so a worker crash loses ≤2 SKUs (not 5-8),
-      // and pending queue drains evenly across workers instead of one
-      // worker hoarding 5 while others idle. Overrides the client's
-      // limit request — the server is authoritative on load-balancing.
-      const currentClaims = workerId
-        ? db.prepare(`SELECT COUNT(*) c FROM jobs WHERE status='claimed' AND claimed_by=?`).get(workerId).c
-        : 0;
-      const askedFor = Math.max(1, Math.min(50, b.limit || 5));
-      const streamingLimit = currentClaims === 0 ? Math.min(askedFor, 2) : Math.min(askedFor, 1);
-      const claimed = claimJobs(workerId, String(b.batchId || ''), streamingLimit);
-      return send(res, 200, { ok: true, jobs: claimed });
-    }
-    if (m === 'POST' && p === '/api/jobs/heartbeat') {
-      const b = await readJson(req); const t = now();
-      let n = 0;
-      for (const id of (Array.isArray(b.jobIds) ? b.jobIds : [])) { const info = Q.heartbeatById.run(t, Number(id), b.workerId); n += info.changes; }
-      // Echo the manager's authoritative active batch back to the worker so
-      // it can detect drift (worker's cached queueBatchId != manager's pin).
-      // Prevents orphan-batch writes when the manager re-pins after a Reset.
-      const cfgHb = Q.getConfig.get();
-      const pinnedHb = (cfgHb?.active_batch_id || '').trim();
-      let activeHb = pinnedHb && Q.batchHasPending.get(pinnedHb) ? pinnedHb : null;
-      if (!activeHb) activeHb = Q.newestPendingBatch.get()?.batch_id || null;
-      return send(res, 200, { ok: true, updated: n, active_batch_id: activeHb });
-    }
-    if (m === 'POST' && p === '/api/jobs/requeue') {
-      const b = await readJson(req);
-      // Two lookup modes:
-      //   { jobId: N }                         — canonical, used by the
-      //                                          Failed-jobs card row-click
-      //   { batchId: '...', productUrl: '...'} — used by the per-SKU
-      //                                          'Re-queue this SKU' button
-      //                                          on Analytics, which knows
-      //                                          the URL but not the job id
-      let info, jobId, priorStatus = null;
-      if (b.jobId) {
-        jobId = Number(b.jobId);
-        const cur = db.prepare(`SELECT status FROM jobs WHERE id=?`).get(jobId);
-        priorStatus = cur?.status || null;
-        info = Q.requeue.run(jobId);
-      } else if (b.batchId && b.productUrl) {
-        const row = db.prepare(`SELECT id, status FROM jobs WHERE batch_id=? AND product_url=? LIMIT 1`).get(String(b.batchId), String(b.productUrl));
-        if (!row) return send(res, 404, { ok: false, error: 'no job found for that batchId + productUrl' });
-        jobId = Number(row.id);            // guard against BigInt in newer node:sqlite
-        priorStatus = row.status;
-        info = Q.requeue.run(jobId);
-      } else {
-        return send(res, 400, { ok: false, error: 'send {jobId} or {batchId, productUrl}' });
-      }
-      // changes == 0 with a valid id shouldn't happen in normal SQLite — UPDATE
-      // matches by WHERE regardless of value delta. Treat it as OK for the
-      // client (the job is now pending either way) but include diagnostics so
-      // any future 0-changes surface with real info instead of a misleading
-      // 'may already be pending' guess. Prior status is echoed so the UI can
-      // say 'reset from failed → pending' etc.
-      const changes = Number(info.changes);
-      return send(res, 200, {
-        ok: true,
-        updated: changes,
-        job_id: jobId,
-        prior_status: priorStatus,
-        was_already_pending: priorStatus === 'pending',
-      });
-    }
-    if (m === 'GET' && p === '/api/jobs/active-batch') {
-      // Manager-pinned batch (if it still has pending work), else newest pending batch.
-      const cfg = Q.getConfig.get();
-      const pinned = (cfg?.active_batch_id || '').trim();
-      if (pinned && Q.batchHasPending.get(pinned)) return send(res, 200, { ok: true, batchId: pinned });
-      const row = Q.newestPendingBatch.get();
-      return send(res, 200, { ok: true, batchId: row?.batch_id || null });
-    }
-    if (m === 'GET' && p === '/api/jobs/url-active') {
-      // Cross-batch dedup check: is this product_url already active in another batch?
-      const u = url.searchParams.get('url') || '';
-      const b = url.searchParams.get('excludeBatch') || '';
-      return send(res, 200, { ok: true, active: !!Q.existsActiveUrl.get(u, b) });
-    }
-    if (m === 'POST' && p === '/api/jobs/done')   {
-      const b = await readJson(req);
-      Q.markDone.run(now(), b.batchId, b.productUrl);
-      // Phantom-done detection — if we've just marked a SKU 'done' but the
-      // keywords table has ZERO rows for it, log a clear err event so the
-      // user sees WHY the SKU landed empty. Root cause 99% of the time
-      // this session was the client-side batch_id mismatch (fixed in
-      // 45a4717) which caused every keyword push to be rejected as
-      // orphan_batch, then markDone flipped the SKU regardless.
-      // With this alert, the pattern is visible IN THE MANAGER LOG the
-      // instant it happens — no more "silent 0-row done" surprises.
-      if (b.batchId && b.productUrl) {
-        try {
-          const kwCount = db.prepare(`SELECT COUNT(*) AS n FROM keywords WHERE batch_id=? AND product_url=?`).get(b.batchId, b.productUrl);
-          if (Number(kwCount?.n || 0) === 0) {
-            Q.insertActivity.run(
-              b.batchId,
-              b.workerId || null,
-              'err',
-              'phantom_done',
-              `⚠ PHANTOM DONE: SKU marked done but the manager has ZERO keyword rows for it. Common causes: (1) worker's cached batch_id doesn't match this batch (see 'ORPHAN-BATCH REJECT' events), (2) push failed after markDone. Requeue via 'Requeue empty' or the SHIP-badge low-yield action.`,
-              b.productUrl,
-              null,
-            );
-          }
-        } catch {}
-      }
-      return send(res, 200, { ok: true });
-    }
-    if (m === 'POST' && p === '/api/jobs/failed') { const b = await readJson(req); Q.markFailed.run(b.reason || null, now(), b.batchId, b.productUrl); return send(res, 200, { ok: true }); }
-    if (m === 'POST' && p === '/api/jobs/release-stale') {
-      const b = await readJson(req); const mins = Number.isFinite(b.staleMinutes) ? b.staleMinutes : 10;
-      const cutoff = now() - mins * 60000;
-      // Auto-fail retry-loop jobs FIRST (attempts >= 3), then release the
-      // remaining stale ones back to pending. Order matters: if we release
-      // first, the attempts-count-3 job flips to pending, then the
-      // auto-fail predicate no longer sees it as 'claimed' so it never
-      // fires. Auto-fail-then-release runs both cleanly.
-      const failed = Q.failMaxAttempts.run(now(), cutoff);
-      // 15-min claim-age floor so fresh claims aren't yanked while worker
-      // is still legitimately processing — see failStuckClaims comment.
-      const stuck = Q.failStuckClaims.run(now(), now() - 5 * 60 * 1000, now() - 30 * 60 * 1000);
-      const released = Q.releaseStale.run(cutoff);
-      return send(res, 200, { ok: true, released: released.changes, auto_failed: failed.changes, force_failed_stuck: stuck.changes });
-    }
-    // Retry-loop diagnostic — list jobs stuck at attempts >= 3.
-    // Used by the dashboard's Retry-loops panel to show what's blocking
-    // throughput. Read-only; no state change.
-    if (m === 'GET' && p === '/api/jobs/retry-loops') {
-      const rows = Q.retryLoops.all();
-      const nowMs = now();
-      const enriched = rows.map(r => ({
-        ...r,
-        claimed_for_ms: r.claimed_at ? nowMs - r.claimed_at : null,
-        heartbeat_stale_for_ms: r.heartbeat_at ? nowMs - r.heartbeat_at : null,
-      }));
-      return send(res, 200, { ok: true, count: rows.length, jobs: enriched });
-    }
-    // Release all claims held by a specific worker — used when the
-    // dashboard detects a stopped/offline worker still holding SKUs
-    // that other workers could be processing.
-    if (m === 'POST' && p === '/api/jobs/release-by-worker') {
-      const b = await readJson(req);
-      const wid = String(b.workerId || '').trim();
-      if (!wid) return send(res, 400, { ok: false, error: 'workerId required' });
-      const info = Q.releaseByWorker.run(wid);
-      return send(res, 200, { ok: true, released: info.changes, workerId: wid });
-    }
-    // ─── Per-job CRUD (worker-safe) ─────────────────────────────────
-    // GET all jobs in a batch — richer than /per-product (adds worker,
-    // heartbeat, attempts, failed_reason). Used by the Queue-manage UI.
-    if (m === 'GET' && p === '/api/jobs/list') {
-      const batchId = String(url.searchParams.get('batchId') || '').trim();
-      if (!batchId) return send(res, 400, { ok: false, error: 'batchId required' });
-      return send(res, 200, { ok: true, rows: Q.jobsForBatch.all(batchId) });
-    }
-    // POST update — safe against active workers. Priority changes always
-    // OK. Field edits (sku/name/handles/brands) refused for CLAIMED jobs
-    // unless force=true, because changing product_url/name mid-run would
-    // confuse the worker's local state. product_url is NEVER updatable
-    // (it's part of the UNIQUE key + used as the job's identity across
-    // the whole system).
-    if (m === 'POST' && p === '/api/jobs/update') {
-      const b = await readJson(req);
-      const id = Number(b.jobId || b.id || 0);
-      if (!Number.isFinite(id) || id <= 0) return send(res, 400, { ok: false, error: 'jobId required' });
-      const row = Q.getJob.get(id);
-      if (!row) return send(res, 404, { ok: false, error: `no job with id ${id}` });
-      // Priority-only path — always safe.
-      if (b.priority != null && Object.keys(b).length <= 3) {
-        Q.updateJobPriority.run(Number(b.priority), id);
-        return send(res, 200, { ok: true, updated: 1, mode: 'priority-only' });
-      }
-      // Full-field update — refuses if job is claimed unless force.
-      if (row.status === 'claimed' && !b.force) {
-        return send(res, 409, { ok: false, error: `job ${id} is claimed by ${row.claimed_by}. Release the claim first, or pass force=true (worker's next heartbeat may fail).` });
-      }
-      const newSku      = b.sku          != null ? String(b.sku)          : row.sku;
-      const newName     = b.product_name != null ? String(b.product_name) : row.product_name;
-      const newPriority = b.priority     != null ? Number(b.priority)     : row.priority;
-      const newHandles  = b.handles      != null ? String(b.handles)      : row.handles;
-      const newBrands   = b.brands       != null ? String(b.brands)       : row.brands;
-      Q.updateJobFields.run(newSku, newName, newPriority, newHandles, newBrands, id);
-      return send(res, 200, { ok: true, updated: 1, mode: 'full-field' });
-    }
-    // POST reset — flip a job back to pending regardless of current state.
-    // Useful for "requeue this failed job" or "the worker is stuck, force
-    // this SKU back to pending". Refuses to reset a DONE job unless force.
-    if (m === 'POST' && p === '/api/jobs/reset') {
-      const b = await readJson(req);
-      const id = Number(b.jobId || b.id || 0);
-      if (!Number.isFinite(id) || id <= 0) return send(res, 400, { ok: false, error: 'jobId required' });
-      const row = Q.getJob.get(id);
-      if (!row) return send(res, 404, { ok: false, error: `no job with id ${id}` });
-      if (row.status === 'done' && !b.force) {
-        return send(res, 409, { ok: false, error: `job ${id} is already done. Pass force=true to re-queue it (existing keyword rows stay in the DB).` });
-      }
-      Q.updateJobStatus.run('pending', id);
-      return send(res, 200, { ok: true, updated: 1, previous: row.status });
-    }
-    // POST delete — refuses claimed jobs unless force. Also drops any
-    // keyword rows for the deleted job's product_url within this batch
-    // to prevent orphan rows lingering in Analytics.
-    if (m === 'POST' && p === '/api/jobs/delete-one') {
-      const b = await readJson(req);
-      const id = Number(b.jobId || b.id || 0);
-      if (!Number.isFinite(id) || id <= 0) return send(res, 400, { ok: false, error: 'jobId required' });
-      const row = Q.getJob.get(id);
-      if (!row) return send(res, 404, { ok: false, error: `no job with id ${id}` });
-      if (row.status === 'claimed' && !b.force) {
-        return send(res, 409, { ok: false, error: `job ${id} is claimed by ${row.claimed_by}. Release the claim first, or pass force=true.` });
-      }
-      // node:sqlite doesn't have better-sqlite3's db.transaction() helper —
-      // use explicit BEGIN/COMMIT (the pattern used elsewhere in this file).
-      let kwDeleted = 0;
-      db.exec('BEGIN');
-      try {
-        Q.deleteJob.run(id);
-        const kwDel = Q.deleteKeywordsForProduct.run(row.batch_id, row.product_url);
-        kwDeleted = kwDel.changes;
-        db.exec('COMMIT');
-      } catch (txErr) {
-        db.exec('ROLLBACK');
-        throw txErr;
-      }
-      return send(res, 200, { ok: true, deleted: 1, keywordsDeleted: kwDeleted, sku: row.sku, productUrl: row.product_url });
-    }
-    // POST add-one — insert a single SKU into an existing batch. Uses the
-    // same upsert semantics as /api/jobs/upload but bounded to one row.
-    if (m === 'POST' && p === '/api/jobs/add-one') {
-      const b = await readJson(req);
-      const batchId = String(b.batchId || '').trim();
-      const productUrl = String(b.url || b.product_url || '').trim();
-      if (!batchId)    return send(res, 400, { ok: false, error: 'batchId required' });
-      if (!productUrl) return send(res, 400, { ok: false, error: 'product url required' });
-      const sku = b.sku ? String(b.sku) : null;
-      const name = b.product_name ? String(b.product_name) : (b.name ? String(b.name) : null);
-      const priority = Number.isFinite(b.priority) ? Number(b.priority) : 100;
-      const handles = Array.isArray(b.handles) ? b.handles.join('|') : (b.handles ? String(b.handles) : null);
-      const brands  = Array.isArray(b.brands)  ? b.brands.join('|')  : (b.brands  ? String(b.brands)  : null);
-      Q.insertJob.run(batchId, sku, productUrl, name, priority, handles, brands);
-      const row = Q.jobIdByBatchAndUrl.get(batchId, productUrl);
-      return send(res, 200, { ok: true, jobId: row?.id, batchId, productUrl });
-    }
-
-    if (m === 'GET' && p === '/api/jobs/summary')      return send(res, 200, { ok: true, batches: Q.summary.all() });
-    // Per-batch readiness — one clear status per batch so the UI can show
-    // a ship-ready badge without users piecing 6 counters together. Query
-    // params: batchId (required), minRows (default 30) = threshold below
-    // which a done SKU is 'low yield'. Returns:
-    //   status: 'READY' | 'REVIEW' | 'IN_PROGRESS' | 'STUCK' | 'EMPTY'
-    //   reason: short human string explaining the status
-    //   metrics: {total, pending, claimed, done, failed, done_empty,
-    //             total_rows, low_yield, avg_rows_per_done, stall_minutes}
-    //   low_yield_skus: [{id, sku, product_name, row_count}]
-    if (m === 'GET' && p === '/api/batches/readiness') {
-      const batchId = url.searchParams.get('batchId') || '';
-      if (!batchId) return send(res, 400, { ok: false, error: 'batchId required' });
-      const minRows = Math.max(0, Number(url.searchParams.get('minRows') || 30));
-      const stuckMinutes = Math.max(1, Number(url.searchParams.get('stuckMinutes') || 30));
-      const r = Q.batchReadiness.get(batchId);
-      if (!r) return send(res, 200, { ok: true, batchId, status: 'EMPTY', reason: 'no jobs found for this batch', metrics: { total: 0 }, low_yield_skus: [] });
-      const total       = Number(r.total || 0);
-      const pending     = Number(r.pending || 0);
-      const claimed     = Number(r.claimed || 0);
-      const done        = Number(r.done || 0);
-      const failed      = Number(r.failed || 0);
-      const done_empty  = Number(r.done_empty || 0);
-      const total_rows  = Number(r.total_rows || 0);
-      // Low-yield SKUs — done jobs with row count below minRows.
-      const lowYieldRows = Q.lowYieldDoneJobs.all(batchId, minRows);
-      const low_yield = lowYieldRows.length;
-      const avg_rows_per_done = done > 0 ? Math.round(total_rows / done) : 0;
-      // Stall detection: how many minutes since the last activity event.
-      // Uses activity_log.ts which is ISO-8601 UTC. If never seen, Infinity.
-      const lastActivityMs = r.last_activity_iso ? Date.parse(r.last_activity_iso) : 0;
-      const stall_minutes = lastActivityMs > 0
-        ? Math.round((Date.now() - lastActivityMs) / 60000)
-        : Infinity;
-      // Classify.
-      let status, reason;
-      if (total === 0) {
-        status = 'EMPTY'; reason = 'no jobs in this batch';
-      } else if (pending > 0 || claimed > 0) {
-        // Still working. Check for stall.
-        if (stall_minutes > stuckMinutes && Number.isFinite(stall_minutes)) {
-          status = 'STUCK';
-          reason = `${claimed + pending} SKU(s) not done; no activity for ${stall_minutes} min. Workers may have died or KP session expired.`;
-        } else {
-          status = 'IN_PROGRESS';
-          reason = `${claimed} in-flight, ${pending} pending${done > 0 ? `, ${done} done so far` : ''}`;
-        }
-      } else if (failed > 0 || done_empty > 0 || low_yield > 0) {
-        // All settled but not clean.
-        const issues = [];
-        if (failed > 0)     issues.push(`${failed} failed`);
-        if (done_empty > 0) issues.push(`${done_empty} done-empty (0 rows)`);
-        if (low_yield > 0)  issues.push(`${low_yield} low-yield (< ${minRows} rows)`);
-        status = 'REVIEW';
-        reason = `all SKUs settled but needs eyes: ${issues.join(', ')}. Requeue or accept as-is.`;
-      } else {
-        // All done, no failures, no low-yield.
-        status = 'READY';
-        reason = `${done}/${total} SKUs done · ${total_rows.toLocaleString()} rows (avg ${avg_rows_per_done}/SKU) · no failed / no low-yield · ready to ship`;
-      }
-      return send(res, 200, {
-        ok: true,
-        batchId,
-        status,
-        reason,
-        metrics: {
-          total, pending, claimed, done, failed, done_empty,
-          total_rows, low_yield, avg_rows_per_done,
-          stall_minutes: Number.isFinite(stall_minutes) ? stall_minutes : null,
-        },
-        low_yield_skus: lowYieldRows,
-      });
-    }
-    // Per-batch ETA — projected finish time based on recent row-landing rate.
-    // Answers "when will this batch actually be done?" by combining:
-    //   · rows landed in the last SHORT window (default 5 min) → recent_rate
-    //   · rows landed in the last LONG window (default 30 min) → long_rate
-    //   · a comparison of the two → trend (accelerating / stable / decelerating)
-    //   · remaining jobs × avg rows/SKU-so-far → estimated rows remaining
-    //   · rows remaining / rate → ETA minutes
-    // Returns null ETA (with reason) when we can't compute — no rows yet,
-    // no pending jobs, etc — so the UI can degrade gracefully.
-    if (m === 'GET' && p === '/api/batches/eta') {
-      const batchId = url.searchParams.get('batchId') || '';
-      if (!batchId) return send(res, 400, { ok: false, error: 'batchId required' });
-      const shortWinMin = Math.max(1, Number(url.searchParams.get('shortWindowMin') || 5));
-      const longWinMin  = Math.max(shortWinMin, Number(url.searchParams.get('longWindowMin') || 30));
-      const nowTs = now();
-      const shortStart = nowTs - shortWinMin * 60000;
-      const longStart  = nowTs - longWinMin  * 60000;
-      const shortR = Q.keywordsRateBatch.get(batchId, shortStart);
-      const longR  = Q.keywordsRateBatch.get(batchId, longStart);
-      const shortN = Number(shortR?.n || 0);
-      const longN  = Number(longR?.n  || 0);
-      const shortRate = shortN / shortWinMin;     // rows/min
-      const longRate  = longN  / longWinMin;      // rows/min
-      // Prefer short rate (matches current pace); fall back to long if short is 0.
-      const activeRate = shortRate > 0 ? shortRate : longRate;
-      // Job status snapshot from batchReadiness aggregate — reuse to avoid duplication.
-      const rd = Q.batchReadiness.get(batchId);
-      if (!rd) return send(res, 200, { ok: true, batchId, eta_minutes: null, reason: 'no jobs found', metrics: {} });
-      const total   = Number(rd.total || 0);
-      const done    = Number(rd.done || 0);
-      const pending = Number(rd.pending || 0);
-      const claimed = Number(rd.claimed || 0);
-      const totalRows = Number(rd.total_rows || 0);
-      const remainingSkus = pending + claimed;
-      const avgRowsPerDone = done > 0 ? Math.round(totalRows / done) : null;
-      // Trend: (short_rate - long_rate) / long_rate. 0=stable, +ve=accelerating.
-      let trend = 'unknown';
-      if (longRate > 0) {
-        const delta = (shortRate - longRate) / longRate;
-        trend = delta > 0.20 ? 'accelerating' : delta < -0.20 ? 'decelerating' : 'stable';
-      }
-      // ETA: if no work remaining, done. If no rate, unknown.
-      let eta_minutes = null, reason = null;
-      if (remainingSkus === 0) {
-        eta_minutes = 0;
-        reason = 'all SKUs settled';
-      } else if (activeRate <= 0) {
-        reason = shortN === 0 && longN === 0
-          ? `no rows landed in the last ${longWinMin} min — workers may be running but haven't produced anything yet (or the extension hasn't been reloaded to pick up the batch_id fix)`
-          : `throughput too low to project`;
-      } else if (avgRowsPerDone == null || avgRowsPerDone === 0) {
-        reason = 'no done SKUs yet, cannot estimate rows-per-SKU';
-      } else {
-        const rowsRemaining = remainingSkus * avgRowsPerDone;
-        eta_minutes = Math.round(rowsRemaining / activeRate);
-      }
-      return send(res, 200, {
-        ok: true,
-        batchId,
-        eta_minutes,
-        reason,
-        eta_at: eta_minutes != null ? nowTs + eta_minutes * 60000 : null,
-        metrics: {
-          total, done, pending, claimed, remaining_skus: remainingSkus,
-          total_rows: totalRows,
-          avg_rows_per_done_sku: avgRowsPerDone,
-          short_window_min: shortWinMin,
-          long_window_min:  longWinMin,
-          rows_last_short_min: shortN,
-          rows_last_long_min:  longN,
-          short_rate_per_min:  Math.round(shortRate * 10) / 10,
-          long_rate_per_min:   Math.round(longRate  * 10) / 10,
-          trend,
-        },
-      });
-    }
-    if (m === 'GET' && p === '/api/jobs/worker-stats') {
-      // Passive stale-claim reaper: any claim whose heartbeat is > 5 minutes
-      // old is released before we count. Fixes the "10 in-flight for one
-      // worker" case where a SW-reloaded worker abandoned claims that never
-      // heartbeat again. Runs on every dashboard poll (10s) — cheap, one
-      // UPDATE with an index-covered filter — and self-heals ghost claims
-      // without waiting for a client to call /api/jobs/release-stale.
-      // Auto-fail retry-loop jobs BEFORE releasing (attempts >= 3 auto-fails,
-      // so the worker stops hammering broken SKUs and moves to fresh work).
-      const staleCutoff = now() - 5 * 60000;
-      Q.failMaxAttempts.run(now(), staleCutoff);
-      Q.failStuckClaims.run(now(), now() - 5 * 60 * 1000, now() - 30 * 60 * 1000);   // 15-min claim-age floor — see failStuckClaims comment
-      Q.releaseStale.run(staleCutoff);
-      return send(res, 200, { ok: true, workers: Q.workerStats.all() });
-    }
-    if (m === 'GET' && p === '/api/jobs/per-product') {
-      const batchId = url.searchParams.get('batchId') || '';
-      const sinceRaw = url.searchParams.get('sinceChangedAt');
-      const sinceChangedAt = sinceRaw != null && sinceRaw !== '' ? Number(sinceRaw) : null;
-      const incremental = Number.isFinite(sinceChangedAt);
-      const rows = incremental
-        ? Q.perProductSince.all(batchId, sinceChangedAt)
-        : Q.perProduct.all(batchId);
-      const maxRow = Q.perProductMaxChanged.get(batchId);
-      const maxChangedAt = Number.isFinite(maxRow?.mx) ? maxRow.mx : 0;
-      return send(res, 200, { ok: true, rows, maxChangedAt, incremental, sinceChangedAt: incremental ? sinceChangedAt : null });
-    }
-    if (m === 'GET' && p === '/api/jobs/active-workers') return send(res, 200, { ok: true, workers: Q.activeWorkers.all(url.searchParams.get('batchId') || '') });
-    // Worker heartbeat — called by workers every 30s regardless of whether
-    // they claim any work. Populates the `workers` roster so armed-idle
-    // workers show up as online in the dashboard fleet.
-    if (m === 'POST' && p === '/api/workers/heartbeat') {
-      const b = await readJson(req);
-      const wid = String(b.workerId || '').trim();
-      if (!wid) return send(res, 400, { ok: false, error: 'workerId required' });
-      const t = now();
-      // MAC + hostname arrive only from workers whose installer captured
-      // them (post-WOL feature). Fall back to bare upsert if absent so
-      // older workers keep working.
-      const mac  = String(b.mac || '').trim();
-      const host = String(b.hostname || '').trim();
-      if (mac || host) Q.upsertWorkerFull.run(wid, t, t, mac, host);
-      else             Q.upsertWorker.run(wid, t, t);
-      // Extension version reporting — worker sends the hash it computed
-      // at cold-start from /api/worker/version-hash. We persist it so the
-      // Fleet UI can flag out-of-date installs when the manager's current
-      // hash diverges (means new WORKER_FILES were deployed after this
-      // worker last did a fresh install).
-      const vhash = String(b.versionHash || '').trim();
-      if (vhash) Q.setWorkerVersion.run(vhash, t, wid);
-      // Response echoes the CURRENT bundle hash so the worker can proactively
-      // notify itself when out-of-date (compare in a follow-up commit).
-      return send(res, 200, { ok: true, current_bundle_hash: currentWorkerBundleHash() });
-    }
-    // Wake-on-LAN — send a magic packet to the worker's stored MAC.
-    // Requires the worker + manager be on the same physical LAN (WOL
-    // works at Layer 2; Tailscale doesn't tunnel it). If they are on
-    // different LANs, this silently fails at the target.
-    if (m === 'POST' && p === '/api/workers/wol') {
-      const b = await readJson(req);
-      const wid = String(b.workerId || '').trim();
-      let mac  = String(b.mac || '').trim();
-      if (!mac && wid) {
-        const w = Q.getWorker.get(wid);
-        if (w?.mac_address) mac = w.mac_address;
-      }
-      if (!mac) return send(res, 400, { ok: false, error: 'no MAC available for this worker — install the extension with the current installer so it captures the MAC, or POST {mac: "AA:BB:CC:DD:EE:FF"}' });
-      const r = await sendWolPacket(mac);
-      if (!r.ok) {
-        // Invalid MAC = 400 (client error); anything else = 500 (server side).
-        const code = /invalid MAC/i.test(r.error) ? 400 : 500;
-        return send(res, code, r);
-      }
-      return send(res, 200, r);
-    }
-    // Manually store a MAC for a worker (used if the worker was installed
-    // before the auto-capture feature). POST {workerId, mac}.
-    if (m === 'POST' && p === '/api/workers/set-mac') {
-      const b = await readJson(req);
-      const wid = String(b.workerId || '').trim();
-      const mac = String(b.mac || '').trim();
-      if (!wid || !mac) return send(res, 400, { ok: false, error: 'workerId + mac required' });
-      const cleaned = mac.replace(/[^0-9a-fA-F]/g, '');
-      if (cleaned.length !== 12) return send(res, 400, { ok: false, error: 'MAC must be 12 hex chars' });
-      // Preserve the existing hostname if any.
-      const cur = Q.getWorker.get(wid);
-      Q.upsertWorkerFull.run(wid, cur?.first_seen || now(), cur?.last_seen || now(), cleaned, cur?.hostname || '');
-      return send(res, 200, { ok: true, mac: cleaned });
-    }
-    if (m === 'GET' && p === '/api/workers/list') {
-      const currentHash = currentWorkerBundleHash();
-      // Grace window: if the worker reported its version < 3 min ago AND
-      // the reported hash differs from ours, the mismatch is almost always
-      // because the manager just pushed a new commit and the worker hasn't
-      // done its 2-min refresh cycle yet. Suppress the 'outdated' badge
-      // during that window to avoid false 'update' calls-to-action right
-      // after operator commits + reloads. Real outdated workers (haven't
-      // refreshed hash in >3 min AND still don't match) still show.
-      const nowMs = Date.now();
-      const GRACE_MS = 3 * 60 * 1000;
-      const workers = Q.listWorkers.all().map(w => {
-        const reportedAt = Number(w.version_reported_at || 0);
-        const hashMismatch = w.version_hash != null && w.version_hash !== currentHash;
-        const withinGrace = reportedAt > 0 && (nowMs - reportedAt) < GRACE_MS;
-        // outdated → user-visible badge; grace window suppresses right after
-        // a fresh version report. hash_mismatch → underlying truth for tests
-        // and diagnostics (skips the grace suppression).
-        const outdated = hashMismatch && !withinGrace;
-        return { ...w, current_bundle_hash: currentHash, hash_mismatch: hashMismatch, outdated };
-      });
-      return send(res, 200, { ok: true, workers, current_bundle_hash: currentHash });
-    }
-    // Ghost-worker cleanup — remove worker rows that haven't checked
-    // in for `olderThanMinutes`. Used when a Chrome reload spawns a new
-    // workerId and the OLD id is stuck in the fleet display.
-    if (m === 'POST' && p === '/api/workers/delete') {
-      const b = await readJson(req);
-      const wId = String(b.workerId || '').trim();
-      if (!wId) return send(res, 400, { ok: false, error: 'workerId required' });
-      const info = Q.deleteWorker.run(wId);
-      return send(res, 200, { ok: true, deleted: info.changes });
-    }
-    if (m === 'POST' && p === '/api/workers/prune-stale') {
-      const b = await readJson(req);
-      const cutoff = now() - Math.max(60, Number(b.olderThanMinutes) || 240) * 60 * 1000;
-      const info = Q.deleteStaleWorkers.run(cutoff);
-      return send(res, 200, { ok: true, deleted: info.changes });
-    }
-    // Quiesce broadcast — send 'pause' to every worker. Returns the current
-    // in-flight snapshot so the UI can poll until it hits zero. Doesn't
-    // reset or delete anything — just tells workers to stop claiming.
-    if (m === 'POST' && p === '/api/workers/quiesce') {
-      Q.insertCommand.run(null, 'pause', null, 'manager-quiesce');
-      const claimed = Q.claimedNowCount.get();
-      const workers = Q.listWorkers.all();
-      const nowT = now();
-      const active = workers.filter(w => (nowT - Number(w.last_seen)) < 3 * 60 * 1000).length;
-      return send(res, 200, { ok: true, activeWorkers: active, claimedNow: claimed?.n || 0 });
-    }
-    if (m === 'GET' && p === '/api/jobs/failed') {
-      const bId = url.searchParams.get('batchId') || '';
-      const rows = bId ? Q.failedJobsByBatch.all(bId) : Q.failedJobsAll.all();
-      return send(res, 200, { ok: true, rows });
-    }
-    if (m === 'POST' && p === '/api/jobs/requeue-all-failed') {
-      const b = await readJson(req);
-      const bId = String(b.batchId || '').trim();
-      const info = bId ? Q.requeueBatchFailed.run(bId) : Q.requeueAllFailed.run();
-      return send(res, 200, { ok: true, updated: info.changes });
-    }
-    // Done-empty visibility: worker marked a job 'done' but the manager
-    // has ZERO keyword rows for it (worker died / push failed after the
-    // done-flag write). Returns the list so the UI can flag them and
-    // offer 1-click requeue.
-    if (m === 'GET' && p === '/api/jobs/done-empty') {
-      const bId = url.searchParams.get('batchId') || '';
-      const rows = Q.doneEmptyJobs.all(bId || null, bId || null);
-      return send(res, 200, { ok: true, rows, count: rows.length });
-    }
-    if (m === 'POST' && p === '/api/jobs/requeue-done-empty') {
-      const b = await readJson(req);
-      const bId = (b.batchId && String(b.batchId).trim()) || null;
-      const info = Q.requeueDoneEmpty.run(bId, bId);
-      return send(res, 200, { ok: true, updated: info.changes });
-    }
-    // Requeue every 'done' job in a batch whose keyword row count is
-    // below the low-yield threshold (default 30). Complements
-    // /api/jobs/requeue-done-empty which handles the exact zero case:
-    // this one covers 'done but under-yielded' too. Powers the SHIP
-    // badge's 1-click 'Requeue low-yield' action.
-    if (m === 'POST' && p === '/api/jobs/requeue-low-yield') {
-      const b = await readJson(req);
-      const bId = (b.batchId && String(b.batchId).trim()) || null;
-      if (!bId) return send(res, 400, { ok: false, error: 'batchId required' });
-      const minRows = Math.max(1, Number(b.minRows || 30));
-      // Identify then wipe: find the low-yield done jobs (uses the
-      // same query the readiness endpoint uses), delete their
-      // existing keyword rows so a re-run doesn't leave duplicates,
-      // then reset the job status to pending.
-      const targets = Q.lowYieldDoneJobs.all(bId, minRows);
-      if (targets.length === 0) return send(res, 200, { ok: true, updated: 0, cleared_keyword_rows: 0 });
-      const targetIds = targets.map(t => t.id);
-      let clearedKw = 0;
-      db.exec('BEGIN');
-      try {
-        for (const t of targets) {
-          const del = Q.deleteKeywordsForProduct.run(bId, t.product_url);
-          clearedKw += del.changes;
-          Q.resetJobToPending.run(t.id);
-        }
-        db.exec('COMMIT');
-      } catch (e) { db.exec('ROLLBACK'); throw e; }
-      return send(res, 200, {
-        ok: true,
-        updated: targetIds.length,
-        cleared_keyword_rows: clearedKw,
-        skus: targets.map(t => ({ id: t.id, sku: t.sku, row_count: t.row_count })),
-      });
-    }
-    if (m === 'GET' && p === '/api/keywords/batches') {
-      return send(res, 200, { ok: true, batches: Q.keywordsBatchList.all() });
-    }
-    // Batch display names — a user-editable overlay on the opaque
-    // timestamp batch_ids that dropdowns/lists render instead of the ID.
-    if (m === 'GET' && p === '/api/batches/names') {
-      return send(res, 200, { ok: true, names: Q.listBatchNames.all() });
-    }
-    if (m === 'POST' && p === '/api/batches/rename') {
-      const b = await readJson(req);
-      const bid = String(b.batchId || '').trim();
-      const name = String(b.name || '').trim();
-      if (!bid) return send(res, 400, { ok: false, error: 'batchId required' });
-      if (!name) { Q.deleteBatchName.run(bid); return send(res, 200, { ok: true, cleared: true }); }
-      if (name.length > 100) return send(res, 400, { ok: false, error: 'display_name max 100 chars' });
-      Q.upsertBatchName.run(bid, name, now());
-      return send(res, 200, { ok: true, batchId: bid, name });
-    }
-    // Count orphan keyword rows — rows whose batch_id no longer has any
-    // jobs. Cheap read; used by the Config-tab cleanup card + the reset
-    // preflight to warn about work-in-progress.
-    if (m === 'GET' && p === '/api/keywords/orphans') {
-      const r = Q.countOrphanKeywords.get();
-      const claimed = Q.claimedNowCount.get();
-      // Also enumerate active workers for the reset warning UI.
-      const workers = Q.listWorkers.all();
-      const nowT = now();
-      const activeWorkerCount = workers.filter(w => (nowT - Number(w.last_seen)) < 3 * 60 * 1000).length;
-      return send(res, 200, {
-        ok: true,
-        orphanRows: r?.n || 0,
-        orphanBatches: r?.batches || 0,
-        claimedNow: claimed?.n || 0,
-        activeWorkers: activeWorkerCount,
-      });
-    }
-    // Deletes orphan keyword rows in a single transaction. Returns the
-    // number of rows removed. Same safety pattern as reset-all: requires
-    // an explicit confirm string so a stray fetch can't nuke data.
-    if (m === 'POST' && p === '/api/keywords/cleanup-orphans') {
-      const b = await readJson(req);
-      if (b.confirm !== 'CLEAN_ORPHANS') return send(res, 400, { ok: false, error: "safety: send {confirm:'CLEAN_ORPHANS'} to proceed" });
-      const info = Q.deleteOrphanKeywords.run();
-      return send(res, 200, { ok: true, deleted: info.changes });
-    }
-    if (m === 'GET' && p === '/api/keywords/timeline') {
-      // 24h throughput (rows-per-hour). Optional ?batchId= scope.
-      const since = now() - 24 * 3600 * 1000;
-      const bId = url.searchParams.get('batchId') || '';
-      const rows = bId ? Q.keywordsPerHourBatch.all(since, bId) : Q.keywordsPerHourAll.all(since);
-      return send(res, 200, { ok: true, since, buckets: rows });
-    }
-
-    // ----- Discovered keywords (results) -----
-    if (m === 'POST' && p === '/api/keywords') {
-      const b = await readJson(req);
-      const rows = Array.isArray(b.rows) ? b.rows : [];
-      // Orphan-batch guard: refuse writes whose batch_id references a batch
-      // that has no jobs. This was the root cause of "orphan" batches in the
-      // UI — workers with a cached queueBatchId kept writing keyword rows
-      // after a Reset deleted the batch, so the rows had nowhere to hang.
-      // Rejecting here forces the worker to re-sync via /api/jobs/active-batch.
-      const seenBatches = new Set();
-      const rejected = [];
-      const accepted = [];
-      for (const r of rows) {
-        const bid = r.batch_id || b.batchId || null;
-        if (!bid) { rejected.push({ row: r, reason: 'no_batch_id' }); continue; }
-        if (!seenBatches.has(bid)) {
-          if (!Q.batchExists.get(bid)) { rejected.push({ row: r, reason: 'orphan_batch' }); continue; }
-          seenBatches.add(bid);
-        }
-        accepted.push(r);
-      }
-      let n = 0;
-      db.exec('BEGIN');
-      try {
-        for (const r of accepted) {
-          Q.insertKeyword.run(r.batch_id || b.batchId || null, r.sku || null, r.keyword || '', r.product_url || '', JSON.stringify(r));
-          n++;
-        }
-        db.exec('COMMIT');
-      } catch (e) { db.exec('ROLLBACK'); throw e; }
-      // Tell the worker the current active batch so it can self-correct after
-      // a rejection — same escape hatch as heartbeat.
-      const cfgKw = Q.getConfig.get();
-      const pinnedKw = (cfgKw?.active_batch_id || '').trim();
-      let activeKw = pinnedKw && Q.batchHasPending.get(pinnedKw) ? pinnedKw : null;
-      if (!activeKw) activeKw = Q.newestPendingBatch.get()?.batch_id || null;
-      // Rejection alerting — turn silent orphan-batch rejections into
-      // visible err-level activity events so the user sees the actual
-      // mismatch in the Activity log. Groups rejections by (batch_id,
-      // product_url) so a 339-row push produces one log line, not 339.
-      // The user's #1 blocker this session was the SILENT orphan-batch
-      // rejection path (see 45a4717 for the client-side root cause fix).
-      if (rejected.length > 0) {
-        const groups = new Map();
-        for (const rj of rejected) {
-          const b_id = rj.row?.batch_id || b.batchId || '(none)';
-          const pu   = rj.row?.product_url || '(unknown)';
-          const key  = `${rj.reason}|${b_id}|${pu}`;
-          const cur  = groups.get(key) || { reason: rj.reason, batch_id: b_id, product_url: pu, sku: rj.row?.sku || null, count: 0 };
-          cur.count++;
-          groups.set(key, cur);
-        }
-        for (const g of groups.values()) {
-          const msg = g.reason === 'orphan_batch'
-            ? `⛔ ORPHAN-BATCH REJECT: ${g.count} row(s) rejected — worker sent batch_id "${g.batch_id}" which does not exist in this manager's jobs. Manager's active batch is "${activeKw || '(none)'}". Worker should resync via /api/jobs/active-batch.`
-            : `⛔ ROW REJECT (${g.reason}): ${g.count} row(s) rejected for product ${g.product_url}`;
-          try {
-            Q.insertActivity.run(
-              activeKw || g.batch_id || null,
-              null,
-              'err',
-              'orphan_guard',
-              msg,
-              g.product_url,
-              g.sku,
-            );
-          } catch {}
-        }
-      }
-      return send(res, 200, { ok: true, inserted: n, rejected: rejected.length, active_batch_id: activeKw });
-    }
-    if (m === 'GET' && p === '/api/keywords') {
-      const batchId = url.searchParams.get('batchId') || '';
-      const sinceIdRaw = url.searchParams.get('sinceId');
-      const sinceId = sinceIdRaw != null && sinceIdRaw !== '' ? Number(sinceIdRaw) : null;
-      const raw = Number.isFinite(sinceId)
-        ? Q.keywordsByBatchSince.all(batchId, sinceId)
-        : Q.keywordsByBatch.all(batchId);
-      const rows = raw.map(r => {
-        try { const d = JSON.parse(r.data); if (d && typeof d === 'object') d._id = r.id; return d; }
-        catch { return null; }
-      }).filter(Boolean);
-      // Always return the CURRENT max id for this batch — even when sinceId
-      // was set. Lets the client update its cursor even on an empty tick
-      // (no new rows since last check but max id has advanced elsewhere).
-      const maxRow = Q.keywordsMaxIdByBatch.get(batchId);
-      const maxId = Number.isFinite(maxRow?.mx) ? maxRow.mx : (rows.length > 0 ? rows[rows.length - 1]._id : 0);
-      return send(res, 200, {
-        ok: true,
-        total: rows.length,
-        rows,
-        maxId,
-        incremental: Number.isFinite(sinceId),
-        sinceId: Number.isFinite(sinceId) ? sinceId : null,
-      });
-    }
+    // SKU/Excel upload + bulk mutate — see routes/jobs-upload.js.
+    // Queue core: claim / heartbeat / done / requeue / CRUD / reporting
+    // — see routes/jobs.js.
+    // Keywords, batch names — see routes/keywords.js.
 
     // Activity, Commands, Config, delete-batch — see routes/*.js (registered above).
 
@@ -3924,6 +2887,28 @@ const server = http.createServer(async (req, res) => {
     return send(res, 500, { ok: false, error: e.message });
   }
 });
+
+// Crash safety. This process is meant to be always-on, and the whole fleet
+// stalls when it dies: workers can't claim, heartbeat, or push results.
+// Node's default for an unhandled rejection is to terminate, so a single
+// missed `.catch()` anywhere would take the manager down. Log loudly and
+// stay up — a manager serving 95% of routes beats a dead one. A genuinely
+// corrupt process is still caught by the supervisor's health check.
+process.on('unhandledRejection', (reason) => {
+  console.error('[manager] UNHANDLED REJECTION (staying up):', reason && reason.stack || reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[manager] UNCAUGHT EXCEPTION (staying up):', err && err.stack || err);
+});
+// Flush WAL and close cleanly so we never leave a hot journal behind.
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    console.log(`[manager] ${sig} — checkpointing WAL and shutting down.`);
+    try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch {}
+    try { db.close(); } catch {}
+    process.exit(0);
+  });
+}
 
 server.listen(PORT, HOST, () => {
   console.log(`[manager] AdBrain SQLite manager on http://${HOST}:${PORT}  (db: ${DB_PATH})`);

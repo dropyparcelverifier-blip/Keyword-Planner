@@ -2,7 +2,7 @@
 // Thin onMessage router with persistent accumulated state so a Stop mid-flow
 // doesn't lose work, and completed products are skipped on the next Start.
 
-import { runKeywordDiscovery, cleanProductUrl, CAPTCHA_PAUSE_ERROR } from './modules/keyword-discovery.js';
+import { runKeywordDiscovery, cleanProductUrl, CAPTCHA_PAUSE_ERROR, KP_DEAD_STREAK_KEY } from './modules/keyword-discovery.js';
 import { toCSV, toXLSX, pushToAdBrain, exportSingleProductCSV } from './modules/discovery-export.js';
 import {
   uploadJobsToManager,
@@ -279,7 +279,24 @@ const coldStart = (async () => {
       if (resp.ok) {
         const cfg = await resp.json();
         if (cfg && cfg.managerUrl) {
-          const workerId = 'PC-' + Math.random().toString(16).slice(2, 8).toUpperCase();
+          // Derive a stable ID from the machine's hostname/MAC (captured by
+          // the installer) so re-arming the SAME physical PC — after a
+          // profile reset, reinstall, or cleared storage — reuses its
+          // existing fleet identity instead of minting a new random one
+          // and leaving an orphaned duplicate/"SHUT DOWN" row behind.
+          const machineKey = String(cfg.hostname || '').trim() || String(cfg.mac || '').trim();
+          let workerId;
+          if (machineKey) {
+            let h = 0;
+            for (let i = 0; i < machineKey.length; i++) {
+              h = (Math.imul(31, h) + machineKey.charCodeAt(i)) | 0;
+            }
+            workerId = 'PC-' + (h >>> 0).toString(16).toUpperCase().padStart(6, '0').slice(-6);
+          } else {
+            // No hostname/MAC available (older installer or manual config) —
+            // fall back to random, same as before.
+            workerId = 'PC-' + Math.random().toString(16).slice(2, 8).toUpperCase();
+          }
           const updates = {
             adbrainManagerUrl:   String(cfg.managerUrl).trim(),
             adbrainManagerToken: String(cfg.managerToken || '').trim(),
@@ -330,8 +347,21 @@ function emitProgress(payload) {
   // vs successes. See state.consecutiveKpFailures for context.
   if (payload?.currentSource === 'kp') {
     const msg = String(payload.currentAction || '');
-    const isFail = payload.logKind === 'err' && /^⚠ KP FAILED/.test(msg);
-    const isOk   = payload.logKind === 'ok'  && /^KP returned \d/.test(msg);
+    // Prefer the TYPED signal (payload.kpEvent, emitted by the engine) over
+    // sniffing the log prose. The regexes below are a fallback for progress
+    // payloads that predate kpEvent.
+    //
+    // Why this matters: this is a circuit breaker whose input used to be a
+    // human-readable log line. That meant (a) rewording a log message
+    // silently armed or disarmed it, and (b) a deliberate KP *skip* was
+    // indistinguishable from a KP *failure*, because both were rendered by
+    // the same emitter — so the skip fed the breaker that caused the skip.
+    // `kpEvent: 'skipped'` is now explicitly neither a failure nor a success.
+    const ev = payload.kpEvent;
+    const isFail = ev ? ev === 'fail'
+                      : payload.logKind === 'err' && /^(⚠\s*)?KP:?\s*FAILED/i.test(msg);
+    const isOk   = ev ? ev === 'ok'
+                      : payload.logKind === 'ok'  && /^KP returned \d/.test(msg);
     if (isFail) {
       state.consecutiveKpFailures = (state.consecutiveKpFailures || 0) + 1;
       if (state.consecutiveKpFailures >= 2 && Date.now() >= (state.kpDeadUntil || 0)) {
@@ -405,7 +435,18 @@ async function triggerKpSessionDead() {
 // the KP-session-dead cooldown window — callers should abort the claim.
 function isKpCooldownActive() {
   const until = Number(state.kpDeadUntil || 0);
-  if (until <= 0 || Date.now() >= until) return false;
+  if (until <= 0) return false;
+  if (Date.now() >= until) {
+    // Cooldown just expired. Clear every piece of "KP is dead" state so the
+    // retry starts from a clean slate — otherwise a leftover failure count
+    // or dead-streak re-trips the breaker on the first attempt after the
+    // cooldown, and the worker never actually gets to retry.
+    state.kpDeadUntil = 0;
+    state.consecutiveKpFailures = 0;
+    chrome.storage.local.remove([KP_DEAD_STREAK_KEY, 'adbrainR1DeadStreak', 'adbrainR2DeadStreak']).catch(() => {});
+    pushLog('KP session cooldown expired — failure counters cleared, resuming normal claiming.', 'ok');
+    return false;
+  }
   const remainMin = Math.ceil((until - Date.now()) / 60000);
   pushLog(`KP session cooldown active — ${remainMin} min remaining before we retry claiming. (Set by 2 consecutive KP failures.)`, 'warn');
   return true;
@@ -1470,7 +1511,7 @@ async function _handleStartInner(msg) {
           // known-flagged. Bypasses ALL KP calls (both R1 and R2). Every
           // SKU runs on PAA + autosuggest + Amazon only. Yield drops but
           // every SKU still completes with SOMETHING. Auto-armed when the
-          // adbrainR2DeadStreak counter hits 2 (see keyword-discovery.js).
+          // shared KP dead-streak counter hits 2 (see keyword-discovery.js).
           skipR1Kp: (await chrome.storage.local.get('adbrainSkipR1Kp')).adbrainSkipR1Kp === true,
           // Website-only KP mode — skip the text-seed flow entirely, use
           // 'Start with a website' directly. Less bot-detected (single

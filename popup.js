@@ -9,7 +9,16 @@
 // PC's web app; there is no config UI here on purpose.
 
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s == null ? '' : s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+// Escapes for HTML TEXT and ATTRIBUTE contexts. Quotes are escaped too:
+// most call sites interpolate into title="${esc(x)}" / value="${esc(x)}",
+// and without quote escaping a scraped product name or keyword containing a
+// double quote breaks out of the attribute and can inject an event handler.
+// Keyword/product/handle/note values all originate from scraped Google,
+// Amazon and Shopify pages, so they are untrusted input.
+// NOT sufficient for JS contexts (inline on*= handlers) — the HTML parser
+// decodes entities before the JS parser runs, so entity-escaping cannot
+// contain a breakout there. Use a data-* attribute + delegated listener.
+const esc = (s) => String(s == null ? '' : s).replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
 
 function fmtTime(t) {
   if (!t) return '—';

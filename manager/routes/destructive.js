@@ -5,7 +5,7 @@
 'use strict';
 
 async function deleteBatch({ req, res, ctx }) {
-  const { db, Q, send, readJson } = ctx;
+  const { db, Q, send, readJson, reclaimSpace } = ctx;
   const b = await readJson(req);
   const batchId = String(b.batchId || '').trim();
   if (!batchId) return send(res, 400, { ok: false, error: 'batchId required' });
@@ -24,7 +24,7 @@ async function deleteBatch({ req, res, ctx }) {
 }
 
 async function wipeSelective({ req, res, ctx }) {
-  const { db, Q, send, readJson } = ctx;
+  const { db, Q, send, readJson, reclaimSpace } = ctx;
   const b = await readJson(req);
   if (b.confirm !== 'WIPE') return send(res, 400, { ok: false, error: "safety: send {confirm:'WIPE'} to proceed" });
   const flags = b.flags || {};
@@ -58,6 +58,8 @@ async function wipeSelective({ req, res, ctx }) {
     }
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
+  // Outside the transaction — return the freed pages to the filesystem.
+  if (dJobs + dKw + dAct + dCmd + dWrk + dFail + dOrph > 0) reclaimSpace?.();
   return send(res, 200, {
     ok: true, batchId,
     deletedJobs: dJobs, deletedKeywords: dKw, deletedActivity: dAct,
@@ -67,7 +69,7 @@ async function wipeSelective({ req, res, ctx }) {
 }
 
 async function resetAll({ req, res, ctx }) {
-  const { db, Q, send, readJson } = ctx;
+  const { db, Q, send, readJson, reclaimSpace } = ctx;
   const b = await readJson(req);
   if (b.confirm !== 'RESET') return send(res, 400, { ok: false, error: "safety: send {confirm:'RESET'} to proceed" });
   let j = 0, k = 0, a = 0, c = 0, w = 0;
@@ -88,14 +90,19 @@ async function resetAll({ req, res, ctx }) {
     Q.insertCommand.run(null, 'reset_local', null, 'manager-reset-all');
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
+  // Outside the transaction — a full reset is the biggest space win there is.
+  reclaimSpace?.();
   return send(res, 200, { ok: true, deletedJobs: j, deletedKeywords: k, deletedActivity: a, deletedCommands: c, deletedWorkers: w });
 }
 
 async function cleanup({ req, res, ctx }) {
-  const { Q, send, readJson, now } = ctx;
+  const { Q, send, readJson, now, reclaimSpace } = ctx;
   const b = await readJson(req);
   const a = Q.cleanupActivity.run(now() - (b.logDays ?? 7) * 86400000);
   const c = Q.cleanupCommands.run(now() - (b.commandsDays ?? 1) * 86400000);
+  // This is the routine retention sweep, so it is the one that most needs
+  // to give pages back — without it the file grew monotonically forever.
+  if (a.changes + c.changes > 0) reclaimSpace?.();
   return send(res, 200, { ok: true, activityLog: a.changes, ackedCommands: c.changes });
 }
 

@@ -62,6 +62,111 @@ import {
 // Surface used by the harness to distinguish CAPTCHA-pause from generic errors.
 export const CAPTCHA_PAUSE_ERROR = 'CAPTCHA_PAUSE';
 
+// ============ KP session health (single source of truth) ============
+// There is ONE Google Ads session per worker, so there is ONE health
+// counter. This state used to live in two chrome.storage keys
+// (adbrainR1DeadStreak / adbrainR2DeadStreak) that were read and written
+// asymmetrically, and the counter's only reset path (a successful R2) sat
+// BEHIND the auto-skip that the counter itself armed. Once it hit 2 it
+// could never come back down: every subsequent SKU skipped KP, produced no
+// rows, bumped the counter again, and got marked FAILED. That is the
+// "KP death spiral" — every SKU failing on a worker whose Google Ads
+// session was fine.
+//
+// Invariants that keep it from wedging again:
+//   1. ONE key, read and written through these helpers only.
+//   2. The counter EXPIRES (TTL). A stale flag can never outlive the
+//      session problem that set it, even if no success ever resets it.
+//   3. ANY successful KP scrape (Round 1 OR Round 2) resets it — the reset
+//      path must never be gated behind something the counter disables.
+//   4. A deliberate SKIP is not a FAILURE and never bumps the counter.
+export const KP_DEAD_STREAK_KEY = 'adbrainKpDeadStreak';
+const KP_DEAD_ARM_THRESHOLD = 2;
+const KP_DEAD_STREAK_TTL_MS = 30 * 60 * 1000;
+const KP_DEAD_STREAK_MAX = 10;
+// Legacy keys, read once for migration then deleted. Old builds could leave
+// these at an arbitrarily high value; we deliberately DISCARD the value
+// rather than migrate it, so upgrading un-wedges a stuck worker immediately.
+const KP_LEGACY_KEYS = ['adbrainR1DeadStreak', 'adbrainR2DeadStreak'];
+
+// The single "is the KP session dead?" predicate — as opposed to "this one
+// seed returned nothing", which is a normal, non-fatal outcome. Three
+// separately-maintained copies of this regex used to live in this file and
+// in background.js; they disagreed about which errors counted, so Round 1
+// and Round 2 armed on different conditions.
+export function isKpSessionDeadError(err) {
+  return /message (port|channel) closed|receiving end does not exist|asynchronous response by returning true|tab crashed|content script dead|hard timeout|hung mid-flow|KP_NEEDS_FRESH_NAV|click strategies exhausted/i
+    .test(String(err || ''));
+}
+
+function kpStorage() {
+  return (typeof chrome !== 'undefined' && chrome.storage?.local) ? chrome.storage.local : null;
+}
+
+// Returns the live streak, or 0 if it has expired / was never set.
+// Also migrates-and-clears the legacy keys on first call.
+export async function readKpDeadStreak() {
+  const store = kpStorage();
+  if (!store) return 0;
+  try {
+    const s = await store.get([KP_DEAD_STREAK_KEY, ...KP_LEGACY_KEYS]);
+    if (KP_LEGACY_KEYS.some(k => s?.[k] !== undefined)) {
+      await store.remove(KP_LEGACY_KEYS).catch(() => {});
+    }
+    const rec = s?.[KP_DEAD_STREAK_KEY];
+    // Stored as { n, ts }. Tolerate a bare number from an interim build.
+    const n  = Number(typeof rec === 'object' && rec ? rec.n  : rec) || 0;
+    const ts = Number(typeof rec === 'object' && rec ? rec.ts : 0)   || 0;
+    if (n <= 0) return 0;
+    if (!ts || (Date.now() - ts) > KP_DEAD_STREAK_TTL_MS) {
+      await store.remove(KP_DEAD_STREAK_KEY).catch(() => {});
+      return 0;
+    }
+    return n;
+  } catch { return 0; }
+}
+
+// Bumps the streak and returns the new value. Capped so a long run can't
+// push it somewhere a future comparison can't reason about.
+export async function bumpKpDeadStreak(byHowMuch = 1) {
+  const store = kpStorage();
+  if (!store) return 0;
+  try {
+    const cur  = await readKpDeadStreak();
+    const next = Math.min(KP_DEAD_STREAK_MAX, cur + Math.max(1, byHowMuch));
+    await store.set({ [KP_DEAD_STREAK_KEY]: { n: next, ts: Date.now() } });
+    return next;
+  } catch { return 0; }
+}
+
+// Arms the streak straight past the threshold — used when we see a hard tab
+// crash, where waiting for a second dead SKU just means another dead SKU.
+export async function armKpDeadStreak() {
+  const store = kpStorage();
+  if (!store) return 0;
+  try {
+    const n = KP_DEAD_ARM_THRESHOLD + 1;
+    await store.set({ [KP_DEAD_STREAK_KEY]: { n, ts: Date.now() } });
+    return n;
+  } catch { return 0; }
+}
+
+// Clears the streak. Returns true if there was actually something to clear,
+// so callers can log "recovered" only when it's true.
+export async function resetKpDeadStreak() {
+  const store = kpStorage();
+  if (!store) return false;
+  try {
+    const had = await readKpDeadStreak();
+    if (had > 0) await store.remove(KP_DEAD_STREAK_KEY).catch(() => {});
+    return had > 0;
+  } catch { return false; }
+}
+
+export function kpDeadStreakIsArmed(n) {
+  return Number(n || 0) >= KP_DEAD_ARM_THRESHOLD;
+}
+
 // ============ Random delays ============
 function randInt(minMs, maxMs) {
   if (maxMs < minMs) maxMs = minMs;
@@ -3242,21 +3347,15 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       if (skippedSeeds.length > 0) {
         onProgress?.({ currentProduct: productName, currentSource: 'kp', currentAction: `Skipped ${skippedSeeds.length} duplicate seed(s) — already covered by another seed in the list: ${skippedSeeds.join(' | ')}`, logKind: 'ok' });
       }
-      // R1 KP auto-skip. Same streak counter as R2 (adbrainR2DeadStreak);
-      // if >= 2 consecutive KP-dead SKUs on this worker, skip R1 KP entirely
-      // too. Saves ~5-8 min per SKU on a broken Google Ads session. The
-      // engine still runs PAA + autosuggest + Amazon Round, which don't
-      // touch Google Ads at all. Yield drops to ~30-100 kw/SKU (vs 500+
-      // with working KP) but every SKU completes and produces SOME output
-      // instead of 0. Manual opts.skipR1Kp override also honoured.
-      let r1KpStreak = 0;
-      try {
-        if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-          const s = await chrome.storage.local.get('adbrainR2DeadStreak');
-          r1KpStreak = Number(s?.adbrainR2DeadStreak || 0);
-        }
-      } catch {}
-      const skipR1Kp = opts.skipR1Kp === true || r1KpStreak >= 2;
+      // R1 KP auto-skip, driven by the shared KP health counter (see
+      // readKpDeadStreak). If the session looks dead, skip R1 KP entirely —
+      // saves ~5-8 min per SKU on a broken Google Ads session. The engine
+      // still runs PAA + autosuggest + Amazon Round, which don't touch
+      // Google Ads at all. Yield drops to ~30-100 kw/SKU (vs 500+ with
+      // working KP) but every SKU still completes and produces SOME output.
+      // Manual opts.skipR1Kp override also honoured.
+      const r1KpStreak = await readKpDeadStreak();
+      const skipR1Kp = opts.skipR1Kp === true || kpDeadStreakIsArmed(r1KpStreak);
       let kpResult;
       if (skipR1Kp) {
         onProgress?.({
@@ -3264,8 +3363,13 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           currentSource: 'kp',
           currentAction: `⏭ R1 KP AUTO-SKIP (${opts.skipR1Kp === true ? 'operator flag' : `streak=${r1KpStreak}`}). Google Ads session broken on this worker — engine will run PAA + autosuggest + Amazon only. Yield ~30-100 kw/SKU (vs 500+ with working KP).`,
           logKind: 'warn',
+          kpEvent: 'skipped',
         });
-        kpResult = { ok: false, error: 'r1_kp_skipped_auto', keywords: [] };
+        // `skipped` — NOT `failed`. We chose not to run KP; that is not
+        // evidence the session is broken (it's the consequence of already
+        // believing so). Marking it as a failure is what let the skip feed
+        // the very circuit breaker that armed it.
+        kpResult = { ok: false, skipped: true, error: 'r1_kp_skipped_auto', keywords: [] };
       } else {
         onProgress?.({ currentProduct: productName, currentSource: 'kp', currentAction: `Running Keyword Planner for ${kpSeeds.length} seed(s): "${kpSeeds.join('", "')}"`, keywordCount: report.size });
         kpResult = await getKeywordPlannerIdeas(kpSeeds, kpUrl, kpMaxPerProduct,
@@ -3273,35 +3377,32 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           { productUrl: cleanUrl, websiteOnly: opts.kpWebsiteOnly === true });
       }
       const kpKeywords = (kpResult?.ok ? (kpResult.keywords || []) : []).filter(Boolean);
-      if (!kpResult?.ok) {
+      if (!kpResult?.ok && !kpResult?.skipped) {
         onProgress?.({
           currentProduct: productName,
           currentSource: 'kp',
           currentAction: `⚠ KP FAILED: ${kpResult.error}. Engine will continue with PAA + autosuggest only (likely < 30 keywords, 2-3 min total). Common fix: re-login to Google Ads in this profile + check the KP URL in Settings.`,
           logKind: 'err',
+          kpEvent: 'fail',
         });
         // HARD-CRASH DETECTION — if KP failed with tab-crash / channel-
         // close / content-script-dead, DON'T just increment the streak
-        // by 1 (needs 2 dead SKUs to arm). Set the streak to 3 (past
-        // the arm threshold) so the very NEXT SKU on this worker skips
-        // R1 KP entirely. Prevents user seeing 'many KP window openings'
-        // when the tab crashes on every attempt.
-        const errStr = String(kpResult?.error || '');
-        const isTabDead = /message (port|channel) closed|receiving end does not exist|asynchronous response by returning true|tab crashed|content script dead|hard timeout|hung mid-flow/i.test(errStr);
-        if (isTabDead) {
-          try {
-            if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-              await chrome.storage.local.set({ adbrainR2DeadStreak: 3 });
-              onProgress?.({
-                currentProduct: productName,
-                currentSource: 'kp',
-                currentAction: `⏭ KP TAB CRASHED — auto-arming skip for next SKU (streak set to 3). No more KP window openings until session recovers (successful R2 anywhere resets streak).`,
-                logKind: 'warn',
-              });
-            }
-          } catch {}
+        // by 1 (needs 2 dead SKUs to arm). Arm it straight past the
+        // threshold so the very NEXT SKU on this worker skips R1 KP.
+        // Prevents the operator seeing 'many KP window openings' when the
+        // tab crashes on every attempt.
+        if (isKpSessionDeadError(kpResult?.error)) {
+          const n = await armKpDeadStreak();
+          if (n) {
+            onProgress?.({
+              currentProduct: productName,
+              currentSource: 'kp',
+              currentAction: `⏭ KP TAB CRASHED — auto-arming skip for next SKU (streak=${n}, expires in 30 min). No more KP window openings until the session recovers or the streak times out.`,
+              logKind: 'warn',
+            });
+          }
         }
-      } else if (kpKeywords.length === 0) {
+      } else if (kpResult?.ok && kpKeywords.length === 0) {
         // KP succeeded (HTTP 200) but returned zero ideas. This happens
         // when the seed is too long/specific, when Google has no data
         // for it, or when the KP UI changed and the scraper missed
@@ -3314,7 +3415,20 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           logKind: 'warn',
         });
       } else {
-        onProgress?.({ currentProduct: productName, currentSource: 'kp', currentAction: `KP returned ${kpKeywords.length} ideas`, logKind: 'ok' });
+        onProgress?.({ currentProduct: productName, currentSource: 'kp', currentAction: `KP returned ${kpKeywords.length} ideas`, logKind: 'ok', kpEvent: 'ok' });
+        // A successful R1 scrape is proof the Google Ads session is alive —
+        // reset the health counter HERE. This is the reset path that was
+        // missing: the only previous reset lived inside Round 2, which the
+        // counter itself disables once armed, so nothing could ever clear
+        // it. Round 1 always runs, so this reset is always reachable.
+        if (await resetKpDeadStreak()) {
+          onProgress?.({
+            currentProduct: productName,
+            currentSource: 'kp',
+            currentAction: `✅ KP RECOVERED: session is responding again — dead-streak reset to 0, full KP re-enabled on this worker.`,
+            logKind: 'ok',
+          });
+        }
       }
 
       // Honor a stop request that arrived while KP was working. Without this
@@ -4611,26 +4725,23 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           currentAction: `⏭ FAIL-FAST: ${failReason}`,
           logKind: 'err',
         });
-        // Bump the cross-SKU R2 streak here too — a zero-yield SKU almost
-        // always means KP is dead, which is the same signal R2 auto-skip
-        // is trying to detect. Adding R1 failures to the streak means
-        // after 2 consecutive KP-dead SKUs (from either R1 OR R2 failure),
-        // subsequent SKUs auto-skip R2 KP entirely (saves ~6-8 min each).
-        try {
-          if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-            const s = await chrome.storage.local.get('adbrainR2DeadStreak');
-            const next = Number(s?.adbrainR2DeadStreak || 0) + 1;
-            await chrome.storage.local.set({ adbrainR2DeadStreak: next });
-            if (next === 2) {
-              onProgress?.({
-                currentProduct: productName,
-                currentSource: 'round1',
-                currentAction: `⏭ AUTO-SKIP ARMED (from R1 failure): 2 consecutive KP-dead SKUs on this worker. Next SKU skips R2 KP entirely to save ~6-8 min.`,
-                logKind: 'warn',
-              });
-            }
+        // Bump the shared KP health streak — a zero-yield SKU almost always
+        // means KP is dead, the same signal the auto-skip is trying to
+        // detect. But ONLY when we actually attempted KP: if KP was skipped
+        // for this SKU, a zero yield is the expected consequence of that
+        // skip, not new evidence about the session. Counting it was what
+        // made the streak self-reinforcing and unable to come back down.
+        if (!skipR1Kp) {
+          const next = await bumpKpDeadStreak();
+          if (next === KP_DEAD_ARM_THRESHOLD) {
+            onProgress?.({
+              currentProduct: productName,
+              currentSource: 'round1',
+              currentAction: `⏭ AUTO-SKIP ARMED (from R1 failure): ${next} consecutive KP-dead SKUs on this worker. Next SKU skips KP entirely to save ~6-8 min. Auto-expires in 30 min, or on the next successful KP scrape.`,
+              logKind: 'warn',
+            });
           }
-        } catch {}
+        }
         productsDone++;
         try {
           // Prefer onProductFailed if the caller provides it (surfaces in
@@ -4765,7 +4876,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // candidates through. Keywords that DON'T become R2 seeds still
       // stay in the final output — we only tune WHICH ones we cycle
       // through KP again.
-      const R1_YIELD = productRows.size;
+      const R1_YIELD = productRows.length;
       let R2_MIN_IMAGE_MATCHES, R2_MIN_LINK_MATCHES, R2_MIN_SHOPPING;
       if (R1_YIELD >= 200) {
         // Strict — plenty to choose from, only feed KP the best signals
@@ -4826,19 +4937,12 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         kp1ForR2.push(cand);
       }
       // Opt-out: manual `opts.skipR2Kp` OR auto-detected persistent KP
-      // failure. Read the cross-SKU R2 health counter (adbrainR2DeadStreak
-      // in chrome.storage.local) — 2+ consecutive R2-dead SKUs means the
-      // KP session is TABLE-flat, keep bailing until an R2 succeeds and
-      // resets the streak. Zero operator input required — worker heals
-      // itself and reactivates R2 when KP responds again.
-      let r2DeadStreak = 0;
-      try {
-        if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-          const stored = await chrome.storage.local.get('adbrainR2DeadStreak');
-          r2DeadStreak = Number(stored?.adbrainR2DeadStreak || 0);
-        }
-      } catch {}
-      const autoSkip = r2DeadStreak >= 2;
+      // failure, via the shared health counter. 2+ consecutive KP-dead SKUs
+      // means the session is flat, so keep bailing — but the streak now
+      // expires on its own (30 min) and is reset by a successful Round 1,
+      // so this can no longer wedge the worker permanently.
+      const r2DeadStreak = await readKpDeadStreak();
+      const autoSkip = kpDeadStreakIsArmed(r2DeadStreak);
       if (opts.skipR2Kp || autoSkip) {
         const reason = opts.skipR2Kp
           ? 'operator flag adbrainSkipR2Kp=true'
@@ -4955,8 +5059,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           // Bump the consecutive-dead counter ONLY on channel-close / tab-crash
           // errors — the R2 bail is specifically for 'KP tab is broken', not
           // for legitimate 'this seed returned nothing' failures.
-          const errStr = String(expansion?.error || '');
-          if (/message (port|channel) closed|Receiving end does not exist|asynchronous response by returning true|tab crashed|content script dead/i.test(errStr)) {
+          if (isKpSessionDeadError(expansion?.error)) {
             r2ConsecutiveKpDead++;
           } else {
             r2ConsecutiveKpDead = 0;
@@ -5066,25 +5169,21 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // reset the streak — KP is back. Skipped when we didn't attempt R2
       // this SKU (totalKp1 === 0 with autoSkip active — see block above).
       try {
-        if (typeof chrome !== 'undefined' && chrome.storage?.local && totalKp1 > 0) {
+        if (totalKp1 > 0) {
           const wasR2Dead = kp2RowCount === 0 && r2DegradedSeeds >= Math.min(2, totalKp1);
           if (wasR2Dead) {
-            const s = await chrome.storage.local.get('adbrainR2DeadStreak');
-            const next = Number(s?.adbrainR2DeadStreak || 0) + 1;
-            await chrome.storage.local.set({ adbrainR2DeadStreak: next });
-            if (next === 2) {
+            const next = await bumpKpDeadStreak();
+            if (next === KP_DEAD_ARM_THRESHOLD) {
               onProgress?.({
                 currentProduct: productName,
                 currentSource: 'round2',
-                currentAction: `⏭ AUTO-SKIP ARMED: ${next} consecutive R2-dead SKU(s) on this worker. Next SKU will skip R2 KP entirely until a successful R2 anywhere resets the streak. No operator action needed — worker is self-healing.`,
+                currentAction: `⏭ AUTO-SKIP ARMED: ${next} consecutive KP-dead SKU(s) on this worker. Next SKU will skip KP entirely. Auto-expires in 30 min, or on the next successful KP scrape. No operator action needed — worker is self-healing.`,
                 logKind: 'warn',
               });
             }
           } else if (kp2RowCount > 0) {
             // R2 succeeded — reset the streak. KP session is back.
-            const s = await chrome.storage.local.get('adbrainR2DeadStreak');
-            if (Number(s?.adbrainR2DeadStreak || 0) > 0) {
-              await chrome.storage.local.set({ adbrainR2DeadStreak: 0 });
+            if (await resetKpDeadStreak()) {
               onProgress?.({
                 currentProduct: productName,
                 currentSource: 'round2',

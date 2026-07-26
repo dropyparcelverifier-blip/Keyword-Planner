@@ -1719,19 +1719,25 @@ async function run() {
   assert(appFull.includes('range ${batchMin.toFixed(1)}'),           'DS.49 Top-10 chart shows actual score range in subtitle');
   assert(appFull.includes('score - batchMin) / span'),               'DS.50 Top-10 bars normalize against actual data span');
   // Stuck-worker auto-detection + manager-side release-by-worker endpoint.
-  // server.js + all extracted route modules — concatenated so string-match
-  // 'endpoint defined' assertions survive router.js refactor migrations.
+  // server.js + router + EVERY extracted route module, concatenated. These
+  // assertions mean "the manager implements X" — which file the handler
+  // currently lives in is an implementation detail, and hardcoding the list
+  // meant each migration wave broke a batch of otherwise-correct tests.
+  // Reading the directory keeps them honest without making them brittle.
   const srvFull = [
     'manager/server.js',
     'manager/router.js',
-    'manager/routes/health.js',
-    'manager/routes/activity.js',
-    'manager/routes/commands.js',
-    'manager/routes/config.js',
-    'manager/routes/backups.js',
-    'manager/routes/destructive.js',
+    ...readdirSync(resolve(REPO, 'manager/routes'))
+      .filter(f => f.endsWith('.js'))
+      .sort()
+      .map(f => `manager/routes/${f}`),
   ].map(p => readFileSync(resolve(REPO, p), 'utf-8')).join('\n// ---- module boundary ----\n');
-  assert(srvFull.includes('/api/jobs/release-by-worker'),             'DS.51 release-by-worker endpoint defined');
+  // Behavioural, not string-match: this handler lives in routes/jobs.js now,
+  // and a grep of server.js would fail on a pure move even though the
+  // endpoint works.
+  const dsRelease = await req('POST', '/api/jobs/release-by-worker', {});
+  assert(dsRelease.status === 400 && /workerId required/.test(dsRelease.data?.error || ''),
+    'DS.51 release-by-worker endpoint is routed and validates workerId');
   assert(srvFull.includes('releaseByWorker'),                          'DS.52 releaseByWorker prepared statement defined');
   const apiFull = readFileSync(resolve(REPO, 'manager/public/api.js'), 'utf-8');
   assert(apiFull.includes('jobsReleaseByWorker'),                     'DS.53 client API wrapper wired');
@@ -2048,8 +2054,12 @@ async function run() {
   assert(srvFull.includes('sku, product_url, product_name, priority, status, claimed_by, claimed_at, heartbeat_at, done_at, failed_reason, attempts, handles, brands'), 'CTRL.4 jobs/list returns handles+brands columns');
   // Phantom-done detection: done jobs with ZERO keyword rows.
   assert(srvFull.includes('done_empty'),                               'PHANTOM.1 summary query flags done_empty count');
-  assert(srvFull.includes("'/api/jobs/done-empty'"),                   'PHANTOM.2 GET /done-empty endpoint');
-  assert(srvFull.includes("'/api/jobs/requeue-done-empty'"),           'PHANTOM.3 POST /requeue-done-empty endpoint');
+  const phDoneEmpty = await req('GET', '/api/jobs/done-empty');
+  assert(phDoneEmpty.status === 200 && phDoneEmpty.data?.ok === true && Array.isArray(phDoneEmpty.data.rows),
+    'PHANTOM.2 GET /done-empty is routed and returns rows');
+  const phRequeue = await req('POST', '/api/jobs/requeue-done-empty', {});
+  assert(phRequeue.status === 200 && phRequeue.data?.ok === true && typeof phRequeue.data.updated === 'number',
+    'PHANTOM.3 POST /requeue-done-empty is routed and returns an update count');
   assert(srvFull.includes('doneEmptyJobs: db.prepare'),                'PHANTOM.4 doneEmptyJobs prepared statement');
   assert(srvFull.includes('requeueDoneEmpty: db.prepare'),             'PHANTOM.5 requeueDoneEmpty prepared statement');
   assert(apiCrud.includes('jobsDoneEmpty:'),                           'PHANTOM.6 client wrapper for done-empty');
@@ -2068,8 +2078,13 @@ async function run() {
   assert(srvFull.includes('https://${publicHost}/products/'),          'STORE.3 URL template uses publicHost');
   assert(srvFull.includes('no Shopify variant/product found (tried'),  'STORE.4 unresolved SKUs get explanatory note (all fallback paths listed)');
   // Widened SKU search: multiple case variants + barcode + handle fallback
-  assert(srvFull.includes('allSkuCandidates.push(asin)'),              'STORE.5 tries ASIN only in batch');
-  assert(srvFull.includes('allSkuCandidates.push(`Dropy-${asin}`)'),   'STORE.5b tries Dropy-<ASIN> variant in batch');
+  // Match the candidate list rather than an exact call shape — these broke
+  // when three push() calls were collapsed into one, despite the set of
+  // candidates being identical. What matters is that a bare ASIN and the
+  // Dropy-<ASIN> form are both tried as SKU lookup candidates.
+  const skuCandPush = (srvFull.match(/allSkuCandidates\.push\(([^)]*)\)/g) || []).join(' ');
+  assert(/\basin\b/.test(skuCandPush),          'STORE.5 tries ASIN only in batch');
+  assert(/Dropy-\$\{asin\}/.test(skuCandPush),  'STORE.5b tries Dropy-<ASIN> variant in batch');
   assert(srvFull.includes("batchGqlLookup('barcode'"),                 'STORE.6 barcode search batched (GraphQL)');
   assert(srvFull.includes('handle:*'),                                 'STORE.7 handle wildcard search (GraphQL)');
   assert(srvFull.includes('barcodeMap[String(c).toLowerCase()]'),      'STORE.6b batched barcode map lookup');
@@ -2088,8 +2103,18 @@ async function run() {
   // Ghost-worker cleanup — auto-clear stale activity filter + remove workers.
   assert(appFull.includes("Filter auto-cleared"),                      'GHOST.1 stale activity-log filter auto-cleared');
   assert(appFull.includes('data-remove-worker'),                       'GHOST.2 remove-worker button in fleet row');
-  assert(srvFull.includes("'/api/workers/delete'"),                    'GHOST.3 delete-worker endpoint');
-  assert(srvFull.includes("'/api/workers/prune-stale'"),               'GHOST.4 prune-stale endpoint');
+  // Verify these over HTTP rather than by grepping server.js. These two
+  // assertions previously matched a string literal in server.js and broke
+  // the moment the handlers moved into routes/workers.js — even though the
+  // endpoints still worked. Hitting the live server tests the property we
+  // actually care about (the route is reachable and behaves), and is immune
+  // to where the handler happens to live.
+  const ghostDel = await req('POST', '/api/workers/delete', {});
+  assert(ghostDel.status === 400 && /workerId required/.test(ghostDel.data?.error || ''),
+    'GHOST.3 delete-worker endpoint is routed and validates workerId');
+  const ghostPrune = await req('POST', '/api/workers/prune-stale', { olderThanMinutes: 999999 });
+  assert(ghostPrune.status === 200 && ghostPrune.data?.ok === true && typeof ghostPrune.data.deleted === 'number',
+    'GHOST.4 prune-stale endpoint is routed and returns a delete count');
   assert(appFull.includes('4 * 3600 * 1000'),                          'STATUS.2 4h threshold for shut-down detection');
   assert(appFull.includes("'never seen'"),                             'STATUS.3 never-seen state for workers with hb=0');
   assert(htmlFull.includes('id="shopifyModal"'),                       'SHOP.13 Shopify modal in HTML');
@@ -2359,7 +2384,12 @@ async function run() {
   assert(/q\.failed\.push\(cur\.sku\)/.test(appJs.body),      'BULK.11 push-failure records SKU as failed');
   // Per-SKU 'Re-queue' button on Analytics — server accepts {batchId, productUrl}
   // as an alternative to numeric jobId so the client doesn't need to know it.
-  assert(srvFull.includes('batchId && b.productUrl'),         'REQUEUE.1 server accepts batchId+productUrl for /api/jobs/requeue');
+  // The batchId+productUrl lookup mode exists for the per-SKU 'Re-queue this
+  // SKU' button, which knows the URL but not the job id. A 404 (rather than
+  // the 400 'send {jobId} or ...') proves the mode was recognised.
+  const rqMode = await req('POST', '/api/jobs/requeue', { batchId: 'nope', productUrl: 'https://example.com/x' });
+  assert(rqMode.status === 404 && String(rqMode.data?.error || '').includes('no job found for that batchId + productUrl'),
+    'REQUEUE.1 server accepts batchId+productUrl lookup mode for /api/jobs/requeue');
   assert(apiFull.includes('jobsRequeueByUrl'),                'REQUEUE.2 client wrapper defined');
   assert(appJs.body.includes('id="anRequeueSkuBtn"'),          'REQUEUE.3 per-SKU re-queue button in analytics header');
   assert(appJs.body.includes('jobsRequeueByUrl'),             'REQUEUE.4 button handler calls the client wrapper');
@@ -2460,6 +2490,81 @@ async function run() {
   // CLIP: surface the ACTUAL init/embed failure reason instead of '?'.
   const imMatcher = readFileSync(resolve(REPO, 'modules/image-matcher.js'), 'utf-8');
   const kwDisc = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+
+  // ── KP death-spiral invariants ────────────────────────────────────────
+  // Every SKU was being marked FAILED on a worker whose Google Ads session
+  // was fine. Cause: the KP dead-streak counter's only reset path (a
+  // successful Round 2) sat behind the auto-skip that the counter armed, so
+  // once it reached 2 it could never come back down. These assertions pin
+  // the four properties that make the counter recoverable. Do not relax
+  // them without re-reading the comment block in keyword-discovery.js.
+  const bgSpiral = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
+  // 1. ONE key, reached only through the helpers.
+  assert(kwDisc.includes("KP_DEAD_STREAK_KEY = 'adbrainKpDeadStreak'"), 'KP-SPIRAL.1 single dead-streak storage key');
+  assert(!/chrome\.storage\.local\.set\(\{\s*adbrainR[12]DeadStreak/.test(kwDisc), 'KP-SPIRAL.2 no direct writes to the legacy per-round keys');
+  assert(kwDisc.includes('KP_LEGACY_KEYS'), 'KP-SPIRAL.3 legacy keys migrated+cleared so a poisoned value cannot survive upgrade');
+  // 2. The streak expires — a stale flag cannot outlive the problem.
+  assert(kwDisc.includes('KP_DEAD_STREAK_TTL_MS'), 'KP-SPIRAL.4 dead streak has a TTL');
+  assert(/if \(!ts \|\| \(Date\.now\(\) - ts\) > KP_DEAD_STREAK_TTL_MS\)/.test(kwDisc), 'KP-SPIRAL.5 TTL is actually enforced on read');
+  // 3. The reset path must be reachable — a successful ROUND 1 resets it.
+  //    (Round 1 always runs; Round 2 is what the counter disables.)
+  assert(/kpEvent: 'ok'[\s\S]{0,800}resetKpDeadStreak\(\)/.test(kwDisc), 'KP-SPIRAL.6 successful R1 KP resets the streak (reset path not gated behind R2)');
+  // 4. A deliberate SKIP is not a FAILURE and must not feed the breaker.
+  assert(kwDisc.includes('skipped: true'), 'KP-SPIRAL.7 skip result is flagged distinctly from a failure');
+  assert(kwDisc.includes("if (!kpResult?.ok && !kpResult?.skipped)"), 'KP-SPIRAL.8 skip does not emit the KP-FAILED log line');
+  assert(kwDisc.includes("kpEvent: 'skipped'"), 'KP-SPIRAL.9 skip emits a typed skipped event');
+  assert(/if \(!skipR1Kp\) \{\s*\n\s*const next = await bumpKpDeadStreak/.test(kwDisc), 'KP-SPIRAL.10 zero-yield does not bump the streak when KP was skipped');
+  // Circuit breaker reads the TYPED event, not the log prose.
+  assert(bgSpiral.includes("ev === 'fail'"), 'KP-SPIRAL.11 breaker keys off typed kpEvent, not log text');
+  assert(/const ev = payload\.kpEvent/.test(bgSpiral), 'KP-SPIRAL.12 kpEvent plumbed into emitProgress');
+  // Cooldown expiry clears the state that would immediately re-trip it.
+  assert(/state\.consecutiveKpFailures = 0;[\s\S]{0,200}cooldown expired/i.test(bgSpiral), 'KP-SPIRAL.13 cooldown expiry clears failure counters');
+  // ONE definition of "is the KP session dead" — three drifting regex
+  // copies used to disagree about which errors counted.
+  assert(kwDisc.includes('export function isKpSessionDeadError'), 'KP-SPIRAL.14 single session-dead predicate exported');
+  // Count regex LITERALS only (leading slash) — prose mentions in comments
+  // elsewhere in the file are fine, a second live regex is not.
+  assert((kwDisc.match(/\/message \(port\|channel\) closed/g) || []).length === 1, 'KP-SPIRAL.15 session-dead regex defined exactly once');
+
+  // ── Audit fixes: injection, encoding, durability, indexing ────────────
+  const srvAudit  = readFileSync(resolve(REPO, 'manager/server.js'), 'utf-8');
+  const dashAudit = readFileSync(resolve(REPO, 'dashboard.js'), 'utf-8');
+  const popAudit  = readFileSync(resolve(REPO, 'popup.js'), 'utf-8');
+  // esc() must cover ATTRIBUTE context. ~78 call sites interpolate scraped
+  // product names / keywords into title="" and value="" attributes; without
+  // quote escaping a scraped value containing a double quote breaks out of
+  // the attribute and can inject an event handler.
+  for (const [name, src] of [['app.js', appJs.body], ['dashboard.js', dashAudit], ['popup.js', popAudit]]) {
+    assert(/const esc = [\s\S]{0,900}&quot;/.test(src), `ESCAPE.1 ${name} esc() escapes double quotes`);
+    assert(/const esc = [\s\S]{0,900}&#39;/.test(src),  `ESCAPE.2 ${name} esc() escapes single quotes`);
+    // Entity-escaping cannot protect a JS-in-attribute context — the HTML
+    // parser decodes entities before the JS parser runs.
+    assert(!/on(?:click|change|input|error|load)="[^"]*\$\{/.test(src), `ESCAPE.3 ${name} no interpolated inline event handlers`);
+  }
+  // Request bodies must be assembled as Buffers. String concatenation decoded
+  // each chunk separately, so a multi-byte character straddling a chunk
+  // boundary silently became U+FFFD — corrupting Devanagari product names
+  // and keywords with no error surfacing.
+  assert(srvAudit.includes('Buffer.concat(chunks)'),        'ENCODING.1 readJson concatenates buffers, not strings');
+  assert(!/req\.on\('data', c => \{ buf \+= c/.test(srvAudit), 'ENCODING.2 no string-concat body accumulation');
+  assert(/bytes \+= c\.length/.test(srvAudit),               'ENCODING.3 body cap measured in bytes');
+  // The manager is always-on; an unhandled rejection would otherwise kill it.
+  assert(srvAudit.includes("process.on('unhandledRejection'"), 'DURABILITY.1 unhandled rejections do not kill the manager');
+  assert(srvAudit.includes("process.on('uncaughtException'"),  'DURABILITY.2 uncaught exceptions do not kill the manager');
+  assert(/PRAGMA wal_checkpoint\(TRUNCATE\)/.test(srvAudit),   'DURABILITY.3 WAL is checkpointed');
+  // Deletes must return pages to the filesystem — the live DB had grown to
+  // 116 MB while holding ~150 KB of live rows.
+  assert(srvAudit.includes('function reclaimSpace'), 'DISK.1 reclaimSpace helper exists');
+  const destrAudit = readFileSync(resolve(REPO, 'manager/routes/destructive.js'), 'utf-8');
+  assert((destrAudit.match(/reclaimSpace\?\.\(\)/g) || []).length >= 3, 'DISK.2 every destructive path reclaims space');
+  assert(/Startup backup skipped/.test(srvAudit), 'DISK.3 restart does not re-copy the whole DB');
+  assert(/fs\.existsSync\(target\)/.test(srvAudit), 'DISK.4 backup filenames cannot collide within a second');
+  // Upload dedup scans jobs by product_url once per SKU — without an index
+  // the planner falls back to the low-cardinality status index and bulk
+  // upload degrades to O(rows x table). Measured 9829 ms -> 8 ms.
+  assert(srvAudit.includes('jobs_product_url_idx'), 'INDEX.1 product_url lookup is indexed');
+  assert(srvAudit.includes('DROP INDEX IF EXISTS keywords_batch_idx'), 'INDEX.2 redundant keywords(batch_id) index removed');
+
   assert(imMatcher.includes('_lastRefEmbedError'),            'CLIP-DIAG.1 last-error captured module-level');
   assert(imMatcher.includes('getLastRefEmbedError'),          'CLIP-DIAG.2 getter exported');
   assert(kwDisc.includes('getLastRefEmbedError'),             'CLIP-DIAG.3 engine imports the getter');

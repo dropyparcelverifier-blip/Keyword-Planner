@@ -9,7 +9,16 @@ import { api, getToken, setToken, fetchBatchKeywordStats, generateSetupCode } fr
 const XLSX = window.XLSX;
 
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s == null ? '' : s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+// Escapes for HTML TEXT and ATTRIBUTE contexts. Quotes are escaped too:
+// most call sites interpolate into title="${esc(x)}" / value="${esc(x)}",
+// and without quote escaping a scraped product name or keyword containing a
+// double quote breaks out of the attribute and can inject an event handler.
+// Keyword/product/handle/note values all originate from scraped Google,
+// Amazon and Shopify pages, so they are untrusted input.
+// NOT sufficient for JS contexts (inline on*= handlers) — the HTML parser
+// decodes entities before the JS parser runs, so entity-escaping cannot
+// contain a breakout there. Use a data-* attribute + delegated listener.
+const esc = (s) => String(s == null ? '' : s).replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
 
 const state = {
   parsedProducts: null,   // upload preview
@@ -426,9 +435,10 @@ async function refreshManagerVersion() {
 
 async function refreshStatsBar() {
   try {
-    const [sum, workers, act] = await Promise.all([
+    const [sum, workers, roster, act] = await Promise.all([
       api.jobsSummary(),
       api.jobsWorkerStats(),
+      api.workersList().catch(() => ({ workers: [] })),
       api.activityGet('', 1),
     ]);
     const batches = sum.batches || [];
@@ -440,11 +450,23 @@ async function refreshStatsBar() {
       return a;
     }, { total: 0, done: 0, claimed: 0, failed: 0 });
     // Online worker = last heartbeat within 5 minutes.
+    // jobsWorkerStats() only knows about workers that have claimed at
+    // least one job, so an armed-but-idle worker (heartbeating, never
+    // claimed) is invisible to it — that's what produced "0 workers
+    // online" here while the fleet table (which merges in the
+    // workersList() roster) correctly showed workers as online.
+    // Union both sources by worker_id, same fix refreshDashboard() uses.
     const now = Date.now();
-    const online = (workers.workers || []).filter(w => {
-      const hb = Number(w.last_heartbeat || 0);
-      return hb && (now - hb) < 5 * 60 * 1000;
-    }).length;
+    const heartbeatByWid = new Map();
+    for (const w of (workers.workers || [])) {
+      heartbeatByWid.set(w.worker_id, Number(w.last_heartbeat || 0));
+    }
+    for (const w of (roster.workers || [])) {
+      if (!heartbeatByWid.has(w.worker_id)) {
+        heartbeatByWid.set(w.worker_id, Number(w.last_seen || 0));
+      }
+    }
+    const online = Array.from(heartbeatByWid.values()).filter(hb => hb && (now - hb) < 5 * 60 * 1000).length;
     const kwTotal = batches.reduce((a, _) => a, 0); // computed below via a separate endpoint if needed
     // Sum keywords across batches — cheap here since summary doesn't include it.
     let kwSum = 0;
@@ -1590,14 +1612,14 @@ function renderDashHero(timeline) {
   const donePct = totals.total ? Math.round((totals.done / totals.total) * 100) : 0;
   // Throughput trend: sum of last-6-hour buckets vs the prior 6-hour window.
   const buckets = (timeline && timeline.buckets) || [];
-  const last6 = buckets.slice(-6).reduce((s, b) => s + (b.count || 0), 0);
-  const prev6 = buckets.slice(-12, -6).reduce((s, b) => s + (b.count || 0), 0);
+  const last6 = buckets.slice(-6).reduce((s, b) => s + (b.n || 0), 0);
+  const prev6 = buckets.slice(-12, -6).reduce((s, b) => s + (b.n || 0), 0);
   const trend = prev6 === 0 ? (last6 > 0 ? '↑' : '·')
               : last6 > prev6 * 1.1 ? '↑'
               : last6 < prev6 * 0.9 ? '↓'
               : '→';
   const trendCls = trend === '↑' ? 'hero-trend-up' : trend === '↓' ? 'hero-trend-down' : 'hero-trend-flat';
-  const last24h = buckets.reduce((s, b) => s + (b.count || 0), 0);
+  const last24h = buckets.reduce((s, b) => s + (b.n || 0), 0);
   const workerDot = workersOnline > 0 ? '<span class="pulse-dot"></span>'
                   : workersTotal > 0  ? '<span class="pulse-dot idle"></span>'
                   : '<span class="pulse-dot danger"></span>';
@@ -1638,7 +1660,7 @@ function renderBatchOverview() {
       const fillClass = complete ? 'done' : (claimed > 0 ? '' : (donePct > 0 ? '' : 'stuck'));
       return `
         <tr>
-          <td class="mono" style="cursor:pointer;" onclick="document.getElementById('dashBatchSelect').value='${esc(b.batch_id)}'; document.getElementById('dashBatchSelect').dispatchEvent(new Event('change'));">${esc(b.batch_id)}</td>
+          <td class="mono" style="cursor:pointer;" data-pick-batch="${esc(b.batch_id)}" title="Scope the dashboard to this batch">${esc(b.batch_id)}</td>
           <td><span class="ship-badge ship-loading" data-ship-badge="${esc(b.batch_id)}" data-batch-id="${esc(b.batch_id)}" title="Ship-readiness — loading…">…</span></td>
           <td>
             <div class="progress">
@@ -1663,6 +1685,20 @@ function renderBatchOverview() {
         </tr>`;
     }).join('')}
     </tbody></table>`;
+  // Wire the batch-id cells. This used to be an inline onclick= that
+  // interpolated batch_id straight into a JS string literal. Entity-escaping
+  // can't protect a JS-in-attribute context (the HTML parser decodes
+  // entities before the JS parser sees them), and batch_id comes from
+  // uploaded files — so the value travels in a data-* attribute and the
+  // behaviour lives here instead.
+  el.querySelectorAll('[data-pick-batch]').forEach(td =>
+    td.addEventListener('click', () => {
+      const sel = $('dashBatchSelect');
+      if (!sel) return;
+      sel.value = td.dataset.pickBatch;
+      sel.dispatchEvent(new Event('change'));
+    })
+  );
   // Wire the Manage buttons.
   el.querySelectorAll('button[data-queue-manage]').forEach(btn =>
     btn.addEventListener('click', () => openQueueManager(btn.dataset.queueManage))
@@ -2524,7 +2560,10 @@ function renderWorkerFleet() {
               const idle        = isOnline && !inFlight;
               const running     = isOnline && inFlight && !isFrozenSt;
               const bts = [];
-              bts.push(`<button data-worker="${esc(w.worker_id)}" data-monitor="1" class="wa wa-primary" title="Monitor — full status, controls, filtered log" onclick="window.openWorkerMonitor && window.openWorkerMonitor('${esc(w.worker_id)}')">🖥</button>`);
+              // No inline onclick — the delegated [data-monitor] handler
+              // below already opens the monitor, and interpolating
+              // worker_id into a JS string literal was a breakout vector.
+              bts.push(`<button data-worker="${esc(w.worker_id)}" data-monitor="1" class="wa wa-primary" title="Monitor — full status, controls, filtered log">🖥</button>`);
               // ▶ Wake — only when idle / stopped / offline (has something to do)
               if (idle || isStoppedByUser || isOffline) {
                 bts.push(`<button data-worker="${esc(w.worker_id)}" data-cmd="wake" class="wa wa-ok" title="Wake — start claiming (respects Stop)">▶</button>`);
