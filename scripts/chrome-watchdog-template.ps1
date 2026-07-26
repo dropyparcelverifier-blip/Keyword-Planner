@@ -40,7 +40,7 @@ function Mgr-Get($path) {
         $req = [System.Net.WebRequest]::Create($managerUrl + $path)
         $req.Method = 'GET'
         $req.Timeout = 4000
-        if ($token -and $token -ne '__TOKEN__') { $req.Headers.Add('X-Manager-Token', $token) }
+        if ($token) { $req.Headers.Add('X-Manager-Token', $token) }
         $resp = $req.GetResponse()
         $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
         $body = $sr.ReadToEnd()
@@ -55,7 +55,7 @@ function Mgr-Post($path, $bodyText) {
         $req.Method = 'POST'
         $req.ContentType = 'application/json'
         $req.Timeout = 4000
-        if ($token -and $token -ne '__TOKEN__') { $req.Headers.Add('X-Manager-Token', $token) }
+        if ($token) { $req.Headers.Add('X-Manager-Token', $token) }
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($bodyText)
         $req.ContentLength = $bytes.Length
         $s = $req.GetRequestStream(); $s.Write($bytes, 0, $bytes.Length); $s.Close()
@@ -81,19 +81,17 @@ function Download-To($url, $destPath) {
 }
 
 # 1) Manager reachability check. Skip Chrome relaunch if manager is off.
-try {
-    $req = [System.Net.WebRequest]::Create($managerUrl + '/api/health')
-    $req.Method = 'GET'
-    $req.Timeout = 2000
-    $resp = $req.GetResponse()
-    $code = [int]$resp.StatusCode
-    $resp.Close()
-    if ($code -ne 200) {
-        Add-Log ('[skip] manager returned HTTP ' + $code + ' - not launching Chrome')
-        exit 0
-    }
-} catch {
-    # Silent exit on unreachable manager - this is the whole point.
+# Go through Mgr-Get so the auth header is attached. This probe used to
+# build its own WebRequest and send NO token; /api/health is token-gated,
+# so on any manager with MANAGER_TOKEN set it answered 401, GetResponse()
+# threw, and the catch below exited 0 — silently, every run. The watchdog
+# therefore never reached the auto-update or the Chrome relaunch, and
+# workers sat on stale code indefinitely with nothing in the log to show
+# for it.
+$healthBody = Mgr-Get '/api/health'
+if (-not $healthBody) {
+    # Manager down, unreachable, or rejecting our token. Staying quiet here
+    # is deliberate: no point running Chrome if nothing can hand out work.
     exit 0
 }
 

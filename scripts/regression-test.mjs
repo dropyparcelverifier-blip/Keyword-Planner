@@ -2647,6 +2647,22 @@ async function run() {
   // worker recycle, a browser restart — lost everything it had found. With
   // KP retrying, SKUs routinely ran past that cap, which is how the fleet
   // produced ZERO keyword rows in an hour while looking busy.
+  // ── Watchdog auth ─────────────────────────────────────────────────────
+  // The watchdog's health probe built its own WebRequest and sent no token.
+  // /api/health is token-gated, so on any manager with MANAGER_TOKEN set it
+  // got 401 and exited 0 — silently, every run, for hours. It never reached
+  // the auto-update or the Chrome relaunch, so workers sat on stale code
+  // with an empty log. Every manager call must carry the token.
+  const wdTpl = readFileSync(resolve(REPO, 'scripts/chrome-watchdog-template.ps1'), 'utf-8');
+  assert(/\$healthBody = Mgr-Get '\/api\/health'/.test(wdTpl), 'WATCHDOG-AUTH.1 health probe goes through Mgr-Get (which attaches the token)');
+  assert(!/Create\(\$managerUrl \+ '\/api\/health'\)/.test(wdTpl), 'WATCHDOG-AUTH.2 no hand-rolled unauthenticated health request');
+  // The guard compared $token to the literal placeholder, but the installer
+  // replaces EVERY __TOKEN__ occurrence — including the one inside the
+  // comparison — so it became "send only if token != token": never true.
+  assert(!/\$token -ne '__TOKEN__'/.test(wdTpl), 'WATCHDOG-AUTH.3 token guard does not compare against the placeholder');
+  assert((wdTpl.match(/if \(\$token\) \{ \$req\.Headers\.Add\('X-Manager-Token', \$token\) \}/g) || []).length >= 2,
+    'WATCHDOG-AUTH.4 both Mgr-Get and Mgr-Post attach the token');
+
   assert(bgSpiral.includes('maybeFlushIncremental'),        'INCPUSH.1 incremental flush helper exists');
   assert(/onRowAdded[\s\S]{0,1200}maybeFlushIncremental\(\)/.test(bgSpiral), 'INCPUSH.2 flush is driven from onRowAdded');
   assert(bgSpiral.includes('INCREMENTAL_FLUSH_MS'),         'INCPUSH.3 time-based throttle');
