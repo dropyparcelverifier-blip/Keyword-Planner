@@ -2027,6 +2027,11 @@ function computeMatchConfidence(clipScorePct, ctx, productContext, thumbColors, 
   };
 }
 
+// Set once if chrome.search.query turns out to be structurally unusable on
+// this machine (see the "No current window" handling below). Service-worker
+// lifetime — a reload re-probes, which is correct if a window has appeared.
+let _chromeSearchUnavailable = false;
+
 async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls, threshold, log, productContext, loadOpts = {}) {
   log = log || (() => {});
 
@@ -2043,7 +2048,7 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
   // normal browsing context (referrer, cookies, omnibox-search fingerprint),
   // which is more human-looking than direct URL navigation.
   let chromeSearchOk = false;
-  if (!forceDirectUrl && chrome.search?.query) {
+  if (!forceDirectUrl && chrome.search?.query && !_chromeSearchUnavailable) {
     try {
       // Ensure worker tab exists first (chrome.search.query needs a tabId).
       tabId = await Worker.navigate('about:blank');
@@ -2056,7 +2061,19 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
         log(`chrome.search.query navigation timed out, falling back to direct URL`);
       }
     } catch (e) {
-      log(`chrome.search.query failed (${e.message}) — falling back to direct URL`);
+      // "No current window" is structural, not transient: chrome.search.query
+      // needs a CURRENT (focused) window, and a worker PC running headless —
+      // all windows closed, or only the minimized one the engine created —
+      // never has one. Retrying it per seed just burns a round trip and
+      // fills the error panel. Probe once, then use direct URL for the rest
+      // of this service-worker's life. We deliberately do NOT focus a window
+      // to satisfy the API: these PCs may have someone working on them.
+      if (/no current window/i.test(e.message || '')) {
+        _chromeSearchUnavailable = true;
+        log(`chrome.search.query unavailable on this PC (no focused window) — using direct URL for the rest of this session. Not an error; results are identical.`);
+      } else {
+        log(`chrome.search.query failed (${e.message}) — falling back to direct URL`);
+      }
     }
   }
 
