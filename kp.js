@@ -573,7 +573,11 @@
         }
       }
     } else {
-      kpLog('interactive Discover card did not appear within 45s', 'warn');
+      // Report the page we're on. "Card never appeared" on /ideas/new is a
+      // genuine UI/selector problem; the same message on /home or an
+      // onboarding path means we were redirected and the card was never
+      // going to be there. Those need opposite fixes, so don't conflate them.
+      kpLog(`interactive Discover card did not appear within 12s (page is on "${location.pathname + location.search}")`, 'warn');
     }
 
     // ----- URL-navigation fallback (added after recurring Auto-click failures) -----
@@ -589,8 +593,18 @@
       // then throw to signal the engine to re-navigate. Engine's outer
       // retry handles the Worker.navigate cleanly + re-sends KP_GET_IDEAS.
       try { await chrome.storage.local.set({ kp_click_broken: true }); } catch {}
-      kpLog(`click strategies failed — signalling engine to re-navigate to /ideas/new (no self-nav = no content-script suicide)`, 'warn');
-      throw new Error('KP_NEEDS_FRESH_NAV: click strategies exhausted, engine must re-navigate to /ideas/new');
+      // Say WHERE we actually are. The engine navigates straight to
+      // /ideas/new, so reaching this branch means Google redirected us off
+      // it — and the engine's response is to navigate to that same URL
+      // again, which redirects again. Without the landing path in the error
+      // that loop is invisible: every attempt just reads "click strategies
+      // exhausted", which sounds like a selector problem rather than a
+      // redirect. Restricted / onboarding-state Ads accounts (no campaigns,
+      // no billing) are the common cause — Google bounces them to the hub
+      // or an onboarding page instead of serving the ideas pane.
+      const landedOn = location.pathname + location.search;
+      kpLog(`click strategies failed — Google redirected us off /ideas/new to "${landedOn}"; signalling engine to re-navigate`, 'warn');
+      throw new Error(`KP_NEEDS_FRESH_NAV: click strategies exhausted; expected /ideas/new but the page is on "${landedOn}" — Google redirected us off the ideas pane (common when the Ads account is in an onboarding/restricted state with no campaigns or billing)`);
     }
 
     // ----- Manual fallback -----

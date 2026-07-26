@@ -2487,6 +2487,15 @@ async function run() {
   assert(kpJs.includes('KP_NEEDS_FRESH_NAV'),                 'KP-FIX.1 kp.js throws NAV marker instead of self-navigating');
   assert(kpJs.includes('/aw/keywordplanner/ideas/new'),       'KP-FIX.2 target URL still referenced (in error message)');
   assert(!/location\.href\s*=\s*[a-zA-Z]/.test(kpJs) || !/location\.href\s*=.*ideas\/new/.test(kpJs), 'KP-FIX.3 no more location.href self-nav to /ideas/new');
+  // The NAV error must name the page we actually landed on. The engine
+  // navigates straight to /ideas/new, so this branch only runs when Google
+  // redirected us OFF it — and the engine's response is to navigate to the
+  // same URL again. Without the landing path in the message that loop is
+  // invisible: every attempt reads "click strategies exhausted", which
+  // sounds like a selector bug rather than a redirect.
+  assert(/expected \/ideas\/new but the page is on/.test(kpJs), 'KP-FIX.4 NAV error reports the actual landing path');
+  assert(/const landedOn = location\.pathname \+ location\.search/.test(kpJs), 'KP-FIX.5 landing path captured from the live page');
+  assert(/card did not appear[\s\S]{0,120}location\.pathname/.test(kpJs), 'KP-FIX.6 card-timeout warning also reports the page');
   // CLIP: surface the ACTUAL init/embed failure reason instead of '?'.
   const imMatcher = readFileSync(resolve(REPO, 'modules/image-matcher.js'), 'utf-8');
   const kwDisc = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
