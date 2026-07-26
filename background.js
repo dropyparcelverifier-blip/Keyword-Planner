@@ -737,23 +737,23 @@ async function workerAutoPollTick() {
     // the manager can Wake-on-LAN this PC later.
     (async () => {
       try {
-        const d = await chrome.storage.local.get(['adbrainWorkerMac', 'adbrainWorkerHostname', 'adbrainWorkerBundleHash', 'adbrainWorkerBundleHashAt']);
-        // Version hash — refresh every 2 min so post-install workers
-        // report the current hash promptly (was 10 min in a241e35, too
-        // long — kept 'update' badge showing on freshly-reinstalled
-        // workers because the manager's hash changes with each new
-        // commit push while workers lagged 10 min behind). 2 min is a
-        // good balance: negligible /api/worker/version-hash cost
-        // (~5ms per worker per 2 min) and the badge clears within one
-        // heartbeat cycle after a genuine reinstall.
-        const HASH_MAX_AGE_MS = 2 * 60 * 1000;
-        const hashAgeMs = d.adbrainWorkerBundleHashAt ? Date.now() - d.adbrainWorkerBundleHashAt : Infinity;
-        let vhash = d.adbrainWorkerBundleHash || '';
-        if (!vhash || hashAgeMs > HASH_MAX_AGE_MS) {
-          fetchWorkerBundleHash().then(h => {
-            if (h) chrome.storage.local.set({ adbrainWorkerBundleHash: h, adbrainWorkerBundleHashAt: Date.now() }).catch(() => {});
-          }).catch(() => {});
-        }
+        const d = await chrome.storage.local.get(['adbrainWorkerMac', 'adbrainWorkerHostname']);
+        // Report OUR OWN bundle hash, computed from this extension's file
+        // contents once per service-worker lifetime.
+        //
+        // This previously reported the value of GET /api/worker/version-hash
+        // — the MANAGER's hash — echoed straight back, refreshed every 2 min.
+        // That made hash_mismatch a tautology: the fleet table showed
+        // outdated=false for every worker no matter how old its code was.
+        // It is what made a worker running the pre-fix engine look fully
+        // up to date while it emitted pre-fix log lines.
+        //
+        // Computing it at SW startup and caching for the SW's lifetime is
+        // deliberate: it reports what is RUNNING, not what sits on disk. A
+        // worker whose files were updated but which has not reloaded keeps
+        // reporting the old hash and correctly shows as outdated until the
+        // hard_reset lands.
+        const vhash = await computeOwnBundleHash();
         sendWorkerHeartbeat(state.workerId, {
           mac: d.adbrainWorkerMac || '',
           hostname: d.adbrainWorkerHostname || '',

@@ -3705,9 +3705,21 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         // attributing A's image_count to a row that was meant to describe B.
         if (report.size >= productCap) return null;
         if (isJunkKeyword(keyword)) return null;
+        // Last-resort seeds are built FROM this product's own name / SKU /
+        // URL slug, so they are relevant by construction and must never be
+        // filtered out. They were previously subject to the same gates as
+        // everything else, and the relevance gate is brand-strict: for any
+        // product whose brand aliases the classifier could not extract, the
+        // product's OWN NAME was judged irrelevant. Every fallback seed was
+        // dropped, round1Seeds stayed empty, and the SKU hit FAIL-FAST and
+        // was marked failed — while the log promised "Engine will continue
+        // with PAA + autosuggest". That is the path that failed whole
+        // batches whenever KP was skipped.
+        const isLastResortSeed = source === 'fallback_no_kp';
         // External quality filter (geo/platform/UI-literal/etc.) if provided
         // by the harness via opts.shouldKeepKeyword.
-        if (typeof opts.shouldKeepKeyword === 'function' && !opts.shouldKeepKeyword(keyword, productName)) {
+        if (!isLastResortSeed &&
+            typeof opts.shouldKeepKeyword === 'function' && !opts.shouldKeepKeyword(keyword, productName)) {
           return null;
         }
         // Product-relevance gate. Skipped for kp_idea and kp_reexpand rows —
@@ -3716,7 +3728,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         // autosuggest, related_search and any other source where Google's
         // suggestions can drift off-product.
         if (
-          source !== 'kp_idea' && source !== 'kp_reexpand' &&
+          source !== 'kp_idea' && source !== 'kp_reexpand' && !isLastResortSeed &&
           typeof opts.isRelevantToProduct === 'function' && productContext &&
           !opts.isRelevantToProduct(keyword, productContext)
         ) {
@@ -4738,6 +4750,26 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // a clear reason so the operator can fix + requeue in one click.
       // We DO keep going if kp1RowsArr has some rows even with 0 seeds —
       // that's a partial win worth pushing through.
+      // LAST RESORT before failing: if we still have nothing to cycle but the
+      // product has a usable name/SKU/slug, seed directly from it, bypassing
+      // every filter. A SKU must not be marked FAILED merely because KP was
+      // unavailable — the product URL alone is enough to run Google SERP,
+      // autosuggest and Amazon, which is exactly what the operator was told
+      // would happen ("Engine will continue with PAA + autosuggest only").
+      if (round1Seeds.length === 0 && kp1RowsArr.length === 0) {
+        const lastResort = (productName && productName.trim())
+          || (p.sku || cleanUrl.split('/').pop() || '').replace(/[^a-z0-9\s-]/gi, ' ').replace(/[-_]+/g, ' ').trim();
+        if (lastResort) {
+          const r = addRow(lastResort, 'fallback_no_kp', '');
+          if (r) round1Seeds.push(r);
+          onProgress?.({
+            currentProduct: productName,
+            currentSource: 'round1',
+            currentAction: `↩ LAST-RESORT SEED: KP unavailable and PAA empty, so seeding directly from the product name "${lastResort.slice(0, 60)}". Yield will be low, but the SKU still runs SERP + autosuggest + Amazon instead of being failed.`,
+            logKind: 'warn',
+          });
+        }
+      }
       if (round1Seeds.length === 0 && kp1RowsArr.length === 0) {
         const failReason = 'zero seeds + zero KP rows — likely KP session dead or product name unrecognised. Fix Google Ads session on this worker + requeue.';
         onProgress?.({

@@ -295,11 +295,55 @@ export async function sendWorkerHeartbeat(workerId, extras = {}) {
 // worker cold-start; the returned hash is what we then echo on every
 // subsequent heartbeat so the manager can compare it against its live
 // hash and flag mismatches.
+// The MANAGER's current hash — what the fleet SHOULD be running.
 export async function fetchWorkerBundleHash() {
   try {
     const r = await _get('/api/worker/version-hash');
     return r?.hash || '';
   } catch { return ''; }
+}
+
+// THIS extension's own hash — what this worker IS running.
+//
+// Computed from our own file contents, using the same recipe as the
+// manager's currentWorkerBundleHash():
+//   sha256( "<rel>:<sha256hex(bytes)>" joined by "|" ).slice(0, 16)
+//
+// Cached for the lifetime of the service worker, deliberately. The SW loaded
+// its modules at startup, so a hash taken at startup is what is actually
+// executing. If the watchdog downloads new files but the extension has not
+// reloaded, we keep reporting the OLD hash and the manager correctly shows
+// the worker as outdated — which is the entire point. Re-reading the files
+// on a timer would report what is on disk, not what is running, and that is
+// exactly the bug this replaces: workers echoed the manager's hash back and
+// so could never appear outdated, no matter how stale their code was.
+let _ownBundleHashPromise = null;
+export function computeOwnBundleHash() {
+  if (_ownBundleHashPromise) return _ownBundleHashPromise;
+  _ownBundleHashPromise = (async () => {
+    try {
+      // The manager owns the canonical file list; asking keeps the two in
+      // step when WORKER_FILES changes.
+      const manifest = await _get('/worker-files.json');
+      const files = Array.isArray(manifest?.files) ? manifest.files : [];
+      if (!files.length) return '';
+      const sha256Hex = async (buf) => {
+        const d = await crypto.subtle.digest('SHA-256', buf);
+        return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+      };
+      const parts = [];
+      for (const rel of files) {
+        try {
+          const resp = await fetch(chrome.runtime.getURL(rel));
+          if (!resp.ok) { parts.push(`${rel}:MISSING`); continue; }
+          parts.push(`${rel}:${await sha256Hex(await resp.arrayBuffer())}`);
+        } catch { parts.push(`${rel}:MISSING`); }
+      }
+      const full = await sha256Hex(new TextEncoder().encode(parts.join('|')));
+      return full.slice(0, 16);
+    } catch { return ''; }
+  })();
+  return _ownBundleHashPromise;
 }
 
 export async function fetchBatchKeywordStats(batchId, limit = 50) {

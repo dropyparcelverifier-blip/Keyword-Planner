@@ -1525,14 +1525,27 @@ function currentManagerVersion() {
   return data;
 }
 let _workerBundleHashCache = { at: 0, hash: '0000000000000000' };
+// Hashes the CONTENT of every worker file.
+//
+// This used to hash mtime+size, which broke the feature two ways. It made
+// the hash change on any git checkout that rewrote identical bytes, and —
+// far worse — a worker could not reproduce it, because a browser extension
+// cannot see the mtime of its own files. So the worker "reported its
+// version" by fetching THIS endpoint and echoing the manager's own hash
+// back, which made hash_mismatch a tautology that could never be true. The
+// fleet showed outdated=false for every worker while they ran old code.
+//
+// Content hashing is reproducible on both sides, so the comparison finally
+// means something. Both sides must build the string identically:
+//   sha256( "<rel>:<sha256hex(bytes)>" joined by "|" ).slice(0, 16)
 function currentWorkerBundleHash() {
   const now = Date.now();
   if (now - _workerBundleHashCache.at < 5000) return _workerBundleHashCache.hash;
   const parts = [];
   for (const rel of WORKER_FILES) {
     try {
-      const st = fs.statSync(path.join(__dirname, '..', rel));
-      parts.push(`${rel}:${Math.floor(st.mtimeMs)}:${st.size}`);
+      const bytes = fs.readFileSync(path.join(__dirname, '..', rel));
+      parts.push(`${rel}:${crypto.createHash('sha256').update(bytes).digest('hex')}`);
     } catch { parts.push(`${rel}:MISSING`); }
   }
   const hash = crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 16);
