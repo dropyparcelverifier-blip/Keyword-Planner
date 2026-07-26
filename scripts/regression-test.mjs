@@ -2700,6 +2700,16 @@ async function run() {
   // account, and lands the tab on /aw/campaigns instead of Keyword Planner.
   // Only ocid (account) and authuser (profile index) may be forwarded.
   assert(/for \(const k of \['ocid', 'authuser'\]\)/.test(kwDisc), 'KPURL.1 only ocid + authuser are forwarded');
+  // The engine must try the OPERATOR'S url first. It used to force every KP
+  // URL to /aw/keywordplanner/ideas/new; when Google began bouncing that
+  // deep link to /aw/campaigns there was no working path left — even though
+  // the operator's own /home URL still reached Keyword Planner by hand, and
+  // kp.js can click through from that hub via waitForInteractiveDiscoverCard.
+  assert(kwDisc.includes('function cleanKpUrl'),      'KPURL.3 param cleaning preserves the configured path');
+  assert(kwDisc.includes('function toIdeasDeepLink'), 'KPURL.4 deep link retained as a fallback');
+  assert(/urlForAttempt = \(n\) => \(n <= 1 \? hubUrl : deepUrl\)/.test(kwDisc), 'KPURL.5 attempt 1 = configured URL, attempt 2 = deep link');
+  assert(!/transformToIdeasUrl/.test(kwDisc),         'KPURL.6 unconditional path rewrite removed');
+  assert(!/Worker\.navigate\(ideasUrl\)/.test(kwDisc), 'KPURL.7 no navigation hardcoded to the deep link');
   for (const volatileParam of ['euid', '__u', 'uscid', '__c']) {
     assert(!new RegExp(`'${volatileParam.replace(/_/g, '_')}'[^\\n]*\\]`).test(
       (kwDisc.match(/for \(const k of \[[^\]]*\]/) || [''])[0]),

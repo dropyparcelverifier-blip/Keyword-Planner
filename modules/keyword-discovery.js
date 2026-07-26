@@ -1001,11 +1001,21 @@ async function explainKpLandingPage(tabId) {
 // ============ KP step (separate from Google SERP) ============
 // Uses the user's own ads.google.com KP tab — does NOT load a Google search
 // results page, so it isn't subject to the per-product SERP budget.
-function transformToIdeasUrl(kpUrl) {
+// Strip the volatile params but KEEP the operator's path.
+//
+// The engine used to force every KP URL to /aw/keywordplanner/ideas/new.
+// That deep link is what Google was bouncing to /aw/campaigns — the account
+// resolved correctly (the Ads header showed the right customer) and the page
+// was still wrong. Meanwhile the URL the operator actually verified by hand
+// is the hub, /aw/keywordplanner/home, and kp.js already knows how to drive
+// it: waitForInteractiveDiscoverCard() finds the "Discover new keywords"
+// card and clicks through. Forcing the deep link skipped the one path known
+// to work. Try the operator's URL first; the deep link stays available as a
+// fallback for when the hub click genuinely fails.
+function cleanKpUrl(kpUrl) {
   try {
     const u = new URL(kpUrl);
     if (/\/aw\/keywordplanner\b/.test(u.pathname)) {
-      u.pathname = '/aw/keywordplanner/ideas/new';
       // Keep ONLY the two stable identifiers.
       //
       //   ocid     — the Google Ads account. Stable, and the one thing that
@@ -1027,6 +1037,20 @@ function transformToIdeasUrl(kpUrl) {
       }
       u.search = keep.toString();
     }
+    return u.toString();
+  } catch {
+    return kpUrl;
+  }
+}
+
+// The /ideas/new deep link, used only as a RETRY after the operator's own
+// URL failed to get us to the Discover pane. Keeping it as a fallback rather
+// than the default means a Google-side change to this path degrades to one
+// wasted attempt instead of breaking KP outright, which is what happened.
+function toIdeasDeepLink(kpUrl) {
+  try {
+    const u = new URL(cleanKpUrl(kpUrl));
+    if (/\/aw\/keywordplanner\b/.test(u.pathname)) u.pathname = '/aw/keywordplanner/ideas/new';
     return u.toString();
   } catch {
     return kpUrl;
@@ -1086,8 +1110,15 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
     return { ok: true, keywords: cachedUnion.slice(0, maxResults), cached: true };
   }
 
-  const ideasUrl = transformToIdeasUrl(kpUrl);
-  if (ideasUrl !== kpUrl) log(`KP: rewrote URL -> ${ideasUrl.slice(0, 140)}`);
+  // Attempt 1 uses the operator's OWN url (params cleaned, path preserved) —
+  // the one they verified reaches Keyword Planner by hand. Attempt 2 falls
+  // back to the /ideas/new deep link. Previously the deep link was the only
+  // thing ever tried, so when Google started bouncing it to /aw/campaigns
+  // there was no working path left at all.
+  const hubUrl  = cleanKpUrl(kpUrl);
+  const deepUrl = toIdeasDeepLink(kpUrl);
+  const urlForAttempt = (n) => (n <= 1 ? hubUrl : deepUrl);
+  if (hubUrl !== kpUrl) log(`KP: cleaned URL -> ${hubUrl.slice(0, 140)}`);
 
   const accumulated = [];
   const seen = new Set();
@@ -1153,8 +1184,9 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
         // Navigate the KP tab for this seed. The Worker reuses the same tab id;
         // the navigation forces kp.js to re-inject cleanly.
         const attemptLabel = attempt > 1 ? ` (retry ${attempt}/${SEED_MAX_ATTEMPTS})` : '';
-        log(`KP seed ${i + 1}/${seedList.length}: navigating to ideas page${attemptLabel}`);
-        const tabId = await Worker.navigate(ideasUrl);
+        const navUrl = urlForAttempt(attempt);
+        log(`KP seed ${i + 1}/${seedList.length}: navigating to ${attempt <= 1 ? 'the configured KP page' : 'the /ideas/new deep link'}${attemptLabel}`);
+        const tabId = await Worker.navigate(navUrl);
         await sleep(randInt(2500, 4000));
         const ready = await pingContentScript(tabId, 'KP_PING', 15, 1000);
         if (!ready) {
@@ -1288,7 +1320,7 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
         websiteAttempt++;
         const attemptLabel = websiteAttempt > 1 ? ` (retry ${websiteAttempt}/${WEBSITE_MAX_ATTEMPTS})` : '';
         if (websiteAttempt > 1) log(`KP website fallback: re-navigating for retry${attemptLabel}`);
-        const tabId = await Worker.navigate(ideasUrl);
+        const tabId = await Worker.navigate(urlForAttempt(websiteAttempt));
         await sleep(randInt(2500, 4000));
         const ready = await pingContentScript(tabId, 'KP_PING', 15, 1000);
         if (!ready) {
