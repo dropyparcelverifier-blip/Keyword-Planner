@@ -2660,6 +2660,29 @@ async function run() {
   // account), the content script legitimately never loads. The engine's only
   // symptom was "KP content script never responded", which reads like a
   // scraping bug and sends you hunting in the wrong place.
+  // ── Multi-account Keyword Planner ─────────────────────────────────────
+  // A KP URL pins one Google Ads account (ocid + authuser). With several
+  // accounts in the fleet, one global kp_url points most workers at an
+  // account their Chrome profile isn't signed into — which is Google's
+  // account chooser, on which kp.js cannot run at all.
+  const cfgRoute = readFileSync(resolve(REPO, 'manager/routes/config.js'), 'utf-8');
+  assert(cfgRoute.includes('resolveKpForWorker'), 'KPACCT.1 per-worker KP resolution exists');
+  assert(cfgRoute.includes('kp_accounts'),        'KPACCT.2 supports an account list');
+  assert(cfgRoute.includes('kp_assignments'),     'KPACCT.3 supports explicit per-worker pinning');
+  // Rendezvous, not modulo: with `hash % n`, adding a third account
+  // reshuffled 133/400 workers — each move is a chooser prompt and a dead
+  // SKU. Rendezvous moves only what the new account wins.
+  assert(cfgRoute.includes('pickAccount'),        'KPACCT.4 rendezvous selection');
+  assert(!/%\s*accounts\.length/.test(cfgRoute),  'KPACCT.5 no modulo assignment (reshuffles the fleet on every add)');
+  // The avalanche finalizer is load-bearing: without it, keys differing by
+  // one character skewed selection to 155/294/151 across three accounts.
+  assert(/h \^= h >>> 16; h = Math\.imul\(h, 2246822507\)/.test(cfgRoute), 'KPACCT.6 hash has an avalanche finalizer');
+  // The worker must identify itself or the manager cannot resolve for it.
+  const djKpAcct = readFileSync(resolve(REPO, 'modules/discovery-jobs.js'), 'utf-8');
+  assert(/fetchWorkerConfig\(workerId\)/.test(djKpAcct), 'KPACCT.7 fetchWorkerConfig takes a workerId');
+  assert(/\/api\/config\$\{q\}/.test(djKpAcct),          'KPACCT.8 workerId is sent to /api/config');
+  assert(!/fetchWorkerConfig\(\)/.test(bgSpiral),     'KPACCT.9 no call site omits the workerId');
+
   assert(kwDisc.includes('async function explainKpLandingPage'), 'KPLAND.1 landing-page explainer exists');
   assert(/accounts\\.google\\.com/.test(kwDisc), 'KPLAND.2 detects the account-chooser redirect');
   assert(/ACCOUNT CHOOSER \/ SIGN-IN/.test(kwDisc), 'KPLAND.3 surfaces a human-readable cause');

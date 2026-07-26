@@ -679,7 +679,7 @@ async function _doAutoConnectWorker(msg = {}) {
       } catch {}
     }
     let centralConfig = null;
-    try { centralConfig = await fetchWorkerConfig(); } catch {}
+    try { centralConfig = await fetchWorkerConfig(state.workerId); } catch {}
     const centralRunOpts = centralConfig ? workerConfigToRunOpts(centralConfig) : {};
     if (centralRunOpts.kpUrl) {
       await chrome.storage.local.set({ [STORAGE_KEY_KP_URL]: centralRunOpts.kpUrl }).catch(() => {});
@@ -1060,7 +1060,7 @@ async function maybeAutoMigrateKpUrl() {
     const localKpUrl = (data.adbrainKpUrl || '').trim();
     if (!localKpUrl || !/\/aw\/keywordplanner\b/.test(localKpUrl)) return;
     // Local has a valid KP URL. Check what the central config has.
-    const cfg = await fetchWorkerConfig().catch(() => null);
+    const cfg = await fetchWorkerConfig(state.workerId).catch(() => null);
     if (cfg && cfg.kp_url && /\/aw\/keywordplanner\b/.test(cfg.kp_url)) {
       // Central already has a valid KP URL — no migration needed.
       _kpUrlMigrationDone = true;
@@ -2370,7 +2370,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (action === 'jobs:fetchWorkerConfig') {
     (async () => {
       try {
-        const cfg = await fetchWorkerConfig();
+        const cfg = await fetchWorkerConfig(state.workerId);
         sendResponse({ ok: true, config: cfg });
       } catch (e) { sendResponse({ ok: false, error: e.message }); }
     })();
@@ -2474,7 +2474,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // caps) BEFORE claiming so the engine starts with the central
         // settings. Worker's local Settings tab is now a fallback only.
         let centralConfig = null;
-        try { centralConfig = await fetchWorkerConfig(); } catch {}
+        try { centralConfig = await fetchWorkerConfig(state.workerId); } catch {}
         const centralRunOpts = centralConfig ? workerConfigToRunOpts(centralConfig) : {};
         if (centralRunOpts.kpUrl) {
           // Mirror the central KP URL into chrome.storage so the KP

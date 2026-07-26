@@ -231,9 +231,14 @@ export async function cleanupOldData({ logDays = 7, commandsDays = 1 } = {}) {
 
 // ---- Worker config (push-to-workers) ----
 // Config is stored as a snake_case blob so workerConfigToRunOpts still works.
-export async function fetchWorkerConfig() {
+// Pass our workerId so the manager can resolve kp_url to THIS worker's
+// Google Ads account when the fleet is configured with kp_accounts. Without
+// it every worker gets the same URL, which is wrong the moment more than one
+// Ads account is in play — see resolveKpForWorker in manager/routes/config.js.
+export async function fetchWorkerConfig(workerId) {
   try {
-    const r = await _get('/api/config');
+    const q = workerId ? `?workerId=${encodeURIComponent(workerId)}` : '';
+    const r = await _get(`/api/config${q}`);
     return { ...(r.config || {}), active_batch_id: r.active_batch_id || null };
   } catch { return null; }
 }
