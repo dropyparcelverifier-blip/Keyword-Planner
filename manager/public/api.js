@@ -70,6 +70,10 @@ export const api = {
   activityGet:       (batchId, limit, workerId) => _fetch(`/api/activity?batchId=${encodeURIComponent(batchId || '')}&limit=${limit || 120}${workerId ? `&workerId=${encodeURIComponent(workerId)}` : ''}`),
   activityErrors:    (batchId, limit) => _fetch(`/api/activity?batchId=${encodeURIComponent(batchId || '')}&limit=${limit || 60}&level=err`),
   commandsSend:      (workerId, command, payload) => _fetch('/api/commands', { method: 'POST', body: { workerId, command, payload, createdBy: 'web-manager' } }),
+  // Fleet update. The server owns the graceful_reload -> hard_reset
+  // escalation, so closing this tab can no longer strand a worker on old
+  // code (which is what happened when the timer lived in the page).
+  commandsUpdateAll: (workerId) => _fetch('/api/commands/update-all', { method: 'POST', body: { workerId: workerId || null, createdBy: 'web-manager' } }),
   configGet:         ()                => _fetch('/api/config'),
   configSet:         (config)          => _fetch('/api/config', { method: 'POST', body: { config } }),
   configPatch:       (configPatch)     => _fetch('/api/config', { method: 'POST', body: { configPatch } }),

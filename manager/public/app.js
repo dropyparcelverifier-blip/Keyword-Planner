@@ -1270,19 +1270,17 @@ $('updateAllWorkersBtn')?.addEventListener('click', async () => {
   const orig = btn.textContent;
   btn.textContent = '⏳ Broadcasting…'; btn.disabled = true;
   try {
-    const r1 = await api.commandsSend('', 'graceful_reload', {});
-    if (!r1?.ok) throw new Error(r1?.error || 'graceful_reload broadcast failed');
-    toast(`Step 1/2: graceful_reload sent. Idle & finishing workers reload immediately.`, 'ok', { title: '🔄 Fleet update — step 1' });
-    // 30-second escalation: any worker that didn't reload yet is stuck.
-    // hard_reset kills their in-flight (which was producing nothing anyway)
-    // and force-reloads. Fires from the same click so operator doesn't
-    // have to remember a follow-up action.
-    setTimeout(async () => {
-      try {
-        const r2 = await api.commandsSend('', 'hard_reset', {});
-        if (r2?.ok) toast(`Step 2/2: hard_reset sent. Any worker still stuck in a loop force-reloads within ~30s. Every worker on latest code within 60s.`, 'warn', { title: '🔨 Fleet update — step 2 (escalation)' });
-      } catch (e) { toast(`Step 2 failed: ${e.message}`, 'err'); }
-    }, 30_000);
+    // Both steps are now scheduled by the MANAGER. The escalation used to be
+    // a setTimeout right here, which was lost if the operator closed this tab
+    // or Chrome throttled it while backgrounded — and step 1 on its own is
+    // routinely ignored, because a worker with a SKU in flight defers a
+    // graceful reload until that SKU finishes (10+ min when KP is retrying).
+    // That combination is why clicking this button repeatedly could leave
+    // workers running old code.
+    const r1 = await api.commandsUpdateAll('');
+    if (!r1?.ok) throw new Error(r1?.error || 'fleet update failed');
+    toast(`graceful_reload sent now; hard_reset auto-follows in ${Math.round((r1.escalates_in_ms || 30000) / 1000)}s — scheduled on the MANAGER, so you can close this tab.`,
+      'ok', { title: '🔄 Fleet update armed' });
   } catch (e) {
     toast(e.message, 'err', { title: 'Update broadcast failed' });
   } finally {

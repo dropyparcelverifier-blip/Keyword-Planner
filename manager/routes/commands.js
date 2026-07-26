@@ -47,10 +47,47 @@ async function ackCommands({ req, res, ctx }) {
   return send(res, 200, { ok: true });
 }
 
+// Fleet update = graceful_reload now, hard_reset shortly after.
+//
+// The escalation used to be a setTimeout in the dashboard page, which meant
+// it was lost whenever the operator closed the tab, navigated away, or
+// Chrome throttled the backgrounded tab. Step 1 alone is not enough: a
+// worker with a SKU in flight DEFERS a graceful reload until that SKU
+// finishes, and a SKU stuck in a KP retry loop can run for ten minutes or
+// more. So clicking the button repeatedly appeared to do nothing — every
+// click queued another deferral, and the one command that would actually
+// force the issue depended on a browser timer surviving.
+//
+// Running the escalation here means once the request is accepted, the
+// hard_reset WILL be sent, whatever the operator's browser does next.
+const ESCALATE_AFTER_MS = 30 * 1000;
+
+async function updateAll({ req, res, ctx }) {
+  const { Q, send, readJson } = ctx;
+  const b = await readJson(req);
+  const workerId = b.workerId || null;              // null = broadcast
+  const by = b.createdBy || 'fleet-update';
+  Q.insertCommand.run(workerId, 'graceful_reload', null, by);
+  const timer = setTimeout(() => {
+    try { Q.insertCommand.run(workerId, 'hard_reset', null, `${by}-escalation`); }
+    catch (e) { console.error('[manager] fleet-update escalation failed:', e.message); }
+  }, ESCALATE_AFTER_MS);
+  // Don't hold the event loop open on shutdown for a pending escalation.
+  if (typeof timer.unref === 'function') timer.unref();
+  return send(res, 200, {
+    ok: true,
+    step1: 'graceful_reload',
+    step2: 'hard_reset',
+    escalates_in_ms: ESCALATE_AFTER_MS,
+    target: workerId || 'all workers',
+  });
+}
+
 function register(router) {
-  router.post('/api/commands',     insertCommand);
-  router.get ('/api/commands',     listPending);
-  router.post('/api/commands/ack', ackCommands);
+  router.post('/api/commands',            insertCommand);
+  router.get ('/api/commands',            listPending);
+  router.post('/api/commands/ack',        ackCommands);
+  router.post('/api/commands/update-all', updateAll);
 }
 
 module.exports = { register };

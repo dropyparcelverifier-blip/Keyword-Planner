@@ -121,15 +121,24 @@ try {
                 }
                 if ($failCount -eq 0) {
                     Set-Content -Path $hashFile -Value $remoteHash -Encoding utf8
-                    # Broadcast hard_reset so every running worker
-                    # picks up the new files. Workers reload via
-                    # chrome.runtime.reload() which re-reads the JS
-                    # from the (now-updated) extension dir. State
-                    # (workerId, buffered pushes, claimed jobs) all
-                    # survive via chrome.storage.
-                    $cmdBody = '{"command":"graceful_reload","createdBy":"watchdog-auto-update"}'
-                    if (Mgr-Post '/api/commands' $cmdBody) {
-                        Add-Log ('[update] ' + $okCount + ' file(s) written; hard_reset broadcast - workers reload within ~30s')
+                    # Make every running worker pick up the new files.
+                    # Workers reload via chrome.runtime.reload(), which
+                    # re-reads the JS from the (now-updated) extension dir.
+                    # State (workerId, buffered pushes, claimed jobs) all
+                    # survives via chrome.storage.
+                    #
+                    # This used to post a bare graceful_reload, despite the
+                    # comment claiming hard_reset. A worker with a SKU in
+                    # flight DEFERS a graceful reload until that SKU
+                    # finishes, and a SKU stuck in a KP retry loop runs for
+                    # ten minutes or more — so freshly downloaded files sat
+                    # on disk while the old code kept running, indefinitely.
+                    # /api/commands/update-all sends graceful_reload now and
+                    # escalates to hard_reset on the MANAGER after 30s, so
+                    # the update always lands.
+                    $cmdBody = '{"createdBy":"watchdog-auto-update"}'
+                    if (Mgr-Post '/api/commands/update-all' $cmdBody) {
+                        Add-Log ('[update] ' + $okCount + ' file(s) written; graceful_reload sent, hard_reset escalation armed - workers reload within ~60s')
                     } else {
                         Add-Log ('[update] ' + $okCount + ' file(s) written but hard_reset POST failed; workers need manual reload')
                     }
