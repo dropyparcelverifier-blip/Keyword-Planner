@@ -32,6 +32,7 @@ import {
   fetchBatchKeywordStats,
   sendWorkerHeartbeat,
   fetchWorkerBundleHash,
+  computeOwnBundleHash,
 } from './modules/discovery-jobs.js';
 import {
   STORAGE_KEY_KP_URL,

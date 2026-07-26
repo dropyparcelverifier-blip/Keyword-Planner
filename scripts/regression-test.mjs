@@ -2598,6 +2598,49 @@ async function run() {
   // exist on a worker PC whose windows are all closed while the MV3 service
   // worker keeps running — live logs showed the Amazon Round dying with
   // "failed to open tab — No current window".
+  // Used-but-not-imported check.
+  //
+  // This class of bug has bitten twice: `_policyCache` left behind in
+  // server.js during the Shopify extraction, and `computeOwnBundleHash`
+  // called in background.js without an import. Both were invisible to the
+  // rest of the suite because a ReferenceError inside a try/catch just
+  // takes a silent fallback path — the worker kept heartbeating, only
+  // without its mac, hostname and version.
+  //
+  // For every symbol a module exports, if a consumer references it, that
+  // consumer must import it.
+  // Comments must be stripped first: a prose mention like
+  // "// checkNameSwap (returns null for X)" otherwise reads as a call.
+  // Split on /\r?\n/, not '\n': this repo is CRLF, and a trailing \r left on
+  // each line makes `//.*$` fail to match (a lone `$` cannot match before a
+  // carriage return), so the strip silently did nothing.
+  const stripComments = (s) => s
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .split(/\r?\n/).map(l => l.replace(/\/\/.*$/, '')).join('\n');
+  for (const consumerPath of ['background.js', 'modules/keyword-discovery.js', 'modules/discovery-export.js']) {
+    const consumerRaw = readFileSync(resolve(REPO, consumerPath), 'utf-8');
+    const consumer = stripComments(consumerRaw);
+    const importedHere = new Set(
+      [...consumer.matchAll(/import\s*\{([\s\S]*?)\}\s*from/g)]
+        .flatMap(m => m[1].split(',').map(s => s.trim().split(/\s+as\s+/)[0].trim()))
+        .filter(Boolean)
+    );
+    for (const modFile of readdirSync(resolve(REPO, 'modules')).filter(f => f.endsWith('.js'))) {
+      if (`modules/${modFile}` === consumerPath) continue;
+      const modSrc = readFileSync(resolve(REPO, `modules/${modFile}`), 'utf-8');
+      const exported = [...modSrc.matchAll(/^export\s+(?:async\s+)?function\s+([\w$]+)|^export\s+const\s+([\w$]+)/gm)]
+        .map(m => m[1] || m[2]);
+      for (const sym of exported) {
+        // Called or referenced as a bare identifier (not a property access).
+        const used = new RegExp(`(^|[^.\\w$])${sym}\\s*\\(`, 'm').test(consumer);
+        if (!used) continue;
+        // Locally redefined in the consumer? then it isn't the import.
+        if (new RegExp(`(function|const|let|var)\\s+${sym}\\b`).test(consumer)) continue;
+        assert(importedHere.has(sym), `IMPORTS.${consumerPath}:${sym} is used but not imported`);
+      }
+    }
+  }
+
   assert(kwDisc.includes('createWorkerTab'), 'TABWIN.1 engine routes tab creation through a helper');
   assert(/chrome\.windows\.getAll\(\{ windowTypes: \['normal'\] \}\)/.test(kwDisc), 'TABWIN.2 binds to an existing normal window when one exists');
   assert(/chrome\.windows\.create\(\{ url, focused: false/.test(kwDisc), 'TABWIN.3 creates a window when none exists');
