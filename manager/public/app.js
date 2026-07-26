@@ -1364,6 +1364,12 @@ async function refreshLivePanels() {
     if (activity) renderActivity(activity.events || []);
     if (state.activeBatch) {
       const stats = await fetchBatchKeywordStats(state.activeBatch).catch(() => null);
+      // Round state for the per-SKU strip. Separate cheap read; a failure
+      // here must not blank the output panel, so it degrades to no strip.
+      try {
+        const rp = await api.jobsRoundProgress(state.activeBatch);
+        state.roundProgress = Object.fromEntries((rp.products || []).map(x => [x.product_url, x]));
+      } catch { state.roundProgress = state.roundProgress || {}; }
       if (stats) renderOutputStats(stats);
     } else {
       renderOutputStats(null); // shows the "Pick a batch above" prompt
@@ -2957,6 +2963,28 @@ function renderOutputStats(stats) {
   const zeroBanner = skusWithZeroKw.length > 0
     ? `<div class="banner err">⚠ ${skusWithZeroKw.length} SKU(s) finished with zero keyword rows — check activity log for "KP FAILED" or "LOW YIELD".</div>`
     : '';
+  // Per-SKU round strip. Answers "which rounds finished, which are left,
+  // and what did each yield?" without reading the activity log line by line.
+  // Populated from /api/jobs/round-progress, which derives state from the
+  // engine's ⟦ROUND⟧ markers. Rounds the engine hasn't reached yet show as
+  // dimmed dots, so an in-progress SKU is visually distinct from one that
+  // finished every round empty.
+  const ROUND_LABEL = { kp: 'KP', paa: 'PAA', round1: 'R1', round2: 'R2', related: 'RS', amazon: 'AMZ', rescue: 'RSQ' };
+  const roundStrip = (productUrl) => {
+    const rec = state.roundProgress?.[productUrl];
+    if (!rec) return '<span style="color:var(--text-3);font-size:10px;">—</span>';
+    return rec.rounds.map(r => {
+      const tone = r.status === 'ok'      ? 'var(--ok, #3fb950)'
+                 : r.status === 'empty'   ? 'var(--warn, #d29922)'
+                 : r.status === 'skipped' ? 'var(--text-3)'
+                 : r.status === 'failed'  ? 'var(--danger, #f85149)'
+                 : 'var(--line-1, #30363d)';
+      const rows = r.rows != null ? ` ${r.rows}` : '';
+      return `<span title="${esc(r.round)}: ${esc(r.status)}${rows ? ' — ' + esc(String(r.rows)) + ' rows' : ''}"
+        style="display:inline-block;padding:1px 4px;margin-right:2px;border-radius:3px;font-size:9px;
+               border:1px solid ${tone};color:${tone};">${esc(ROUND_LABEL[r.round] || r.round)}</span>`;
+    }).join('');
+  };
   const rows = topSkus.map(s => `
     <tr title="${esc(s.failedReason || '')}">
       <td class="mono">${esc(s.sku)}</td>
@@ -2970,11 +2998,12 @@ function renderOutputStats(stats) {
             ? `<span style="color:var(--text-3);">—</span>`
             : `<span class="chip failed">0</span>`
       }</td>
+      <td>${roundStrip(s.productUrl)}</td>
       <td>${s.doneAt ? fmtTime(s.doneAt) : '—'}</td>
     </tr>`).join('');
   wrap.innerHTML = `${tiles}${zeroBanner}
     <table class="tbl"><thead><tr>
-      <th>SKU</th><th>Product</th><th>Status</th><th>Worker</th><th class="num">Rows</th><th>Done</th>
+      <th>SKU</th><th>Product</th><th>Status</th><th>Worker</th><th class="num">Rows</th><th title="Rounds: KP, PAA, Round 1, Round 2, Related Search, Amazon, Rescue">Rounds</th><th>Done</th>
     </tr></thead><tbody>${rows}</tbody></table>`;
 }
 

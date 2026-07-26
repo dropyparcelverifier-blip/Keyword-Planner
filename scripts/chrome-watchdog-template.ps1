@@ -150,6 +150,53 @@ try {
     Add-Log ('[update] auto-update check failed: ' + $_.Exception.Message)
 }
 
+# 2b) Self-update.
+#
+# The watchdog could not previously update itself: it runs from $root while
+# auto-update only writes into $extDir, and the template was not in
+# WORKER_FILES. So any bug in THIS script was permanent until someone re-ran
+# the installer by hand on every worker PC — which is exactly what happened
+# with the unauthenticated health probe: it exited 0 silently for hours on
+# every machine, and no amount of pushing from the manager could fix it.
+#
+# Now: fetch the current template, substitute the same placeholders the
+# installer does (using the values already baked into THIS file), and
+# rewrite ourselves if the result differs. Next scheduled run picks it up.
+try {
+    $tplBody = Mgr-Get '/worker/chrome-watchdog-template.ps1'
+    if ($tplBody) {
+        # Build the placeholder tokens at RUNTIME rather than writing them as
+        # literals. The installer does a global find-and-replace over this
+        # whole file, so a literal '__PROFILE__' here would itself be
+        # substituted at install time and this code would then be replacing
+        # the wrong string. That is precisely how the token guard broke:
+        # `$token -ne '__TOKEN__'` became `$token -ne '<the real token>'`,
+        # i.e. never true, so no request was ever authenticated.
+        $u = '__'
+        # .Replace() is LITERAL. PowerShell's -replace is regex, and these
+        # values are Windows paths full of backslashes, which regex would
+        # mangle into escape sequences.
+        $rendered = $tplBody
+        $rendered = $rendered.Replace(($u + 'PROFILE' + $u), $profileDir)
+        $rendered = $rendered.Replace(($u + 'EXTDIR'  + $u), $extDir)
+        $rendered = $rendered.Replace(($u + 'CHROME'  + $u), $chromeExe)
+        $rendered = $rendered.Replace(($u + 'LOG'     + $u), $logFile)
+        $rendered = $rendered.Replace(($u + 'MGR'     + $u), $managerUrl)
+        $rendered = $rendered.Replace(($u + 'TOKEN'   + $u), $token)
+        $selfPath = $MyInvocation.MyCommand.Path
+        $current  = ''
+        if ($selfPath -and (Test-Path $selfPath)) { $current = Get-Content $selfPath -Raw }
+        # Only rewrite on a real difference, and never write an empty or
+        # obviously truncated file over a working watchdog.
+        if ($selfPath -and $rendered.Length -gt 500 -and $rendered -ne $current) {
+            Set-Content -Path $selfPath -Value $rendered -Encoding utf8
+            Add-Log '[self-update] watchdog script updated from the manager; next run uses the new version'
+        }
+    }
+} catch {
+    Add-Log ('[self-update] failed (non-fatal): ' + $_.Exception.Message)
+}
+
 # 3) AdBrain Chrome already running? Then nothing to do.
 try {
     $needle = '--user-data-dir=' + $profileDir

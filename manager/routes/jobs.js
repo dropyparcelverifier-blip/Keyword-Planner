@@ -385,7 +385,73 @@ function doneEmpty({ res, url, ctx }) {
   return send(res, 200, { ok: true, rows, count: rows.length });
 }
 
+// Per-SKU round progress: which rounds finished, which are outstanding, and
+// what each one yielded.
+//
+// Derived from the ⟦ROUND⟧ markers the engine writes to the activity log
+// rather than a new table — the markers ride the existing activity pipeline
+// (buffering, retry, batch scoping), so this needed no schema change. The
+// last marker per (product, round) wins, which is what you want when a SKU
+// is requeued and re-run.
+const ROUND_ORDER = ['kp', 'paa', 'round1', 'round2', 'related', 'amazon', 'rescue'];
+
+function roundProgress({ res, url, ctx }) {
+  const { db, send } = ctx;
+  const batchId = String(url.searchParams.get('batchId') || '').trim();
+  if (!batchId) return send(res, 400, { ok: false, error: 'batchId required' });
+
+  const rows = db.prepare(`
+    SELECT product_url, message, ts FROM activity_log
+    WHERE batch_id = ? AND message LIKE '⟦ROUND⟧%'
+    ORDER BY ts ASC
+  `).all(batchId);
+
+  const byProduct = new Map();
+  for (const r of rows) {
+    if (!r.product_url) continue;
+    const get = (k) => (r.message.match(new RegExp(`${k}=([^\\s]+)`)) || [])[1];
+    const round = get('round');
+    if (!round) continue;
+    if (!byProduct.has(r.product_url)) byProduct.set(r.product_url, {});
+    byProduct.get(r.product_url)[round] = {
+      status: get('status') || 'unknown',
+      rows: Number(get('rows') || 0),
+      at: r.ts,
+    };
+  }
+
+  // Pair the markers with job state so a SKU that never started is
+  // distinguishable from one whose rounds all came back empty.
+  const jobs = db.prepare(`
+    SELECT product_url, sku, product_name, status, attempts FROM jobs WHERE batch_id = ?
+  `).all(batchId);
+
+  const out = jobs.map(j => {
+    const seen = byProduct.get(j.product_url) || {};
+    const rounds = ROUND_ORDER.map(name => ({
+      round: name,
+      status: seen[name]?.status || 'pending',
+      rows: seen[name]?.rows ?? null,
+      at: seen[name]?.at ?? null,
+    }));
+    const done = rounds.filter(r => r.status === 'ok').length;
+    const settled = rounds.filter(r => r.status !== 'pending').length;
+    return {
+      product_url: j.product_url, sku: j.sku, product_name: j.product_name,
+      job_status: j.status, attempts: j.attempts,
+      rounds,
+      rounds_ok: done,
+      rounds_settled: settled,
+      rounds_total: ROUND_ORDER.length,
+      total_rows: rounds.reduce((a, r) => a + (r.rows || 0), 0),
+    };
+  });
+
+  return send(res, 200, { ok: true, batchId, order: ROUND_ORDER, products: out });
+}
+
 function register(router) {
+  router.get ('/api/jobs/round-progress',     roundProgress);
   router.post('/api/jobs/claim',              claim);
   router.post('/api/jobs/heartbeat',          heartbeat);
   router.post('/api/jobs/done',               markDone);

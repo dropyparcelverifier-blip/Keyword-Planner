@@ -2816,6 +2816,10 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
   const chunkRestMin    = opts.chunkRestMinMs ?? CHUNK_REST_MIN_MS;
   const chunkRestMax    = opts.chunkRestMaxMs ?? CHUNK_REST_MAX_MS;
 
+  // Products whose one allowed "Start with a website" attempt has been
+  // spent. Run-scoped, so a resume after a stop won't silently re-spend it
+  // on a SKU that already had its turn.
+  const websiteFallbackUsedFor = new Set();
   const report        = opts.report        || new Map();
   const excludeUrls   = opts.excludeUrls   || new Set();
   const onRowAdded    = opts.onRowAdded    || (async () => {});
@@ -3115,6 +3119,35 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       const cleanUrl = cleanProductUrl(p.url);
       if (excludeUrls.has(cleanUrl)) continue;
       const productName = deriveName(cleanUrl);
+
+      // Per-round progress marker.
+      //
+      // The activity log already narrates what happened, but only in prose,
+      // so answering "which rounds finished for this SKU, and what did each
+      // one yield?" meant reading dozens of lines per product and inferring.
+      // This emits one machine-readable line per round so the manager can
+      // show a per-SKU round strip instead.
+      //
+      // Deliberately a log line rather than a new table: it rides the
+      // existing activity pipeline (buffering, retry, batch scoping) and
+      // needs no schema change or migration. The ⟦ROUND⟧ sentinel is
+      // unambiguous enough to parse and readable enough to leave in the log.
+      const ROUNDS = ['kp', 'paa', 'round1', 'round2', 'related', 'amazon', 'rescue'];
+      const emitRound = (round, status, rows = null, note = '') => {
+        const parts = [`⟦ROUND⟧ round=${round}`, `status=${status}`];
+        if (rows != null) parts.push(`rows=${rows}`);
+        if (note) parts.push(`note=${String(note).replace(/[\r\n|]+/g, ' ').slice(0, 120)}`);
+        onProgress?.({
+          currentProduct: productName,
+          currentSource: round,
+          currentAction: parts.join(' '),
+          // 'ok' keeps these out of the error panel; skipped/failed are the
+          // states an operator actually needs to notice.
+          logKind: status === 'failed' ? 'err' : status === 'skipped' ? 'warn' : 'ok',
+          roundEvent: { round, status, rows, note, productUrl: cleanUrl },
+        });
+      };
+      void ROUNDS;   // documents the expected vocabulary for the parser
 
       onProgress?.({
         currentProduct: productName,
@@ -3548,12 +3581,24 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         // evidence the session is broken (it's the consequence of already
         // believing so). Marking it as a failure is what let the skip feed
         // the very circuit breaker that armed it.
+        emitRound('kp', 'skipped', 0, 'KP session believed dead on this worker');
         kpResult = { ok: false, skipped: true, error: 'r1_kp_skipped_auto', keywords: [] };
       } else {
         onProgress?.({ currentProduct: productName, currentSource: 'kp', currentAction: `Running Keyword Planner for ${kpSeeds.length} seed(s): "${kpSeeds.join('", "')}"`, keywordCount: report.size });
+        // "Start with a website" is allowed EXACTLY ONCE per SKU, here in
+        // Round 1, and only when the text-seed flow came back under the
+        // threshold. It submits the product URL to Google, so re-running it
+        // per R2 seed re-scrapes the same page and returns the same ideas —
+        // pure cost, no new data. R2 already passes allowWebsiteFallback:
+        // false; stating it explicitly here (rather than leaning on the
+        // `!== false` default) means the once-per-SKU guarantee is visible
+        // at the call site instead of implied three functions away.
+        const websiteFallbackAllowed = !websiteFallbackUsedFor.has(cleanUrl);
+        websiteFallbackUsedFor.add(cleanUrl);
         kpResult = await getKeywordPlannerIdeas(kpSeeds, kpUrl, kpMaxPerProduct,
           (m) => onProgress?.({ currentProduct: productName, currentAction: m }),
-          { productUrl: cleanUrl, websiteOnly: opts.kpWebsiteOnly === true });
+          { productUrl: cleanUrl, websiteOnly: opts.kpWebsiteOnly === true,
+            allowWebsiteFallback: websiteFallbackAllowed });
       }
       const kpKeywords = (kpResult?.ok ? (kpResult.keywords || []) : []).filter(Boolean);
       if (!kpResult?.ok && !kpResult?.skipped) {
@@ -3595,6 +3640,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         });
       } else {
         onProgress?.({ currentProduct: productName, currentSource: 'kp', currentAction: `KP returned ${kpKeywords.length} ideas`, logKind: 'ok', kpEvent: 'ok' });
+        emitRound('kp', kpKeywords.length ? 'ok' : 'empty', kpKeywords.length);
         // A successful R1 scrape is proof the Google Ads session is alive —
         // reset the health counter HERE. This is the reset path that was
         // missing: the only previous reset lived inside Round 2, which the
@@ -4897,6 +4943,9 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         currentAction: `Round 1: ${kp1RowsArr.length} KP keyword(s) stored, ${round1Seeds.length} SERP-cycled (${paaQuestions.length} PAA + ${kpPicks.length} top KP). Each cycled seed: SERP → image match → autosuggest → expansion.`,
         logKind: 'ok',
       });
+      emitRound('paa', paaQuestions.length ? 'ok' : 'empty', paaQuestions.length);
+      emitRound('round1', kp1RowsArr.length || round1Seeds.length ? 'ok' : 'empty', kp1RowsArr.length,
+        `${round1Seeds.length} seed(s) queued for the SERP cycle`);
 
       // FAIL-FAST: if we have no seeds AND no KP1 rows, all downstream
       // stages (R1 SERP cycle, R2 KP re-expansion, Amazon Round, related
@@ -5170,6 +5219,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             currentAction: `⏭ R2 KP AUTO-SKIP (${reason}). R1 data (${kp1RowsArr.length} row(s)) preserved. R2 will retry automatically on the SKU after the KP session recovers (or a successful R2 anywhere in the fleet resets the streak).`,
             logKind: 'warn',
           });
+          emitRound('round2', 'skipped', 0, 'KP session believed dead on this worker');
           kp1ForR2.length = 0; // clear so the R2 for-loop below runs 0 iterations
         }
         if (kp1ForR2.length > 0) {
@@ -5379,6 +5429,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             currentAction: `Round 2 complete: ${kp1Idx}/${totalKp1} KP1 keywords re-expanded, ${kp2RowCount} KP2 rows processed in ${wholeMin} min`,
             logKind: 'ok',
           });
+          emitRound('round2', kp2RowCount ? 'ok' : 'empty', kp2RowCount, `${kp1Idx}/${totalKp1} seeds re-expanded`);
         }
         // Update the cross-SKU R2 health streak: if we bailed with
         // r2ConsecutiveKpDead >= 2 OR ended with ALL seeds dead, this SKU
@@ -5888,6 +5939,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
               currentAction: `Amazon Round complete: ${amazonStored} new keyword(s) added, ${amazonRejected} filtered${skipNote}`,
               logKind: 'ok',
             });
+            emitRound('amazon', amazonStored ? 'ok' : 'empty', amazonStored, `${amazonRejected} filtered`);
           }
         }
       };

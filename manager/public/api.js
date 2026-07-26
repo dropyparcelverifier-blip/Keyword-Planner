@@ -52,6 +52,8 @@ export const api = {
   jobsSummary:       ()                => _fetch('/api/jobs/summary'),
   batchReadiness:    (batchId, opts = {}) => _fetch(`/api/batches/readiness?batchId=${encodeURIComponent(batchId)}${opts.minRows != null ? `&minRows=${opts.minRows}` : ''}${opts.stuckMinutes != null ? `&stuckMinutes=${opts.stuckMinutes}` : ''}`),
   batchEta:          (batchId, opts = {}) => _fetch(`/api/batches/eta?batchId=${encodeURIComponent(batchId)}${opts.shortWindowMin != null ? `&shortWindowMin=${opts.shortWindowMin}` : ''}${opts.longWindowMin != null ? `&longWindowMin=${opts.longWindowMin}` : ''}`),
+  // Per-SKU round state, derived from the engine's round markers.
+  jobsRoundProgress: (batchId) => _fetch(`/api/jobs/round-progress?batchId=${encodeURIComponent(batchId)}`),
   jobsPerProduct:    (batchId, sinceChangedAt) => _fetch(`/api/jobs/per-product?batchId=${encodeURIComponent(batchId)}${sinceChangedAt != null ? `&sinceChangedAt=${encodeURIComponent(sinceChangedAt)}` : ''}`),
   jobsWorkerStats:   ()                => _fetch('/api/jobs/worker-stats'),
   workersList:       ()                => _fetch('/api/workers/list'),
