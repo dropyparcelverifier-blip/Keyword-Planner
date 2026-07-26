@@ -2057,6 +2057,21 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   });
 }
 
+// A listen failure is fatal and must NOT be swallowed by the
+// uncaughtException handler above. Without this, `EADDRINUSE` (an older
+// manager still holding the port) was caught, logged, and ignored — the new
+// process stayed alive doing nothing while the STALE one kept serving. Every
+// restart silently no-op'd and the fleet kept running old code, with the
+// health endpoint answering the whole time because the old process was fine.
+// Fail loudly so the supervisor restarts us and the operator sees it.
+server.on('error', (err) => {
+  console.error(`[manager] FATAL: cannot listen on ${HOST}:${PORT} — ${err.code || err.message}.`);
+  if (err.code === 'EADDRINUSE') {
+    console.error('[manager] Another manager is already bound to this port. Stop it first (or set PORT=).');
+  }
+  process.exit(1);
+});
+
 server.listen(PORT, HOST, () => {
   console.log(`[manager] AdBrain SQLite manager on http://${HOST}:${PORT}  (db: ${DB_PATH})`);
   console.log(`[manager] Dashboard: http://<this-tailscale-name>:${PORT}/`);
