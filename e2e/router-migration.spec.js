@@ -247,3 +247,52 @@ test('batch eta degrades gracefully instead of erroring', async () => {
   expect(r.eta_minutes).toBe(null);
   expect(typeof r.reason).toBe('string');
 });
+
+// ── Third wave: shopify (routes/shopify.js) ────────────────────────────
+// No Shopify credentials in CI, so these assert the two things that are
+// testable without them and that actually broke during extraction:
+//   · handlers that need no external call still work end-to-end
+//   · handlers that DO need credentials fail with a clear, deliberate error
+//     rather than a ReferenceError from a module-scope value that didn't
+//     travel with the code (this is exactly how `_policyCache is not
+//     defined` was caught — the string-match suite was fully green).
+
+test('shopify field-impact serves the static hierarchy', async () => {
+  const r = await get(mgr.baseUrl, '/api/shopify/field-impact');
+  expect(r.ok).toBe(true);
+  expect(Array.isArray(r.fields)).toBe(true);
+  expect(r.fields.length).toBeGreaterThan(0);
+  expect(r.fields.some(f => f.field === 'title')).toBe(true);
+  expect(Array.isArray(r.allowlist)).toBe(true);
+});
+
+test('shopify validate-patch runs the preflight with no network call', async () => {
+  const r = await post(mgr.baseUrl, '/api/shopify/validate-patch', { patch: { title: 'A decent product title' } });
+  expect(r.ok).toBe(true);
+  expect(r.preflight).toBeTruthy();
+  expect(Array.isArray(r.preflight.critical)).toBe(true);
+  expect(typeof r.preflight.stats.title_chars).toBe('number');
+});
+
+test('shopify push-history is routed and returns an empty history', async () => {
+  const r = await get(mgr.baseUrl, '/api/shopify/push-history?productId=1');
+  expect(r.ok).toBe(true);
+  expect(Array.isArray(r.history)).toBe(true);
+});
+
+test('shopify credential-dependent endpoints fail cleanly, not with a ReferenceError', async () => {
+  for (const path of [
+    '/api/shopify/get-policies',
+    '/api/shopify/metafield-definitions',
+    '/api/shopify/debug-lookup?sku=Dropy-B002OTT3US',
+    '/api/shopify/get-product?url=https://dropy.in/products/x',
+  ]) {
+    const r = await get(mgr.baseUrl, path);
+    expect(r.ok).toBe(false);
+    // The message must name the missing configuration. A ReferenceError
+    // ('X is not defined') means a module-scope value was left behind in
+    // server.js when the handler moved.
+    expect(r.error).toMatch(/creds missing|not configured/i);
+    expect(r.error).not.toMatch(/is not defined/);
+  }
+});
