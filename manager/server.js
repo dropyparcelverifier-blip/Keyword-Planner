@@ -1140,6 +1140,12 @@ const Q = {
   // — same predicate as releaseStale except the attempts branch. Reason
   // string surfaces on the dashboard's failure column so the operator
   // knows this was a retry-loop bail-out, not a real error signal.
+  // NOTE: every requeue/reset path MUST also set attempts=0. claimById
+  // increments attempts on each claim and this predicate auto-fails at >= 3,
+  // so a requeue that leaves the counter alone puts the job straight back
+  // into 'failed' on its very next claim — the button appears to work and
+  // silently changes nothing. That loop is what drove one live SKU to 24
+  // attempts.
   failMaxAttempts: db.prepare(`UPDATE jobs SET status='failed', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=?, failed_reason='auto-failed: exceeded 3 attempts (retry loop). Fix the root cause and requeue.' WHERE status='claimed' AND (heartbeat_at IS NULL OR heartbeat_at < ?) AND attempts >= 3`),
   // Second-tier force-fail — no stale heartbeat required. Fires when a
   // job has been claimed 5+ times AND the CURRENT claim has been active
@@ -1180,7 +1186,7 @@ const Q = {
   getJob:       db.prepare(`SELECT * FROM jobs WHERE id=?`),
   updateJobFields: db.prepare(`UPDATE jobs SET sku=?, product_name=?, priority=?, handles=?, brands=? WHERE id=?`),
   updateJobPriority: db.prepare(`UPDATE jobs SET priority=? WHERE id=?`),
-  updateJobStatus:   db.prepare(`UPDATE jobs SET status=?, claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=NULL, failed_reason=NULL WHERE id=?`),
+  updateJobStatus:   db.prepare(`UPDATE jobs SET status=?, claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=NULL, failed_reason=NULL, attempts=0 WHERE id=?`),
   deleteJob:    db.prepare(`DELETE FROM jobs WHERE id=?`),
   jobsForBatch: db.prepare(`SELECT id, batch_id, sku, product_url, product_name, priority, status, claimed_by, claimed_at, heartbeat_at, done_at, failed_reason, attempts, handles, brands FROM jobs WHERE batch_id=? ORDER BY priority DESC, id ASC`),
   deleteKeywordsForProduct: db.prepare(`DELETE FROM keywords WHERE batch_id=? AND product_url=?`),
@@ -1209,7 +1215,7 @@ const Q = {
   /* Bulk requeue: reset done-empty jobs back to pending so a worker
      re-picks them and (with the reorder fix) pushes keywords first. */
   requeueDoneEmpty: db.prepare(`UPDATE jobs SET status='pending',
-      claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=NULL, failed_reason=NULL
+      claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=NULL, failed_reason=NULL, attempts=0
     WHERE status='done' AND NOT EXISTS
       (SELECT 1 FROM keywords k WHERE k.batch_id=jobs.batch_id AND k.product_url=jobs.product_url)
     AND (? IS NULL OR batch_id=?)`),
@@ -1217,7 +1223,7 @@ const Q = {
      one-shot — used by the low-yield requeue helper which iterates a
      targeted list of jobs whose row count fell below the threshold. */
   resetJobToPending: db.prepare(`UPDATE jobs SET status='pending',
-      claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=NULL, failed_reason=NULL
+      claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, done_at=NULL, failed_reason=NULL, attempts=0
     WHERE id=?`),
   workerStats: db.prepare(`SELECT claimed_by worker_id, batch_id,
       COUNT(*) total_touched, SUM(status='done') done_count, SUM(status='failed') failed_count,
@@ -1268,7 +1274,7 @@ const Q = {
   getConfig: db.prepare(`SELECT config, active_batch_id FROM worker_config WHERE id=1`),
   setConfig: db.prepare(`UPDATE worker_config SET config=? WHERE id=1`),
   setActiveBatch: db.prepare(`UPDATE worker_config SET active_batch_id=? WHERE id=1`),
-  requeue: db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, failed_reason=NULL WHERE id=?`),
+  requeue: db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, failed_reason=NULL, attempts=0 WHERE id=?`),
   cleanupActivity: db.prepare(`DELETE FROM activity_log WHERE ts < ?`),
   cleanupCommands: db.prepare(`DELETE FROM worker_commands WHERE acknowledged_at IS NOT NULL AND acknowledged_at < ?`),
   // Per-batch delete: wipes jobs + keywords + activity for one batch_id.
@@ -1284,8 +1290,8 @@ const Q = {
   wipeWorkersRoster: db.prepare(`DELETE FROM workers`),
   // Bulk requeue: set every failed job back to pending. Optionally scope
   // to one batch. Returns updated row count.
-  requeueAllFailed:      db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, failed_reason=NULL WHERE status='failed'`),
-  requeueBatchFailed:    db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, failed_reason=NULL WHERE status='failed' AND batch_id=?`),
+  requeueAllFailed:      db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, failed_reason=NULL, attempts=0 WHERE status='failed'`),
+  requeueBatchFailed:    db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, failed_reason=NULL, attempts=0 WHERE status='failed' AND batch_id=?`),
   // Every failed job with details (for the bulk-actions UI).
   failedJobsAll:         db.prepare(`SELECT id, batch_id, sku, product_url, product_name, failed_reason, claimed_by, attempts FROM jobs WHERE status='failed' ORDER BY id DESC LIMIT 500`),
   failedJobsByBatch:     db.prepare(`SELECT id, batch_id, sku, product_url, product_name, failed_reason, claimed_by, attempts FROM jobs WHERE status='failed' AND batch_id=? ORDER BY id DESC LIMIT 500`),
@@ -1881,10 +1887,20 @@ Write-Host '==================================================================='
 // OUTSIDE a transaction (VACUUM cannot run inside one), so callers invoke
 // this after COMMIT. Best-effort: a failure here is not worth failing the
 // user's delete over.
+// The checkpoint AFTER the VACUUM is the one that matters. VACUUM rebuilds
+// the entire database, and in WAL mode every one of those pages is written
+// to the write-ahead log first — so vacuuming a 121 MB file grew the WAL to
+// 113 MB and left MORE total bytes on disk than before. Checkpointing only
+// beforehand (as this did originally) reclaims nothing. Do both: before, so
+// VACUUM sees a clean state; after, to fold the rebuild back into the main
+// file and truncate the log.
 function reclaimSpace() {
   try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch {}
   try { db.exec('VACUUM'); } catch (e) {
     console.error('[manager] VACUUM after delete failed (non-fatal):', e.message);
+  }
+  try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch (e) {
+    console.error('[manager] post-VACUUM WAL checkpoint failed (non-fatal):', e.message);
   }
 }
 

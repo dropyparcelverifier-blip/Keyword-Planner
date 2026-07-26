@@ -2562,6 +2562,47 @@ async function run() {
   // Upload dedup scans jobs by product_url once per SKU — without an index
   // the planner falls back to the low-cardinality status index and bulk
   // upload degrades to O(rows x table). Measured 9829 ms -> 8 ms.
+  // Every path that sends a job back to 'pending' must also zero `attempts`.
+  // claimById does attempts+1 on each claim and failMaxAttempts auto-fails
+  // at >= 3, so a requeue that leaves the counter alone puts the job straight
+  // back into 'failed' on its very next claim. The button looks like it
+  // worked and nothing changes — one live SKU reached 24 attempts this way.
+  //
+  // RELEASE is different from REQUEUE and must NOT reset the counter:
+  // releaseStale / releaseByWorker reclaim a claim abandoned by a dead
+  // worker, and zeroing attempts there would mean the retry-loop guard can
+  // never fire. The two are told apart by whether the statement clears
+  // failed_reason (a requeue does; a release has no failure to clear).
+  const pendingStmts = srvFull.match(/UPDATE jobs SET status='pending'[\s\S]{0,260}?`\)/g) || [];
+  const requeueStmts = pendingStmts.filter(s => /failed_reason\s*=\s*NULL/.test(s));
+  const releaseStmts = pendingStmts.filter(s => !/failed_reason\s*=\s*NULL/.test(s));
+  assert(requeueStmts.length >= 4, 'REQUEUE-ATTEMPTS.1 found the requeue statements to check');
+  // These two don't literally read `status='pending'` (one is parameterised,
+  // one spans lines differently), so check them by name.
+  assert(/resetJobToPending:[\s\S]{0,300}?attempts=0/.test(srvFull), 'REQUEUE-ATTEMPTS.1a resetJobToPending resets attempts');
+  assert(/updateJobStatus:[\s\S]{0,300}?attempts=0/.test(srvFull),   'REQUEUE-ATTEMPTS.1b updateJobStatus resets attempts');
+  for (const [i, stmt] of requeueStmts.entries()) {
+    assert(/attempts\s*=\s*0/.test(stmt), `REQUEUE-ATTEMPTS.2.${i} requeue statement resets attempts`);
+  }
+  assert(releaseStmts.length >= 2, 'REQUEUE-ATTEMPTS.4 found the release statements');
+  for (const [i, stmt] of releaseStmts.entries()) {
+    assert(!/attempts\s*=\s*0/.test(stmt), `REQUEUE-ATTEMPTS.5.${i} release does NOT reset attempts (retry-loop guard must survive)`);
+  }
+  // The bulk-update path builds its reset clause as a string instead.
+  const bulkSrc = readFileSync(resolve(REPO, 'manager/routes/jobs-upload.js'), 'utf-8');
+  assert(/patch\.status === 'pending'[\s\S]{0,220}attempts=0/.test(bulkSrc),
+    'REQUEUE-ATTEMPTS.3 bulk-update to pending resets attempts');
+
+  // The engine's tab must bind to an explicit window. A bare
+  // chrome.tabs.create({url}) targets the "current window", which does not
+  // exist on a worker PC whose windows are all closed while the MV3 service
+  // worker keeps running — live logs showed the Amazon Round dying with
+  // "failed to open tab — No current window".
+  assert(kwDisc.includes('createWorkerTab'), 'TABWIN.1 engine routes tab creation through a helper');
+  assert(/chrome\.windows\.getAll\(\{ windowTypes: \['normal'\] \}\)/.test(kwDisc), 'TABWIN.2 binds to an existing normal window when one exists');
+  assert(/chrome\.windows\.create\(\{ url, focused: false/.test(kwDisc), 'TABWIN.3 creates a window when none exists');
+  assert(!/chrome\.tabs\.create\(\{ url, active: false \}\)/.test(kwDisc), 'TABWIN.4 no window-less tabs.create left in the engine');
+
   assert(srvAudit.includes('jobs_product_url_idx'), 'INDEX.1 product_url lookup is indexed');
   assert(srvAudit.includes('DROP INDEX IF EXISTS keywords_batch_idx'), 'INDEX.2 redundant keywords(batch_id) index removed');
 

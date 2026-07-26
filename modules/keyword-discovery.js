@@ -831,6 +831,28 @@ function waitForNavigationComplete(tabId) {
 const Worker = (() => {
   let tabId = null;
 
+  // Open a tab for the engine to drive.
+  //
+  // A bare chrome.tabs.create({url}) targets the "current window", and on a
+  // worker PC there often isn't one: the MV3 service worker stays alive (and
+  // the watchdog keeps Chrome running) after the user closes every normal
+  // window, so create() throws "No current window" and the whole round dies.
+  // Live logs showed the Amazon Round failing exactly this way.
+  //
+  // So: bind explicitly to a normal window if one exists, and otherwise make
+  // one. Minimized + unfocused because this is unattended background work on
+  // a machine someone may be using.
+  async function createWorkerTab(url) {
+    try {
+      const wins = await chrome.windows.getAll({ windowTypes: ['normal'] });
+      if (wins.length) return await chrome.tabs.create({ url, active: false, windowId: wins[0].id });
+    } catch { /* fall through to creating one */ }
+    const win = await chrome.windows.create({ url, focused: false, state: 'minimized' });
+    const tab = win?.tabs?.[0];
+    if (!tab) throw new Error('could not create a window for the engine tab');
+    return tab;
+  }
+
   async function existsAndAlive() {
     if (tabId === null) return false;
     try { await chrome.tabs.get(tabId); return true; }
@@ -842,8 +864,7 @@ const Worker = (() => {
       if (await existsAndAlive()) {
         await chrome.tabs.update(tabId, { url });
       } else {
-        const tab = await chrome.tabs.create({ url, active: false });
-        tabId = tab.id;
+        tabId = (await createWorkerTab(url)).id;
       }
       await waitForNavigationComplete(tabId);
       return tabId;

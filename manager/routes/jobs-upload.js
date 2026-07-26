@@ -336,9 +336,12 @@ async function bulkUpdate({ req, res, ctx }) {
     if (col in patch) { setCols.push(`${col} = ?`); args.push(patch[col]); }
   }
   if (setCols.length === 0) return send(res, 400, { ok: false, error: 'patch must set at least one of: priority, status, failed_reason' });
-  // status=pending clears claim + heartbeat too, matching /api/jobs/reset.
+  // status=pending clears claim + heartbeat too, matching /api/jobs/reset —
+  // including attempts=0. Without that reset the job is auto-failed again on
+  // its next claim (claimById increments attempts; failMaxAttempts fails at
+  // >= 3), so the bulk requeue would silently do nothing.
   const extraCols = patch.status === 'pending'
-    ? ', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, failed_reason=NULL'
+    ? ', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, failed_reason=NULL, attempts=0'
     : '';
   let sql = `UPDATE jobs SET ${setCols.join(', ')}${extraCols} WHERE id IN (${ids.map(() => '?').join(',')})`;
   if (!b.force) sql += ` AND status != 'claimed'`;
