@@ -2805,6 +2805,29 @@ async function run() {
   assert(!/pushLog\(`Incremental push/.test(bgSpiral),
     'INCPUSH.11 incremental push no longer logs only to the local popup');
 
+  // ── Unattended-worker behaviour ───────────────────────────────────────
+  // A worker shares the machine with a human. It must not grab focus, and
+  // the operator should decide whether the screen may sleep.
+  assert(/state\.allowFocusSteal = runOpts\.allowFocusSteal === true/.test(bgSpiral),
+    'UNATTENDED.1 focus stealing is opt-in');
+  assert(/if \(!state\.allowFocusSteal\)[\s\S]{0,400}suppressed: true/.test(bgSpiral),
+    'UNATTENDED.2 activateMyTab is suppressed by default');
+  assert(/keepAwakeLevel === 'system' \? 'system' : 'display'/.test(bgSpiral),
+    'UNATTENDED.3 keep-awake level is selectable, display by default');
+  assert(/requestKeepAwake\?\.\(keepAwakeLevel\)/.test(bgSpiral),
+    'UNATTENDED.4 the chosen level is what gets requested');
+  const djOpts = readFileSync(resolve(REPO, 'modules/discovery-jobs.js'), 'utf-8');
+  assert(/cfg\.keep_awake_level/.test(djOpts),  'UNATTENDED.5 keep_awake_level comes from manager config');
+  assert(/cfg\.allow_focus_steal/.test(djOpts), 'UNATTENDED.6 allow_focus_steal comes from manager config');
+  // Engine tabs must never be created focused/active.
+  assert(!/tabs\.create\(\{ url, active: true/.test(kwDisc), 'UNATTENDED.7 engine tabs are never created active');
+  assert(/chrome\.windows\.create\(\{ url, focused: false, state: 'minimized' \}\)/.test(kwDisc),
+    'UNATTENDED.8 an engine-created window is minimized and unfocused');
+  // Tab ownership must survive a service-worker recycle, or every recycle
+  // orphans the current tab and they pile up.
+  assert(/chrome\.storage\.session \|\| chrome\.storage\.local/.test(kwDisc), 'UNATTENDED.9 owned tabs persist across SW recycles');
+  assert((kwDisc.match(/await saveOwned\(\)/g) || []).length >= 4, 'UNATTENDED.10 ownership is saved at every mutation point');
+
   assert(bgSpiral.includes('maybeFlushIncremental'),        'INCPUSH.1 incremental flush helper exists');
   assert(/onRowAdded[\s\S]{0,1200}maybeFlushIncremental\(\)/.test(bgSpiral), 'INCPUSH.2 flush is driven from onRowAdded');
   assert(bgSpiral.includes('INCREMENTAL_FLUSH_MS'),         'INCPUSH.3 time-based throttle');
@@ -2955,7 +2978,12 @@ async function run() {
   assert(appJs.body.includes('adbrainWakeLockForce'),           'WAKE.5 manual force-on/off persisted');
   // Worker: chrome.power.requestKeepAwake — already existed, guard for regressions.
   const bgJs = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
-  assert(bgJs.includes("chrome.power?.requestKeepAwake?.('display')"), 'WAKE.6 worker requests keep-awake during runs');
+  // Keep-awake is still requested on every run; the LEVEL is now the
+  // operator's choice ('display' keeps the screen on, 'system' lets it sleep
+  // while the CPU works). Assert the request happens and that display
+  // remains the default, rather than pinning the literal argument.
+  assert(bgJs.includes('chrome.power?.requestKeepAwake?.(keepAwakeLevel)'), 'WAKE.6 worker requests keep-awake during runs');
+  assert(/keepAwakeLevel === 'system' \? 'system' : 'display'/.test(bgJs),  'WAKE.6b display remains the default level');
   assert(bgJs.includes('chrome.power?.releaseKeepAwake?.()'),  'WAKE.7 worker releases keep-awake in finally');
   // Metafield-definitions diagnostic — 'why are tabs still blank' one-click.
   assert(srvFull.includes("'/api/shopify/metafield-definitions'"), 'MF-DIAG.1 diagnostic endpoint registered');

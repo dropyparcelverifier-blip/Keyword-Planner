@@ -1520,13 +1520,27 @@ async function _handleStartInner(msg) {
   state._runStartedAt = Date.now();
   if (!state.batchId) state.batchId = String(Date.now());
   state.lastStatus = 'Running';
-  // Keep the screen on for the duration of the run. A 30+ product run
-  // takes several hours and the user typically walks away; if the display
-  // sleeps the visibility-throttling of the SERP tabs starts dropping
-  // image loads and the CLIP model's offscreen sandbox occasionally times
-  // out. 'display' level keeps both the screen and the system awake.
-  // Released in the finally block of the engine wrapper below.
-  try { chrome.power?.requestKeepAwake?.('display'); } catch {}
+  // Keep-awake level, operator-selectable.
+  //
+  //   'display' (default) — screen AND system stay awake.
+  //   'system'            — screen may sleep, CPU keeps running.
+  //
+  // 'system' is what you want on a dedicated worker PC that should go dark
+  // overnight, and it is the honest default to offer — but it is NOT free.
+  // Chrome throttles hidden/background tabs harder once the display sleeps:
+  // SERP image loads start getting dropped and the CLIP offscreen sandbox
+  // can time out, which shows up as image_count=0 rather than as an error.
+  // That is exactly why this was pinned to 'display'. Offered as a choice
+  // rather than silently changed, because the trade is real and the right
+  // answer depends on whether anyone is using the machine.
+  // Surfaced on state so the activateMyTab handler can consult it without
+  // threading runOpts through the message plumbing.
+  state.allowFocusSteal = runOpts.allowFocusSteal === true;
+  const keepAwakeLevel = runOpts.keepAwakeLevel === 'system' ? 'system' : 'display';
+  try { chrome.power?.requestKeepAwake?.(keepAwakeLevel); } catch {}
+  if (keepAwakeLevel === 'system') {
+    pushLog('Keep-awake: system level — the screen may sleep while the CPU keeps working. If image_count drops to 0 across the board, switch back to display level.', 'warn');
+  }
   // Set the run-intent flag BEFORE the engine starts. If we crash between
   // here and the first persistReport, the watchdog / onStartup paths will
   // re-enter and resume from the saved doneProducts list.
@@ -2234,6 +2248,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // KP's manual-fallback: when synthetic clicks fail, the content script asks
   // background to bring its tab to the foreground so the user can click it.
   if (action === 'activateMyTab') {
+    // Focus stealing is OFF by default.
+    //
+    // This yanks the KP tab to the foreground and focuses its window so a
+    // human can click the card by hand. On an unattended worker — or on a
+    // machine somebody is actually using — that means the engine snatches
+    // focus mid-sentence, and it fires repeatedly because the fallback runs
+    // per seed. It only ever existed because synthetic clicks on the
+    // Discover card did not work; now that the engine opens the pane on its
+    // own (it waits for the pane instead of glancing once), this is a
+    // last-resort path that should stay quiet unless the operator opts in.
+    if (!state.allowFocusSteal) {
+      pushLog('KP asked to foreground its tab for a manual click — suppressed (focus stealing is off). Set allow_focus_steal in the manager config if you want it.', 'warn');
+      sendResponse({ ok: false, suppressed: true });
+      return false;
+    }
     if (sender.tab?.id) {
       chrome.tabs.update(sender.tab.id, { active: true }).catch(() => {});
       if (sender.tab.windowId) {

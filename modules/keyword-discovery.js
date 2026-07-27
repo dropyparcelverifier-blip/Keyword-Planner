@@ -841,10 +841,42 @@ const Worker = (() => {
   //
   // Invariant: at most ONE engine tab is open at a time. Anything opened
   // earlier is closed before a replacement is created.
+  //
+  // The set is MIRRORED TO chrome.storage.session because this is module
+  // state in an MV3 service worker, and the browser recycles that worker
+  // aggressively — roughly every 30 idle seconds. Each recycle wiped the set
+  // and reset tabId to null, so the next navigate opened a fresh tab while
+  // the previous one stayed open, unreferenced and unclosable. Over a run
+  // that is the pile of Google/KP/Amazon tabs the operator sees. Persisting
+  // the ids means a restarted worker still knows what it owns and can clean
+  // up. session storage (not local) is right: it is cleared when the browser
+  // closes, which is exactly when those tab ids stop being meaningful.
+  const OWNED_KEY = 'adbrainEngineOwnedTabs';
   const ownedTabs = new Set();
   const ownedWindows = new Set();
+  let ownedLoaded = false;
+
+  async function loadOwned() {
+    if (ownedLoaded) return;
+    ownedLoaded = true;
+    try {
+      const store = chrome.storage.session || chrome.storage.local;
+      const d = await store.get([OWNED_KEY]);
+      const saved = d?.[OWNED_KEY];
+      for (const id of (saved?.tabs || []))    ownedTabs.add(id);
+      for (const id of (saved?.windows || [])) ownedWindows.add(id);
+    } catch { /* first run, or session storage unavailable */ }
+  }
+
+  async function saveOwned() {
+    try {
+      const store = chrome.storage.session || chrome.storage.local;
+      await store.set({ [OWNED_KEY]: { tabs: [...ownedTabs], windows: [...ownedWindows] } });
+    } catch { /* non-fatal — worst case we leak a tab after a recycle */ }
+  }
 
   async function closeOwned({ except = null } = {}) {
+    await loadOwned();
     for (const id of [...ownedTabs]) {
       if (id === except) continue;
       try { await chrome.tabs.remove(id); } catch { /* already gone */ }
@@ -858,6 +890,7 @@ const Worker = (() => {
         if (!w?.tabs?.length) { await chrome.windows.remove(wid); ownedWindows.delete(wid); }
       } catch { ownedWindows.delete(wid); }
     }
+    await saveOwned();
   }
 
   // Open a tab for the engine to drive.
@@ -880,6 +913,7 @@ const Worker = (() => {
       if (wins.length) {
         const t = await chrome.tabs.create({ url, active: false, windowId: wins[0].id });
         ownedTabs.add(t.id);
+        await saveOwned();
         return t;
       }
     } catch { /* fall through to creating one */ }
@@ -888,6 +922,7 @@ const Worker = (() => {
     if (!tab) throw new Error('could not create a window for the engine tab');
     ownedWindows.add(win.id);
     ownedTabs.add(tab.id);
+    await saveOwned();
     return tab;
   }
 
@@ -905,6 +940,7 @@ const Worker = (() => {
         // recycle) so we converge back to exactly one.
         await closeOwned({ except: tabId });
         ownedTabs.add(tabId);
+        await saveOwned();
         await chrome.tabs.update(tabId, { url });
       } else {
         tabId = (await createWorkerTab(url)).id;

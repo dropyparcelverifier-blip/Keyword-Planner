@@ -272,6 +272,13 @@ export function workerConfigToRunOpts(cfg) {
   if (cfg.chunk_rest_max_ms != null)  out.chunkRestMaxMs        = cfg.chunk_rest_max_ms;
   if (cfg.cap != null)                out.cap                   = cfg.cap;
   if (cfg.auto_export != null)        out.autoExport            = cfg.auto_export;
+  // 'system' lets the screen sleep while the CPU keeps working; 'display'
+  // (default) keeps the screen on. See the keep-awake comment in background.js
+  // — 'system' trades a dark screen for harder background-tab throttling.
+  if (cfg.keep_awake_level)           out.keepAwakeLevel        = cfg.keep_awake_level;
+  // Whether the KP manual-click fallback may pull its tab to the foreground.
+  // Off by default: an unattended worker must never steal focus.
+  if (cfg.allow_focus_steal != null)  out.allowFocusSteal       = !!cfg.allow_focus_steal;
   return out;
 }
 
