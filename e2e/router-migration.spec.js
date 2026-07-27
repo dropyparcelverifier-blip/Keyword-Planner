@@ -296,3 +296,63 @@ test('shopify credential-dependent endpoints fail cleanly, not with a ReferenceE
     expect(r.error).not.toMatch(/is not defined/);
   }
 });
+
+// ── Resume from the failed step ────────────────────────────────────────
+test('resume-state reports completed rounds and prior rows for a SKU', async () => {
+  const batchId = `resume-${Date.now()}`;
+  const url = `https://dropy.in/products/resume-${Date.now()}`;
+  await post(mgr.baseUrl, '/api/jobs/upload', { batchId, products: [{ sku: 'R1', url }] });
+
+  // Nothing run yet — must be safe and non-resumable, not an error.
+  const fresh = await get(mgr.baseUrl, `/api/jobs/resume-state?batchId=${encodeURIComponent(batchId)}&productUrl=${encodeURIComponent(url)}`);
+  expect(fresh.ok).toBe(true);
+  expect(fresh.resumable).toBe(false);
+  expect(fresh.completedRounds).toEqual([]);
+
+  // Simulate the engine finishing KP and Round 1, and landing rows.
+  for (const [round, status, rows] of [['kp', 'ok', 42], ['round1', 'ok', 7], ['round2', 'failed', 0]]) {
+    await post(mgr.baseUrl, '/api/activity', {
+      batchId, workerId: 'PC-RESUME', level: 'info', source: round,
+      message: `⟦ROUND⟧ round=${round} status=${status} rows=${rows}`,
+      product_url: url,
+    });
+  }
+  await post(mgr.baseUrl, '/api/keywords', {
+    batchId, rows: [
+      { keyword: 'resume kw one', product_url: url, sku: 'R1' },
+      { keyword: 'resume kw two', product_url: url, sku: 'R1' },
+    ],
+  });
+
+  const rs = await get(mgr.baseUrl, `/api/jobs/resume-state?batchId=${encodeURIComponent(batchId)}&productUrl=${encodeURIComponent(url)}`);
+  expect(rs.ok).toBe(true);
+  expect(rs.resumable).toBe(true);
+  // Only 'ok' rounds may be skipped. round2 FAILED, so it must be re-run —
+  // skipping it would silently drop the work the requeue was asked to do.
+  expect(rs.completedRounds.sort()).toEqual(['kp', 'round1']);
+  expect(rs.completedRounds).not.toContain('round2');
+  // The rows must come back so the engine can restore them instead of
+  // re-deriving them.
+  expect(rs.priorRowCount).toBe(2);
+  expect(rs.priorRows.map(r => r.keyword).sort()).toEqual(['resume kw one', 'resume kw two']);
+});
+
+test('resume-state re-run of a round supersedes the earlier result', async () => {
+  const batchId = `resume2-${Date.now()}`;
+  const url = `https://dropy.in/products/resume2-${Date.now()}`;
+  await post(mgr.baseUrl, '/api/jobs/upload', { batchId, products: [{ sku: 'R2', url }] });
+
+  // First attempt failed, the retry succeeded — the later marker must win,
+  // otherwise a SKU would re-run a round it has since completed.
+  for (const [status, rows] of [['failed', 0], ['ok', 99]]) {
+    await post(mgr.baseUrl, '/api/activity', {
+      batchId, workerId: 'PC-RESUME', level: 'info', source: 'kp',
+      message: `⟦ROUND⟧ round=kp status=${status} rows=${rows}`, product_url: url,
+    });
+    await new Promise(r => setTimeout(r, 1100));   // activity ts is second-resolution
+  }
+  const rs = await get(mgr.baseUrl, `/api/jobs/resume-state?batchId=${encodeURIComponent(batchId)}&productUrl=${encodeURIComponent(url)}`);
+  expect(rs.rounds.kp.status).toBe('ok');
+  expect(rs.rounds.kp.rows).toBe(99);
+  expect(rs.completedRounds).toContain('kp');
+});

@@ -308,6 +308,16 @@ export async function fetchWorkerBundleHash() {
   } catch { return ''; }
 }
 
+// Resume state for one SKU: which rounds already succeeded, and the rows
+// they produced. Lets a requeued SKU skip straight to the rounds that did
+// not finish instead of repeating minutes of completed work.
+export async function fetchResumeState(batchId, productUrl) {
+  if (!batchId || !productUrl) return null;
+  try {
+    return await _get(`/api/jobs/resume-state?batchId=${encodeURIComponent(batchId)}&productUrl=${encodeURIComponent(productUrl)}`);
+  } catch { return null; }
+}
+
 // THIS extension's own hash — what this worker IS running.
 //
 // Computed from our own file contents, using the same recipe as the

@@ -3139,6 +3139,11 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         if (note) parts.push(`note=${String(note).replace(/[\r\n|]+/g, ' ').slice(0, 120)}`);
         onProgress?.({
           currentProduct: productName,
+          // The REAL url. Resume finds a SKU's markers by product_url, and
+          // the host maps currentProduct into that column when nothing
+          // better is supplied — which would store the product NAME and
+          // match nothing.
+          currentProductUrl: cleanUrl,
           currentSource: round,
           currentAction: parts.join(' '),
           // 'ok' keeps these out of the error panel; skipped/failed are the
@@ -3148,6 +3153,62 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         });
       };
       void ROUNDS;   // documents the expected vocabulary for the parser
+
+      // ---- Resume: skip rounds this SKU already completed ----------------
+      //
+      // A requeued SKU used to redo every round from scratch, including the
+      // ones that had already succeeded — so a product that failed only in
+      // Round 2 paid for KP, PAA and the entire Round 1 SERP cycle again.
+      // On a slow SKU that is tens of minutes of duplicated work, which is
+      // what made requeuing so expensive.
+      //
+      // The manager knows which rounds finished (from the ⟦ROUND⟧ markers)
+      // and holds the rows they produced. We reload those rows into the
+      // in-memory report first — so dedup, seed selection and the final
+      // export behave exactly as if the rounds had just run — then skip
+      // ahead to the first unfinished round.
+      //
+      // Only 'ok' rounds are skipped. 'empty' and 'skipped' are retried on
+      // purpose: an empty round may have been a transient Google response,
+      // and a skipped one usually means a broken KP session that may since
+      // have recovered.
+      let resumedRounds = new Set();
+      if (typeof opts.getResumeState === 'function') {
+        try {
+          const rs = await opts.getResumeState(cleanUrl);
+          const prior = Array.isArray(rs?.priorRows) ? rs.priorRows : [];
+          const done  = Array.isArray(rs?.completedRounds) ? rs.completedRounds : [];
+          if (prior.length && done.length) {
+            let restored = 0;
+            for (const row of prior) {
+              const kw = String(row?.keyword || '').trim();
+              if (!kw) continue;
+              const key = keyFor(kw.toLowerCase());
+              if (report.has(key)) continue;
+              report.set(key, row);
+              productKeywordSet.add(kw.toLowerCase());
+              restored++;
+            }
+            resumedRounds = new Set(done);
+            onProgress?.({
+              currentProduct: productName,
+              currentSource: 'round1',
+              currentAction: `↻ RESUMING: ${restored} row(s) restored from the manager; skipping already-completed round(s): ${done.join(', ')}. Only unfinished rounds will run.`,
+              logKind: 'ok',
+            });
+          }
+        } catch (e) {
+          // Resume is an optimisation, never a requirement — a failure here
+          // must fall back to a full re-run rather than losing the SKU.
+          onProgress?.({
+            currentProduct: productName,
+            currentSource: 'round1',
+            currentAction: `Resume state unavailable (${e.message}) — running every round from the start.`,
+            logKind: 'warn',
+          });
+        }
+      }
+      const roundAlreadyDone = (name) => resumedRounds.has(name);
 
       onProgress?.({
         currentProduct: productName,
@@ -3567,22 +3628,43 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // working KP) but every SKU still completes and produces SOME output.
       // Manual opts.skipR1Kp override also honoured.
       const r1KpStreak = await readKpDeadStreak();
-      const skipR1Kp = opts.skipR1Kp === true || kpDeadStreakIsArmed(r1KpStreak);
+      // A KP scrape this SKU already completed is the single most expensive
+      // thing to repeat — minutes of navigation and typing for ideas the
+      // manager already holds and which were just restored into `report`.
+      const skipR1Kp = opts.skipR1Kp === true
+        || roundAlreadyDone('kp')
+        || kpDeadStreakIsArmed(r1KpStreak);
       let kpResult;
       if (skipR1Kp) {
+        const skipReason = opts.skipR1Kp === true ? 'operator flag'
+          : roundAlreadyDone('kp')               ? 'resume — KP already completed for this SKU'
+          : `streak=${r1KpStreak}`;
         onProgress?.({
           currentProduct: productName,
           currentSource: 'kp',
-          currentAction: `⏭ R1 KP AUTO-SKIP (${opts.skipR1Kp === true ? 'operator flag' : `streak=${r1KpStreak}`}). Google Ads session broken on this worker — engine will run PAA + autosuggest + Amazon only. Yield ~30-100 kw/SKU (vs 500+ with working KP).`,
-          logKind: 'warn',
+          currentAction: roundAlreadyDone('kp')
+            ? `↻ R1 KP SKIPPED ON RESUME — this SKU's KP ideas are already in the manager and have been restored. Going straight to the rounds that did not finish.`
+            : `⏭ R1 KP AUTO-SKIP (${skipReason}). Google Ads session broken on this worker — engine will run PAA + autosuggest + Amazon only. Yield ~30-100 kw/SKU (vs 500+ with working KP).`,
+          logKind: roundAlreadyDone('kp') ? 'ok' : 'warn',
           kpEvent: 'skipped',
         });
         // `skipped` — NOT `failed`. We chose not to run KP; that is not
         // evidence the session is broken (it's the consequence of already
         // believing so). Marking it as a failure is what let the skip feed
         // the very circuit breaker that armed it.
-        emitRound('kp', 'skipped', 0, 'KP session believed dead on this worker');
-        kpResult = { ok: false, skipped: true, error: 'r1_kp_skipped_auto', keywords: [] };
+        //
+        // A RESUME skip is reported separately. It means "KP already
+        // succeeded for this SKU", the opposite of "the session is dead" —
+        // labelling both r1_kp_skipped_auto would make a healthy resume look
+        // like a broken worker in the logs and in any counting built on them.
+        // The round marker stays 'ok' for the same reason: the round IS done.
+        if (roundAlreadyDone('kp')) {
+          emitRound('kp', 'ok', null, 'skipped on resume — already completed for this SKU');
+          kpResult = { ok: false, skipped: true, error: 'r1_kp_skipped_resume', keywords: [] };
+        } else {
+          emitRound('kp', 'skipped', 0, 'KP session believed dead on this worker');
+          kpResult = { ok: false, skipped: true, error: 'r1_kp_skipped_auto', keywords: [] };
+        }
       } else {
         onProgress?.({ currentProduct: productName, currentSource: 'kp', currentAction: `Running Keyword Planner for ${kpSeeds.length} seed(s): "${kpSeeds.join('", "')}"`, keywordCount: report.size });
         // "Start with a website" is allowed EXACTLY ONCE per SKU, here in
@@ -5202,6 +5284,10 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // cannot change behaviour. This is the phase the KP dead-streak
       // counter disables, which is why its streak-reset could never run.
       const runRound2Kp = async () => {
+        if (roundAlreadyDone('round2')) {
+          emitRound('round2', 'ok', null, 'skipped on resume — already completed for this SKU');
+          return;
+        }
         // Opt-out: manual `opts.skipR2Kp` OR auto-detected persistent KP
         // failure, via the shared health counter. 2+ consecutive KP-dead SKUs
         // means the session is flat, so keep bailing — but the streak now
@@ -5530,6 +5616,10 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // to module scope needs those ~10 dependencies made explicit first,
       // and that step wants engine-level behavioural tests to back it.
       const runAmazonRound = async () => {
+        if (roundAlreadyDone('amazon')) {
+          emitRound('amazon', 'ok', null, 'skipped on resume — already completed for this SKU');
+          return;
+        }
         const MAX_AMAZON_TOP_KEYWORDS = maxAmazonKeywords;
         const AMAZON_PER_SUGGEST_CAP   = 6;
         if (!shouldStop() && report.size < productCap) {

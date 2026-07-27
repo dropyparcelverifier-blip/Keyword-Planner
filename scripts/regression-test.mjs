@@ -2493,6 +2493,21 @@ async function run() {
   // same URL again. Without the landing path in the message that loop is
   // invisible: every attempt reads "click strategies exhausted", which
   // sounds like a selector bug rather than a redirect.
+  // "Discover new keywords" opens as a MODAL on /home — the URL never becomes
+  // /ideas/new — and the dialog's seed input mounts a beat after the dialog.
+  // A single isOnIdeasPage() check right after the click therefore saw
+  // nothing, recorded the click as failed, and re-navigated — closing the
+  // pane it had just opened, then repeating. That loop left half a dozen KP
+  // tabs open with the pane visibly ready while the log claimed failure.
+  assert(/waitFor\(\(\) => isOnIdeasPage\(\)/.test(kpJs), 'KP-MODAL.1 waits for the pane instead of checking once');
+  assert(/name: 'Discover-keywords pane'/.test(kpJs),     'KP-MODAL.2 the wait is named for diagnosis');
+  assert(!/await humanPause\(2500, 0\.3\);\s*if \(isOnIdeasPage\(\)\)/.test(kpJs),
+    'KP-MODAL.3 the single-glance check is gone');
+  // isOnIdeasPage must key off the pane's own controls, never the URL —
+  // the modal does not change the path.
+  assert(/function isOnIdeasPage\(\)[\s\S]{0,220}getResultsButtonTexts/.test(kpJs),
+    'KP-MODAL.4 pane detection keys off its controls, not the URL');
+
   assert(/expected \/ideas\/new but the page is on/.test(kpJs), 'KP-FIX.4 NAV error reports the actual landing path');
   assert(/const landedOn = location\.pathname \+ location\.search/.test(kpJs), 'KP-FIX.5 landing path captured from the live page');
   assert(/card did not appear[\s\S]{0,120}location\.pathname/.test(kpJs), 'KP-FIX.6 card-timeout warning also reports the page');
@@ -2734,6 +2749,37 @@ async function run() {
   assert(!/\$token -ne '__TOKEN__'/.test(wdTpl), 'WATCHDOG-AUTH.3 token guard does not compare against the placeholder');
   assert((wdTpl.match(/if \(\$token\) \{ \$req\.Headers\.Add\('X-Manager-Token', \$token\) \}/g) || []).length >= 2,
     'WATCHDOG-AUTH.4 both Mgr-Get and Mgr-Post attach the token');
+
+  // ── Resume from the failed step ───────────────────────────────────────
+  // A requeued SKU used to redo every round, including the ones that already
+  // succeeded — so a product that failed only in Round 2 paid for KP, PAA
+  // and the whole Round 1 SERP cycle again. Tens of minutes of duplicated
+  // work per SKU, which is what made requeuing so expensive.
+  assert(kwDisc.includes('getResumeState'),      'RESUME.1 engine accepts a resume-state provider');
+  assert(kwDisc.includes('roundAlreadyDone'),    'RESUME.2 engine can skip a completed round');
+  // Rows must be restored BEFORE any round is skipped, or dedup and seed
+  // selection would behave as though the SKU had produced nothing.
+  assert(/report\.set\(key, row\)[\s\S]{0,400}resumedRounds = new Set\(done\)/.test(kwDisc),
+    'RESUME.3 prior rows are restored into the report before rounds are skipped');
+  // The three expensive rounds must all honour it.
+  assert(/roundAlreadyDone\('kp'\)/.test(kwDisc),     'RESUME.4 KP scrape is skippable');
+  assert(/roundAlreadyDone\('round2'\)/.test(kwDisc), 'RESUME.5 Round 2 is skippable');
+  assert(/roundAlreadyDone\('amazon'\)/.test(kwDisc), 'RESUME.6 Amazon round is skippable');
+  // A resume skip must NOT look like a dead KP session: same label would
+  // make a healthy resume indistinguishable from a broken worker in the
+  // logs and in anything counting them.
+  assert(kwDisc.includes("'r1_kp_skipped_resume'"), 'RESUME.7 resume skip has its own reason code');
+  assert(/roundAlreadyDone\('kp'\)\) \{[\s\S]{0,200}emitRound\('kp', 'ok'/.test(kwDisc),
+    'RESUME.8 a resumed KP round is recorded as ok, not skipped');
+  // Resume is an optimisation; failing to fetch it must fall back to a full
+  // run rather than losing the SKU.
+  assert(/Resume state unavailable[\s\S]{0,120}running every round from the start/.test(kwDisc),
+    'RESUME.9 resume failure degrades to a full re-run');
+  // Only 'ok' rounds may be skipped — empty/skipped/failed are retryable.
+  const jobsRoute = readFileSync(resolve(REPO, 'manager/routes/jobs.js'), 'utf-8');
+  assert(/filter\(\(\[, v\]\) => v\.status === 'ok'\)/.test(jobsRoute), 'RESUME.10 only ok rounds count as completed');
+  assert(jobsRoute.includes('/api/jobs/resume-state'), 'RESUME.11 resume-state endpoint registered');
+  assert(srvFull.includes('keywordsByProduct'), 'RESUME.12 per-product row query exists');
 
   assert(bgSpiral.includes('maybeFlushIncremental'),        'INCPUSH.1 incremental flush helper exists');
   assert(/onRowAdded[\s\S]{0,1200}maybeFlushIncremental\(\)/.test(bgSpiral), 'INCPUSH.2 flush is driven from onRowAdded');

@@ -450,8 +450,62 @@ function roundProgress({ res, url, ctx }) {
   return send(res, 200, { ok: true, batchId, order: ROUND_ORDER, products: out });
 }
 
+// Everything a worker needs to RESUME one SKU instead of restarting it.
+//
+// A requeued SKU used to redo every round from scratch, including the ones
+// that already succeeded — so a product that failed only in Round 2 paid for
+// KP, PAA and the whole Round 1 SERP cycle again. On a slow SKU that is tens
+// of minutes of duplicated work, and it is why requeuing felt so expensive.
+//
+// Returns the rounds already marked ok, plus the rows that product has
+// already landed. The worker seeds its in-memory report with those rows (so
+// dedup and downstream seed selection behave as if the rounds had just run)
+// and skips straight to the first unfinished round.
+function resumeState({ res, url, ctx }) {
+  const { db, Q, send } = ctx;
+  const batchId    = String(url.searchParams.get('batchId') || '').trim();
+  const productUrl = String(url.searchParams.get('productUrl') || '').trim();
+  if (!batchId || !productUrl) return send(res, 400, { ok: false, error: 'batchId + productUrl required' });
+
+  const markers = db.prepare(`
+    SELECT message, ts FROM activity_log
+    WHERE batch_id = ? AND product_url = ? AND message LIKE '⟦ROUND⟧%'
+    ORDER BY ts ASC
+  `).all(batchId, productUrl);
+
+  // Last marker per round wins — a re-run's result supersedes the earlier one.
+  const rounds = {};
+  for (const m of markers) {
+    const get = (k) => (m.message.match(new RegExp(`${k}=([^\\s]+)`)) || [])[1];
+    const round = get('round');
+    if (round) rounds[round] = { status: get('status') || 'unknown', rows: Number(get('rows') || 0), at: m.ts };
+  }
+
+  // Only 'ok' counts as done. empty/skipped/failed are all worth retrying:
+  // 'empty' may have been a transient Google response, and 'skipped' means a
+  // broken KP session that may since have recovered.
+  const completed = Object.entries(rounds).filter(([, v]) => v.status === 'ok').map(([k]) => k);
+
+  let rows = [];
+  try {
+    rows = Q.keywordsByProduct.all(batchId, productUrl)
+      .map(r => { try { return JSON.parse(r.data); } catch { return null; } })
+      .filter(Boolean);
+  } catch { /* no rows yet is normal */ }
+
+  return send(res, 200, {
+    ok: true, batchId, productUrl,
+    completedRounds: completed,
+    rounds,
+    priorRows: rows,
+    priorRowCount: rows.length,
+    resumable: completed.length > 0 && rows.length > 0,
+  });
+}
+
 function register(router) {
   router.get ('/api/jobs/round-progress',     roundProgress);
+  router.get ('/api/jobs/resume-state',       resumeState);
   router.post('/api/jobs/claim',              claim);
   router.post('/api/jobs/heartbeat',          heartbeat);
   router.post('/api/jobs/done',               markDone);

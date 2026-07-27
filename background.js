@@ -33,6 +33,7 @@ import {
   sendWorkerHeartbeat,
   fetchWorkerBundleHash,
   computeOwnBundleHash,
+  fetchResumeState,
 } from './modules/discovery-jobs.js';
 import {
   STORAGE_KEY_KP_URL,
@@ -381,7 +382,18 @@ function emitProgress(payload) {
       level:      payload.logKind || 'info',
       source:     payload.currentSource || 'engine',
       message:    payload.currentAction,
-      productUrl: payload.currentProduct || null,
+      // Prefer a REAL url. This wrote payload.currentProduct — the product
+      // NAME — into the product_url column for every activity row, so
+      // anything joining activity to a product by URL silently matched
+      // nothing. Resume depends on exactly that join (find this SKU's round
+      // markers by product_url), so it would have looked implemented and
+      // done nothing. currentProduct stays as the last-resort fallback so
+      // existing name-based filtering keeps working until every emitter
+      // passes a url.
+      productUrl: payload.currentProductUrl
+               || payload.roundEvent?.productUrl
+               || payload.currentProduct
+               || null,
     });
   }
   // Always include batch totals in the broadcast even when the engine
@@ -1630,6 +1642,15 @@ async function _handleStartInner(msg) {
           familiesFor,
           computeProductFamilyValues,
           checkAttributeFamily,
+          // Resume support: tell the engine which rounds this SKU already
+          // finished, and hand back the rows they produced. Only meaningful
+          // in distributed mode — a local run has no manager to ask, and
+          // returning null there makes the engine run everything, which is
+          // the correct behaviour for a one-off local run.
+          getResumeState: async (productUrl) => {
+            if (!state.workerId || !state.queueBatchId) return null;
+            return await fetchResumeState(state.queueBatchId, productUrl);
+          },
           onRowAdded: async () => {
             state.report = Array.from(reportMap.values());
             await persistReport();

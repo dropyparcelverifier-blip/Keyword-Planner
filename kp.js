@@ -564,13 +564,31 @@
         const desc = `<${el.tagName?.toLowerCase()}>${el.getAttribute?.('role') ? `[role=${el.getAttribute('role')}]` : ''} "${(el.innerText || el.textContent || '').trim().slice(0, 40)}" (${why})`;
         kpLog(`click attempt ${i + 1}/${candidates.length}: ${desc}`);
         await aggressiveClick(el);
-        await humanPause(2500, 0.3);
-        if (isOnIdeasPage()) {
+        // WAIT for the pane, don't glance at it once.
+        //
+        // "Discover new keywords" opens as a MODAL on /home — the URL never
+        // becomes /ideas/new — and the dialog's seed input and Get-results
+        // button mount a beat after the dialog itself. A single check ~2.5s
+        // after the click therefore saw nothing, the click was recorded as
+        // failed, and the engine re-navigated... which closed the dialog it
+        // had just successfully opened, then repeated. That loop is what
+        // left half a dozen Keyword Planner tabs open with the pane sitting
+        // there, visibly ready, while the log insisted the click failed.
+        //
+        // Poll instead, so we notice the pane whenever it finishes
+        // rendering rather than at one arbitrary instant.
+        const appeared = await waitFor(() => isOnIdeasPage(), {
+          timeoutMs: 12000,
+          intervalMs: 400,
+          name: 'Discover-keywords pane',
+        }).then(() => true).catch(() => false);
+        if (appeared) {
           kpLog(`Discover Keywords pane opened via ${why}`, 'ok');
           await humanPause(600);
           opened = true;
           return;
         }
+        kpLog(`click ${i + 1} did not surface the pane within 12s — trying the next candidate`, 'warn');
       }
     } else {
       // Report the page we're on. "Card never appeared" on /ideas/new is a

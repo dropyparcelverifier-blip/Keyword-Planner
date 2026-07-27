@@ -1242,6 +1242,9 @@ const Q = {
   insertKeyword: db.prepare(`INSERT INTO keywords (batch_id, sku, keyword, product_url, data) VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(batch_id, product_url, keyword) DO UPDATE SET data=excluded.data, sku=excluded.sku`),
   keywordsByBatch: db.prepare(`SELECT id, data FROM keywords WHERE batch_id=? ORDER BY id ASC`),
+  // One product's rows. Used by resume: a requeued SKU reloads what it
+  // already produced instead of re-running the rounds that succeeded.
+  keywordsByProduct: db.prepare(`SELECT id, data FROM keywords WHERE batch_id=? AND product_url=? ORDER BY id ASC`),
   // Incremental keyword fetch — only rows whose id > sinceId. Analytics
   // live-poll uses this to avoid re-sending the whole batch every 4s;
   // client keeps a running `lastMaxId` and requests only what's new.
