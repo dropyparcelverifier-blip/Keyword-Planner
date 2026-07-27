@@ -2581,6 +2581,91 @@ async function run() {
   // elsewhere in the file are fine, a second live regex is not.
   assert((kwDisc.match(/\/message \(port\|channel\) closed/g) || []).length === 1, 'KP-SPIRAL.15 session-dead regex defined exactly once');
 
+  // ── Engine tab lifecycle (behavioural, not string-matching) ───────────
+  //
+  // "It opens too many tabs" was the complaint, and string assertions cannot
+  // catch it: the code LOOKED correct while leaking a tab on every MV3
+  // service-worker recycle, because the ownership Set lived in module state
+  // that the recycle destroyed. This runs the real Worker IIFE against a
+  // fake chrome.tabs/windows/storage and asserts the invariant that matters:
+  // at most ONE engine tab exists, across recycles, crashes and restarts.
+  {
+    const kdSrc = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+    const workerSrc = kdSrc.slice(kdSrc.indexOf('const Worker = (() => {'),
+                                  kdSrc.indexOf('async function pingContentScript'));
+
+    // One fake browser shared across "recycles"; only the module state is
+    // rebuilt, which is exactly what a service-worker restart does.
+    const tabs = new Map(); const wins = new Map();
+    let nextId = 1;
+    const sessionStore = {};
+    const fakeChrome = {
+      tabs: {
+        create: async ({ url, windowId, active }) => {
+          const id = nextId++; tabs.set(id, { id, url, windowId, active: !!active }); return tabs.get(id);
+        },
+        get:    async id => { if (!tabs.has(id)) throw new Error('no tab'); return tabs.get(id); },
+        update: async (id, { url }) => { if (!tabs.has(id)) throw new Error('no tab'); tabs.get(id).url = url; },
+        remove: async id => { if (!tabs.has(id)) throw new Error('gone'); tabs.delete(id); },
+      },
+      windows: {
+        getAll: async () => [...wins.values()],
+        create: async ({ url, focused, state }) => {
+          const wid = nextId++; const t = { id: nextId++, url, windowId: wid };
+          tabs.set(t.id, t); wins.set(wid, { id: wid, focused: !!focused, state });
+          return { id: wid, tabs: [t] };
+        },
+        get:    async id => { if (!wins.has(id)) throw new Error('no win'); return { id, tabs: [...tabs.values()].filter(t => t.windowId === id) }; },
+        remove: async id => { wins.delete(id); },
+      },
+      storage: {
+        session: {
+          get: async keys => { const o = {}; for (const k of [].concat(keys)) if (k in sessionStore) o[k] = sessionStore[k]; return o; },
+          set: async obj => { Object.assign(sessionStore, obj); },
+        },
+      },
+    };
+    // Rebuild ONLY the module state — the browser (and session storage)
+    // survives, which is precisely an MV3 service-worker recycle.
+    const newWorker = () => {
+      const fn = new Function('chrome', 'waitForNavigationComplete',
+        `return (${workerSrc.replace(/^const Worker = /, '').replace(/;\s*$/, '')});`);
+      return fn(fakeChrome, async () => {});
+    };
+
+    let W = newWorker();
+    await W.navigate('https://kp/1');
+    assert(tabs.size === 1, `TABLIFE.1 first navigate opens exactly one tab (got ${tabs.size})`);
+    assert([...tabs.values()].every(t => !t.active), 'TABLIFE.2 the engine tab is never created active/focused');
+    assert([...wins.values()].every(w => !w.focused), 'TABLIFE.3 an engine-created window is never focused');
+
+    for (let i = 0; i < 15; i++) await W.navigate('https://kp/n' + i);
+    assert(tabs.size === 1, `TABLIFE.4 16 navigations still leave one tab (got ${tabs.size})`);
+
+    // THE regression: recycle the service worker repeatedly. Before session
+    // persistence this leaked one tab per recycle.
+    for (let r = 0; r < 6; r++) { W = newWorker(); await W.navigate('https://kp/after-recycle-' + r); }
+    assert(tabs.size === 1, `TABLIFE.5 six SW recycles leak nothing (got ${tabs.size} tabs)`);
+
+    // Tab killed externally (operator closed it, or it crashed).
+    tabs.clear();
+    W = newWorker();
+    await W.navigate('https://kp/after-crash');
+    assert(tabs.size === 1, `TABLIFE.6 a killed tab is replaced, not duplicated (got ${tabs.size})`);
+
+    // Cleanup must remove the tab AND any window the engine created.
+    await W.close();
+    assert(tabs.size === 0, `TABLIFE.7 close() removes the engine tab (got ${tabs.size})`);
+    assert(wins.size === 0, `TABLIFE.8 close() removes windows the engine created (got ${wins.size})`);
+
+    // An operator's own window must never be touched.
+    wins.set(9999, { id: 9999, focused: true });
+    W = newWorker();
+    await W.navigate('https://kp/in-operator-window');
+    await W.close();
+    assert(wins.has(9999), 'TABLIFE.9 a window the engine did not create is left alone');
+  }
+
   // ── Audit fixes: injection, encoding, durability, indexing ────────────
   const srvAudit  = readFileSync(resolve(REPO, 'manager/server.js'), 'utf-8');
   const dashAudit = readFileSync(resolve(REPO, 'dashboard.js'), 'utf-8');
