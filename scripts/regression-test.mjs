@@ -2729,6 +2729,25 @@ async function run() {
     assert(/attempts\s*=\s*0/.test(stmt), `REQUEUE-ATTEMPTS.2.${i} requeue statement resets attempts`);
   }
   assert(releaseStmts.length >= 2, 'REQUEUE-ATTEMPTS.4 found the release statements');
+  // An ADMINISTRATIVE release must refund the attempt. claimById increments
+  // attempts on every claim and failMaxAttempts fires at >= 3, so an
+  // operator Stop or a fleet update silently burned one of three lives on a
+  // job that never failed — three deploy cycles in one afternoon auto-failed
+  // four healthy SKUs with "exceeded 3 attempts (retry loop)".
+  assert(/releaseByWorker:[\s\S]{0,260}attempts=MAX\(0, attempts-1\)/.test(srvFull),
+    'REQUEUE-ATTEMPTS.7 release-by-worker refunds the attempt it did not use');
+  // The STALE reaper must NOT refund: there the attempt was genuinely spent
+  // by a worker that died mid-SKU, and refunding would defeat the guard.
+  const staleStmt = (srvFull.match(/releaseStale: db\.prepare\(`[^`]*`\)/) || [''])[0];
+  // Assert we FOUND it first. Without this the regex silently matching
+  // nothing makes the check below pass against an empty string — a green
+  // test that verifies nothing, which is worse than no test at all.
+  assert(staleStmt.length > 0, 'REQUEUE-ATTEMPTS.8a the stale-release statement was located');
+  // Check for an ASSIGNMENT, not any mention: this statement legitimately
+  // filters on `attempts < 3` in its WHERE clause. There the attempt was
+  // genuinely spent by a worker that died mid-SKU, so refunding it would
+  // defeat the retry-loop guard entirely.
+  assert(!/SET[\s\S]*attempts\s*=/.test(staleStmt), 'REQUEUE-ATTEMPTS.8b the stale reaper does not refund attempts');
   for (const [i, stmt] of releaseStmts.entries()) {
     assert(!/attempts\s*=\s*0/.test(stmt), `REQUEUE-ATTEMPTS.5.${i} release does NOT reset attempts (retry-loop guard must survive)`);
   }

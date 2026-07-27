@@ -1178,7 +1178,15 @@ const Q = {
   // (which routes through the worker's SW). Used when a worker is stopped
   // or offline and its stale claims are blocking other workers from
   // picking up the SKUs.
-  releaseByWorker: db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL WHERE status='claimed' AND claimed_by=?`),
+  // Give the attempt back. `attempts` is incremented by claimById on every
+  // claim, and failMaxAttempts auto-fails at >= 3 — so an ADMINISTRATIVE
+  // release (operator Stop, a fleet update, a worker cold-start clearing its
+  // ghost claims) silently burned one of the three lives even though the job
+  // never actually failed. Three deploy cycles in an afternoon were enough
+  // to auto-fail four healthy SKUs with "exceeded 3 attempts (retry loop)".
+  // Only real work should consume attempts, so an unforced release refunds
+  // it. Clamped at 0; the stale-claim reaper keeps its own accounting.
+  releaseByWorker: db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, attempts=MAX(0, attempts-1) WHERE status='claimed' AND claimed_by=?`),
   // Per-job CRUD helpers. Deliberately narrow (one field family per stmt)
   // so we can never accidentally update the wrong column via body param
   // injection. Job status transitions still respect claimed_by (worker
