@@ -2499,6 +2499,20 @@ async function run() {
   // nothing, recorded the click as failed, and re-navigated — closing the
   // pane it had just opened, then repeating. That loop left half a dozen KP
   // tabs open with the pane visibly ready while the log claimed failure.
+  // Google Ads binds click handlers through jsaction attributes, usually on
+  // a DESCENDANT of the visible card rather than the <div role="button">
+  // wrapper that text/spatial matching finds. Dispatching on the wrapper
+  // fires the ripple and nothing else — every automated click was logged as
+  // "click attempt 1/1" against it and never opened the pane, while the only
+  // successes in the logs came from a human clicking.
+  assert(/\[jsaction\*="click"\]/.test(kpJs),        'KP-CLICK.1 jsaction descendants are click candidates');
+  assert(/jsaction-ancestor/.test(kpJs),             'KP-CLICK.2 delegated ancestor handlers are tried too');
+  assert(/jsaction-descendant/.test(kpJs),           'KP-CLICK.3 jsaction candidates are labelled for diagnosis');
+  assert(/click candidate\(s\)/.test(kpJs),          'KP-CLICK.4 the candidate roster is logged');
+  // A flat 12s per candidate would spend a minute per seed proving the same
+  // negative once there are several jsaction candidates.
+  assert(/timeoutMs: isLast \? 12000 : 5000/.test(kpJs), 'KP-CLICK.5 wait is adaptive, full window only for the last candidate');
+
   assert(/waitFor\(\(\) => isOnIdeasPage\(\)/.test(kpJs), 'KP-MODAL.1 waits for the pane instead of checking once');
   assert(/name: 'Discover-keywords pane'/.test(kpJs),     'KP-MODAL.2 the wait is named for diagnosis');
   assert(!/await humanPause\(2500, 0\.3\);\s*if \(isOnIdeasPage\(\)\)/.test(kpJs),

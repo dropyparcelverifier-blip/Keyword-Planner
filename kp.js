@@ -553,11 +553,28 @@
       // the card itself. Cycling through candidates on retry is much more
       // effective than clicking the same wrong element three times.
       const candidates = [];
-      const inner = card.querySelector?.('button, a[role="button"], a[href], [role="link"][tabindex], material-button, mat-button');
-      if (inner && visible(inner)) candidates.push({ el: inner, why: 'nested-clickable' });
-      const spatial = findRealClickTarget(card);
-      if (spatial && !candidates.some(c => c.el === spatial)) candidates.push({ el: spatial, why: 'spatial-hit' });
-      if (!candidates.some(c => c.el === card)) candidates.push({ el: card, why: 'card-container' });
+      const add = (el, why) => {
+        if (el && visible(el) && !candidates.some(c => c.el === el)) candidates.push({ el, why });
+      };
+      // jsaction FIRST. Google Ads binds click handlers through jsaction
+      // attributes, and the handler usually sits on a DESCENDANT of the
+      // visible card — not the <div role="button"> wrapper that text and
+      // spatial matching find. Dispatching on the wrapper fires the ripple
+      // and nothing else, which is exactly what was observed: every
+      // automated click was logged as "click attempt 1/1" against that
+      // wrapper and never opened the pane, while the only two successes in
+      // the logs came from a HUMAN clicking ("thanks for the manual click").
+      // Handlers can also be delegated to an ancestor, so try both
+      // directions before falling back to the old guesses.
+      for (const el of card.querySelectorAll?.('[jsaction*="click"]') || []) add(el, 'jsaction-descendant');
+      for (let a = card; a && a !== document.body; a = a.parentElement) {
+        const ja = a.getAttribute?.('jsaction') || '';
+        if (ja.includes('click')) { add(a, 'jsaction-ancestor'); break; }
+      }
+      add(card.querySelector?.('button, a[role="button"], a[href], [role="link"][tabindex], material-button, mat-button'), 'nested-clickable');
+      add(findRealClickTarget(card), 'spatial-hit');
+      add(card, 'card-container');
+      kpLog(`${candidates.length} click candidate(s): ${candidates.map(c => c.why).join(', ')}`);
       let opened = false;
       for (let i = 0; i < candidates.length && !opened; i++) {
         const { el, why } = candidates[i];
@@ -577,8 +594,13 @@
         //
         // Poll instead, so we notice the pane whenever it finishes
         // rendering rather than at one arbitrary instant.
+        // Adaptive wait: a wrong candidate is usually obvious quickly, so
+        // give the early ones a short window and reserve the full 12s for
+        // the last resort. With several jsaction candidates a flat 12s each
+        // would spend a minute per seed proving the same negative.
+        const isLast = i === candidates.length - 1;
         const appeared = await waitFor(() => isOnIdeasPage(), {
-          timeoutMs: 12000,
+          timeoutMs: isLast ? 12000 : 5000,
           intervalMs: 400,
           name: 'Discover-keywords pane',
         }).then(() => true).catch(() => false);
