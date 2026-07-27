@@ -2795,6 +2795,16 @@ async function run() {
   assert(jobsRoute.includes('/api/jobs/resume-state'), 'RESUME.11 resume-state endpoint registered');
   assert(srvFull.includes('keywordsByProduct'), 'RESUME.12 per-product row query exists');
 
+  // Incremental-push logging must reach the MANAGER, not just the popup.
+  // pushLog() writes only to state.log + chrome.storage, so the one
+  // mechanism that most needs remote verification was invisible: rows were
+  // landing mid-product (proven by rows arriving with zero completed jobs)
+  // while the manager's activity log showed no push events at all.
+  assert(/bufferActivity\(\{ level: 'ok', source: 'push'/.test(bgSpiral),
+    'INCPUSH.10 successful incremental pushes are reported to the manager');
+  assert(!/pushLog\(`Incremental push/.test(bgSpiral),
+    'INCPUSH.11 incremental push no longer logs only to the local popup');
+
   assert(bgSpiral.includes('maybeFlushIncremental'),        'INCPUSH.1 incremental flush helper exists');
   assert(/onRowAdded[\s\S]{0,1200}maybeFlushIncremental\(\)/.test(bgSpiral), 'INCPUSH.2 flush is driven from onRowAdded');
   assert(bgSpiral.includes('INCREMENTAL_FLUSH_MS'),         'INCPUSH.3 time-based throttle');

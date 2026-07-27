@@ -883,18 +883,21 @@ async function maybeFlushIncremental(force = false) {
     // An orphan-batch rejection means our cached batch id is stale; leave
     // them unsent so the completion path can resync and retry properly.
     if (r && r.rejectedOrphan > 0) {
-      pushLog(`Incremental push: ${r.rejectedOrphan} row(s) rejected (stale batch id) — leaving them for the completion-time resync.`, 'warn');
+      bufferActivity({ level: 'warn', source: 'push',
+        message: `Incremental push: ${r.rejectedOrphan} row(s) rejected (stale batch id) — leaving them for the completion-time resync.` });
     } else {
       for (const row of unsent) _incrementalSent.add(_rowKey(row));
       _lastIncrementalAt = Date.now();
       if ((r?.success || 0) > 0) {
-        pushLog(`Incremental push: ${r.success} row(s) landed mid-product (${_incrementalSent.size} sent so far this run) — work is now safe from a claim timeout or SW restart.`, 'ok');
+        bufferActivity({ level: 'ok', source: 'push',
+          message: `Incremental push: ${r.success} row(s) landed mid-product (${_incrementalSent.size} sent so far this run) — work is now safe from a claim timeout or SW restart.` });
       }
     }
   } catch (e) {
     // Non-fatal by design: the completion-time push and the pending-push
     // retry queue remain the backstop. Don't let a blip abort the run.
-    pushLog(`Incremental push failed (will retry at product completion): ${e.message}`, 'warn');
+    bufferActivity({ level: 'warn', source: 'push',
+      message: `Incremental push failed (will retry at product completion): ${e.message}` });
   } finally {
     _incrementalInFlight = false;
   }
