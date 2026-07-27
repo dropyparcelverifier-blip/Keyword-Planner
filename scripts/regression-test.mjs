@@ -2933,6 +2933,26 @@ async function run() {
   // ── Unattended-worker behaviour ───────────────────────────────────────
   // A worker shares the machine with a human. It must not grab focus, and
   // the operator should decide whether the screen may sleep.
+  // A STOPPED worker must still heartbeat.
+  //
+  // The heartbeat sat BELOW `if (!state.workerArmed) return;`, so the moment
+  // a Stop was broadcast every worker vanished from the fleet table — not
+  // idle, not stopped, simply absent. Seven workers going silent in the same
+  // second is indistinguishable from seven crashes, and it sent this
+  // investigation chasing dead service workers more than once. "Idle by
+  // instruction" and "crashed" are the two states an operator most needs to
+  // tell apart, and this made them identical.
+  {
+    const tick = (bgSpiral.match(/async function workerAutoPollTick\(\)[\s\S]*?\n\}/) || [''])[0];
+    assert(tick.length > 0, 'HEARTBEAT.1 located workerAutoPollTick');
+    const idxArm = tick.indexOf('state.workerArmed) return');
+    const idxBeat = tick.indexOf('sendWorkerHeartbeat(state.workerId,');
+    assert(idxBeat > -1, 'HEARTBEAT.2 the roster heartbeat is in the autopoll tick');
+    assert(idxArm > -1,  'HEARTBEAT.3 claiming is still gated on the arm flag');
+    assert(idxBeat < idxArm,
+      'HEARTBEAT.4 the heartbeat fires BEFORE the arm check — a stopped worker must still report in');
+  }
+
   assert(/state\.allowFocusSteal = runOpts\.allowFocusSteal === true/.test(bgSpiral),
     'UNATTENDED.1 focus stealing is opt-in');
   assert(/if \(!state\.allowFocusSteal\)[\s\S]{0,400}suppressed: true/.test(bgSpiral),

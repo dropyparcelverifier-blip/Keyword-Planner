@@ -740,14 +740,23 @@ async function _doAutoConnectWorker(msg = {}) {
 async function workerAutoPollTick() {
   try {
     await coldStart;
-    // Only run if armed + has identity + not currently running.
-    if (!state.workerArmed) return;
+    // Identity is all the heartbeat needs.
     if (!state.workerId) return;
     // Fire the worker roster heartbeat FIRST — before any of the early
     // returns below. Even armed-idle workers must show as online in the
     // manager fleet; without this, workers that never claim (empty
     // queue) appear as offline forever. MAC + hostname come along so
     // the manager can Wake-on-LAN this PC later.
+    //
+    // This comment was already here and the code did the opposite: the
+    // `workerArmed` check sat ABOVE it, so a worker that had been Stopped
+    // returned before ever heartbeating and vanished from the fleet
+    // entirely. The whole fleet going silent the instant a Stop was
+    // broadcast looked exactly like seven crashed workers, and it sent this
+    // investigation chasing dead service workers and stalled engines more
+    // than once. A stopped worker is still ONLINE — it is just not working,
+    // which is precisely the state an operator most needs to see.
+    // The arm check now guards only the claiming logic further down.
     (async () => {
       try {
         const d = await chrome.storage.local.get(['adbrainWorkerMac', 'adbrainWorkerHostname']);
@@ -774,6 +783,11 @@ async function workerAutoPollTick() {
         }).catch(() => {});
       } catch { sendWorkerHeartbeat(state.workerId).catch(() => {}); }
     })();
+    // Everything below CLAIMS work, so it stays gated on the arm flag. The
+    // heartbeat above deliberately is not: a Stopped worker must still
+    // report in, or the operator cannot tell "idle by instruction" from
+    // "crashed".
+    if (!state.workerArmed) return;
     if (state.running) return;
     if (state.starting) return;
     if (state.resumeInFlight) return;
