@@ -2539,7 +2539,11 @@ async function run() {
   assert(/function isOnIdeasPage\(\)[\s\S]{0,220}getResultsButtonTexts/.test(kpJs),
     'KP-MODAL.4 pane detection keys off its controls, not the URL');
 
-  assert(/expected \/ideas\/new but the page is on/.test(kpJs), 'KP-FIX.4 NAV error reports the actual landing path');
+  // Both failure branches must name the page we actually landed on —
+  // the wording differs (failed click on the hub vs a genuine redirect)
+  // but neither may report a bare "click strategies exhausted" again.
+  assert(/would not open on "\$\{landedOn\}"/.test(kpJs),          'KP-FIX.4a hub failure names the landing path');
+  assert(/but the page is on "\$\{landedOn\}"/.test(kpJs),         'KP-FIX.4b redirect failure names the landing path');
   assert(/const landedOn = location\.pathname \+ location\.search/.test(kpJs), 'KP-FIX.5 landing path captured from the live page');
   assert(/card did not appear[\s\S]{0,120}location\.pathname/.test(kpJs), 'KP-FIX.6 card-timeout warning also reports the page');
   // CLIP: surface the ACTUAL init/embed failure reason instead of '?'.

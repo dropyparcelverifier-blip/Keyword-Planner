@@ -600,7 +600,27 @@
         const { el, why } = candidates[i];
         const desc = `<${el.tagName?.toLowerCase()}>${el.getAttribute?.('role') ? `[role=${el.getAttribute('role')}]` : ''} "${(el.innerText || el.textContent || '').trim().slice(0, 40)}" (${why})`;
         kpLog(`click attempt ${i + 1}/${candidates.length}: ${desc}`);
-        await aggressiveClick(el);
+        // Click the SAME element more than once before giving up on it.
+        //
+        // This click is a race, not a wrong target: the card renders, and its
+        // handler attaches some time later. A click that lands in that gap
+        // does nothing at all — no error, no ripple, nothing to detect — and
+        // with only one candidate the loop abandoned the element after a
+        // single try. That is why it succeeded roughly one time in three,
+        // and why a human clicking a second later always worked.
+        //
+        // Re-clicking is safe: if the first click DID register, the pane is
+        // already open and the check below short-circuits before we click
+        // again. Worst case on an already-open pane is a no-op click on a
+        // card that is now behind a modal.
+        const CLICK_TRIES = 3;
+        let clicked = 0;
+        while (clicked < CLICK_TRIES && !isOnIdeasPage()) {
+          clicked++;
+          if (clicked > 1) kpLog(`re-clicking ${why} (try ${clicked}/${CLICK_TRIES}) — handler may not have attached yet`);
+          await aggressiveClick(el);
+          if (clicked < CLICK_TRIES) await humanPause(2200, 0.25);
+        }
         // WAIT for the pane, don't glance at it once.
         //
         // "Discover new keywords" opens as a MODAL on /home — the URL never
@@ -663,8 +683,19 @@
       // no billing) are the common cause — Google bounces them to the hub
       // or an onboarding page instead of serving the ideas pane.
       const landedOn = location.pathname + location.search;
-      kpLog(`click strategies failed — Google redirected us off /ideas/new to "${landedOn}"; signalling engine to re-navigate`, 'warn');
-      throw new Error(`KP_NEEDS_FRESH_NAV: click strategies exhausted; expected /ideas/new but the page is on "${landedOn}" — Google redirected us off the ideas pane (common when the Ads account is in an onboarding/restricted state with no campaigns or billing)`);
+      // Don't claim a redirect that did not happen. The engine now navigates
+      // to the operator's own KP page (the hub) first, so being on /home is
+      // the EXPECTED starting point, not evidence that Google bounced us.
+      // Saying "redirected off /ideas/new" there sent this investigation
+      // chasing an account-restriction theory for hours when the real
+      // problem was that the click never registered.
+      const onHub = /\/aw\/keywordplanner\/(home|overview)?$/.test(location.pathname)
+                 || /\/aw\/keywordplanner\/home/.test(location.pathname);
+      const why = onHub
+        ? `the Discover card would not open on "${landedOn}" — the click did not register (handler may not have attached, or Google requires a real user gesture here)`
+        : `expected the ideas pane but the page is on "${landedOn}" — Google redirected us off it (common when the Ads account is in an onboarding/restricted state with no campaigns or billing)`;
+      kpLog(`click strategies failed — ${why}; signalling engine to re-navigate`, 'warn');
+      throw new Error(`KP_NEEDS_FRESH_NAV: click strategies exhausted; ${why}`);
     }
 
     // ----- Manual fallback -----
