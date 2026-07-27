@@ -189,9 +189,22 @@ try {
         $selfPath = $MyInvocation.MyCommand.Path
         $current  = ''
         if ($selfPath -and (Test-Path $selfPath)) { $current = Get-Content $selfPath -Raw }
-        # Only rewrite on a real difference, and never write an empty or
-        # obviously truncated file over a working watchdog.
-        if ($selfPath -and $rendered.Length -gt 500 -and $rendered -ne $current) {
+        # Compare NORMALISED text, not raw bytes.
+        #
+        # A raw comparison never matched and the watchdog rewrote itself on
+        # every single run — the log filled with "[self-update] watchdog
+        # script updated" every two minutes forever. Three reasons, any one
+        # of which is enough: the manager serves LF while Set-Content writes
+        # CRLF, Set-Content -Encoding utf8 prepends a BOM on Windows
+        # PowerShell 5.1, and Get-Content -Raw keeps a trailing newline the
+        # rendered string does not have. Normalising line endings, BOM and
+        # trailing whitespace compares what actually matters: the script.
+        # [string] cast on the BOM is required: Replace([char], '') binds to
+        # the Replace(char, char) overload and throws, because '' is not a
+        # char. That silently sent the comparison down the error path.
+        $bom = [string][char]0xFEFF
+        $norm = { param($t) if ($null -eq $t) { '' } else { $t.Replace($bom, '').Replace("`r`n", "`n").TrimEnd() } }
+        if ($selfPath -and $rendered.Length -gt 500 -and (& $norm $rendered) -ne (& $norm $current)) {
             Set-Content -Path $selfPath -Value $rendered -Encoding utf8
             Add-Log '[self-update] watchdog script updated from the manager; next run uses the new version'
         }
