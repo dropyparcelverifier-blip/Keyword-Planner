@@ -2513,6 +2513,23 @@ async function run() {
   // negative once there are several jsaction candidates.
   assert(/timeoutMs: isLast \? 12000 : 5000/.test(kpJs), 'KP-CLICK.5 wait is adaptive, full window only for the last candidate');
 
+  // The pane must be recognised by the DIALOG, not only by its fields.
+  // "Discover new keywords" is a modal whose seed input and Get-results
+  // button mount a beat after the dialog. Keying only off those controls
+  // reported an open, on-screen pane as "did not surface", and the engine
+  // then re-navigated and closed the dialog it had just opened. Live logs
+  // showed 'shell hydrated (buttons:19 inputs:1 dialogs:3)' — the single
+  // input being the page's top search box, not the seed field.
+  assert(/for \(const d of document\.querySelectorAll\('\[role="dialog"\]/.test(kpJs),
+    'KP-PANE.1 a visible discover dialog counts as the pane');
+  assert(/if \(!visible\(d\)\) continue;/.test(kpJs),
+    'KP-PANE.2 hidden dialogs do not count — Google keeps several mounted');
+  assert(/seedDialogHeadings\.some\(h => txt\.includes\(h\)\)/.test(kpJs),
+    'KP-PANE.3 the dialog is matched by its heading');
+  // Safe only because the seed-input lookup already waits for the field.
+  assert(/waitFor\(findSeedInput, \{ timeoutMs: tmo/.test(kpJs),
+    'KP-PANE.4 seed-input lookup waits, so early dialog detection is safe');
+
   assert(/waitFor\(\(\) => isOnIdeasPage\(\)/.test(kpJs), 'KP-MODAL.1 waits for the pane instead of checking once');
   assert(/name: 'Discover-keywords pane'/.test(kpJs),     'KP-MODAL.2 the wait is named for diagnosis');
   assert(!/await humanPause\(2500, 0\.3\);\s*if \(isOnIdeasPage\(\)\)/.test(kpJs),

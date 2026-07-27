@@ -308,8 +308,28 @@
 
   // ----- flow -----
   function isOnIdeasPage() {
-    return !!(findByText('button, [role="button"]', SELECTORS.getResultsButtonTexts)
-              || findSeedInput());
+    // Fast paths: the controls we ultimately need.
+    if (findByText('button, [role="button"]', SELECTORS.getResultsButtonTexts)) return true;
+    if (findSeedInput()) return true;
+
+    // The pane itself, even before its fields mount.
+    //
+    // "Discover new keywords" opens as a modal, and its seed input and
+    // Get-results button appear a beat AFTER the dialog. Keying only off
+    // those controls meant a pane that was open and visible on screen was
+    // reported as "did not surface", the engine re-navigated, and it closed
+    // the dialog it had just opened. Live logs showed 'shell hydrated
+    // (buttons:19 inputs:1 dialogs:3)' — dialogs already in the DOM — with
+    // the single input being the page's top search box, not the seed field.
+    //
+    // Visibility is essential here: Google keeps several dialog nodes
+    // mounted-but-hidden, so a bare [role="dialog"] count proves nothing.
+    for (const d of document.querySelectorAll('[role="dialog"], material-dialog, .modal')) {
+      if (!visible(d)) continue;
+      const txt = (d.innerText || d.textContent || '').toLowerCase();
+      if (SELECTORS.seedDialogHeadings.some(h => txt.includes(h))) return true;
+    }
+    return false;
   }
 
   async function waitForReact(timeoutMs) {
