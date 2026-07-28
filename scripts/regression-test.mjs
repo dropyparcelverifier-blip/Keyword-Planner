@@ -2557,6 +2557,12 @@ async function run() {
   // frame settles it, and the debugger attachment we already make gives us
   // Page.captureScreenshot for free.
   assert(/Page\.captureScreenshot/.test(bgTrusted),      'SHOT.1 captures a frame via the existing attachment');
+  // Page.enable is required: captureScreenshot returns nothing without the
+  // Page domain enabled, which is why the first attempt produced zero frames
+  // while reporting no errors at all — the failure was completely silent.
+  assert(/Page\.enable/.test(bgTrusted),                 'SHOT.9 enables the Page domain before capturing');
+  assert(/action === 'captureFrame'/.test(bgTrusted),    'SHOT.10 on-demand frame capture exists');
+  assert(/kp-results-timeout/.test(kpJs),                'SHOT.11 a frame is taken when the results wait fails');
   assert(/shoot\('before-click'\)/.test(bgTrusted),      'SHOT.2 captures before the click');
   assert(/shoot\('after-click'\)/.test(bgTrusted),       'SHOT.3 captures after the click');
   assert(/async function postDebugScreenshot/.test(bgTrusted), 'SHOT.4 frames are shipped to the manager');

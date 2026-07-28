@@ -2276,6 +2276,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     } catch { /* diagnostics are best-effort */ }
   }
 
+  // Capture one frame of a worker's tab, on demand.
+  //
+  // Separate from trustedClick because the interesting moment is no longer
+  // the click — that now succeeds ~75% and rising. It is what Keyword
+  // Planner shows AFTER a seed is submitted: every open is followed by
+  // "Timed out waiting for KP results", so the pane accepts the seed and
+  // Google returns nothing for 165s. A frame at that moment distinguishes
+  // "Google is showing an error/upgrade prompt" from "results are there and
+  // our row selectors miss them" — which no DOM count can settle.
+  if (action === 'captureFrame') {
+    const tabId = sender.tab?.id;
+    if (!tabId) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+    (async () => {
+      let attached = false;
+      try {
+        await chrome.debugger.attach({ tabId }, '1.3');
+        attached = true;
+        await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
+        const r = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', { format: 'png' });
+        if (r?.data) await postDebugScreenshot(String(msg.label || 'frame'), `data:image/png;base64,${r.data}`);
+        sendResponse({ ok: !!r?.data });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      } finally {
+        if (attached) { try { await chrome.debugger.detach({ tabId }); } catch {} }
+      }
+    })();
+    return true;
+  }
+
   // Dispatch a TRUSTED mouse click via the DevTools protocol.
   //
   // Sends events Chrome treats as genuine user gestures — isTrusted, routed
@@ -2322,6 +2352,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const shoot = async (label) => {
           if (!msg.capture) return;
           try {
+            // Page.enable first. captureScreenshot returns nothing without
+            // the Page domain enabled, which is why the first attempt at
+            // this produced zero frames despite reporting no errors.
+            await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
             const r = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', { format: 'png' });
             if (r?.data) await postDebugScreenshot(label, `data:image/png;base64,${r.data}`);
           } catch { /* diagnostics must never break the click */ }

@@ -1069,6 +1069,18 @@
         return false;
       }, { timeoutMs: tableTimeoutMs, intervalMs: 700, name: 'KP results or no-results' });
     } catch (e) {
+      // Photograph the page at the moment the wait gave up.
+      //
+      // This is now the blocker: the pane opens reliably and the seed goes
+      // in, then Google returns nothing until the hard timeout. The DOM
+      // counts below say how many rows/grids/loaders exist but not WHAT is
+      // on screen — an "upgrade your account" prompt, an error, a spinner
+      // that never resolves, and a genuinely empty result set all look
+      // identical in those numbers. One frame separates them.
+      try {
+        await chrome.runtime.sendMessage({ action: 'captureFrame', label: 'kp-results-timeout' });
+        kpLog('captured a frame of the page at the results timeout — see manager/debug-shots');
+      } catch { /* diagnostics are best-effort */ }
       // Soft-fail: if we have ANY rows, attempt a partial scrape instead of bailing.
       const rows = document.querySelectorAll('[role="row"], tr, material-row').length;
       const dump = {
