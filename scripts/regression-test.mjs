@@ -2517,6 +2517,25 @@ async function run() {
   // So every spatial click landed on the picture in the middle of the card.
   // A human clicks the LABEL, and the label is also stable across layout
   // changes in a way that centre-of-bounding-box is not.
+  // 50 forensic samples from the fleet: 49 failures, and in EVERY one the
+  // point being clicked was occupied by something else —
+  //   35x <svg>                    (the card's icon sits dead centre)
+  //   14x <ipl-progress-indicator> (still hydrating; spinner covers it)
+  // The single success was the one sample where neither was in the way.
+  // Dispatching on a covered element is not a click a user could make: the
+  // event goes to our node while a real one would route to whatever is on
+  // top, and Material treats the mismatch as nothing at all.
+  assert(/async function waitUntilClickable/.test(kpJs),
+    'KP-HIT.1 the hit-point is probed before dispatching');
+  assert(/hit === el \|\| el\.contains\(hit\) \|\| hit\.contains\(el\)/.test(kpJs),
+    'KP-HIT.2 the probe accepts the element, its descendants or its ancestors');
+  assert(/const landable = await waitUntilClickable\(el, 10000\)/.test(kpJs),
+    'KP-HIT.3 the click loop waits for a landable point');
+  assert(/if \(!landable\) \{ clicked = CLICK_TRIES; break; \}/.test(kpJs),
+    'KP-HIT.4 a click known to be swallowed is skipped, not fired');
+  assert(/this click would have been swallowed/.test(kpJs),
+    'KP-HIT.5 a blocked click point names its blocker');
+
   assert(/add\(headingEl, 'card-label-text'\)/.test(kpJs),
     'KP-TARGET.5 the card label is the first click candidate');
   assert(/el\.textContent \|\| ''\)\.length < \(best\.textContent/.test(kpJs),
@@ -2524,8 +2543,13 @@ async function run() {
   // Clearing the spinner once before the loop is not enough — KP re-renders
   // the card while hydrating, and a click through a spinner is inert and
   // indistinguishable from one that silently did nothing.
-  assert(/await waitForLoadingOverlayToClear\(6000\);\s*\n\s*await aggressiveClick\(el\);/.test(kpJs),
-    'KP-TARGET.7 the spinner is re-checked immediately before every click');
+  // The spinner check and the hit-point probe both sit inside the click
+  // loop, ahead of the dispatch — assert the ordering rather than adjacency,
+  // since the probe now sits between them.
+  assert(/await waitForLoadingOverlayToClear\(6000\);[\s\S]{0,600}await aggressiveClick\(el\);/.test(kpJs),
+    'KP-TARGET.7 the spinner is re-checked before every click');
+  assert(/waitForLoadingOverlayToClear\(6000\);[\s\S]{0,400}waitUntilClickable\(el/.test(kpJs),
+    'KP-TARGET.8 spinner clears first, then the hit-point is probed');
 
   assert(/if \(card\.contains\(hit\)\) \{/.test(kpJs),
     'KP-TARGET.1 a hit inside the card becomes the click target');
