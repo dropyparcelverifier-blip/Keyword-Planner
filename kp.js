@@ -508,6 +508,38 @@
     return hit;
   }
 
+  // Ask the background worker for a TRUSTED click at el's centre.
+  //
+  // This is the primary path for the Discover card. Synthetic events open it
+  // only intermittently — 48% one hour and 0% the next on identical code —
+  // because Chrome marks them isTrusted:false and Google's handler is free
+  // to ignore them. Input.dispatchMouseEvent via the DevTools protocol
+  // produces an event the compositor routes exactly like a physical click,
+  // which is why a human has never failed to open this card.
+  //
+  // Returns false if the background could not do it (permission missing,
+  // debugger busy, tab gone), so the caller still has the synthetic path.
+  async function trustedClick(el) {
+    if (!el) return false;
+    try {
+      el.scrollIntoView({ block: 'center' });
+      await humanPause(220);
+      const r = el.getBoundingClientRect();
+      if (!(r.width > 0 && r.height > 0)) return false;
+      // CDP takes CSS pixels in viewport space, which is exactly what
+      // getBoundingClientRect returns — no devicePixelRatio conversion.
+      const x = Math.round(r.left + r.width / 2);
+      const y = Math.round(r.top + r.height / 2);
+      const resp = await chrome.runtime.sendMessage({ action: 'trustedClick', x, y });
+      if (resp?.ok) { kpLog(`trusted click dispatched at (${x}, ${y}) via DevTools protocol`); return true; }
+      kpLog(`trusted click unavailable (${resp?.error || 'no response'}) — falling back to synthetic events`, 'warn');
+      return false;
+    } catch (e) {
+      kpLog(`trusted click failed (${e.message}) — falling back to synthetic events`, 'warn');
+      return false;
+    }
+  }
+
   async function aggressiveClick(el) {
     if (!el) return;
     el.scrollIntoView({ block: 'center' });
@@ -732,7 +764,12 @@
           if (target !== el) {
             kpLog(`dispatching on <${target.tagName?.toLowerCase()}> — the element actually on top at ${why}'s centre (a real click lands here and bubbles up)`);
           }
-          await aggressiveClick(target);
+          // Trusted click first; synthetic only if the DevTools path is
+          // unavailable. Ordering matters: the synthetic burst can leave the
+          // card in a half-hovered state, so trying it first would make the
+          // trusted click less representative of a clean user gesture.
+          const wasTrusted = await trustedClick(target);
+          if (!wasTrusted) await aggressiveClick(target);
           if (clicked < CLICK_TRIES) await humanPause(2200, 0.25);
         }
         // WAIT for the pane, don't glance at it once.

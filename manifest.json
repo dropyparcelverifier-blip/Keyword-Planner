@@ -14,7 +14,8 @@
     "offscreen",
     "search",
     "alarms",
-    "power"
+    "power",
+    "debugger"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -36,12 +37,18 @@
         "https://www.google.co.in/search*",
         "https://www.google.co.uk/search*"
       ],
-      "js": ["serp-reader.js"],
+      "js": [
+        "serp-reader.js"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://ads.google.com/aw/keywordplanner/*"],
-      "js": ["kp.js"],
+      "matches": [
+        "https://ads.google.com/aw/keywordplanner/*"
+      ],
+      "js": [
+        "kp.js"
+      ],
       "run_at": "document_idle"
     },
     {
@@ -49,21 +56,35 @@
         "https://www.amazon.in/*",
         "https://www.amazon.com/*"
       ],
-      "js": ["amazon-reader.js"],
+      "js": [
+        "amazon-reader.js"
+      ],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["lib/xlsx.mjs", "lib/transformers.min.js"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "lib/xlsx.mjs",
+        "lib/transformers.min.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     },
     {
-      "resources": ["dashboard.html", "dashboard.js"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "dashboard.html",
+        "dashboard.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ],
   "sandbox": {
-    "pages": ["sandbox.html"]
+    "pages": [
+      "sandbox.html"
+    ]
   }
 }

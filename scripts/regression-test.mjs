@@ -2529,6 +2529,34 @@ async function run() {
   // browser would route a real click to — and let it bubble. The icon under
   // the cursor is not an obstruction; it is where a user's click lands.
   // Refusing to click it (my first attempt) produced 16 skips and 0 opens.
+  // ── Trusted click (DevTools protocol) ────────────────────────────────
+  // Synthetic events open the Discover card only intermittently: measured
+  // over the only window where BOTH outcomes were logged, the rate swung
+  // 48% -> 0% on IDENTICAL code, one hour apart. The variable is Google's
+  // page state, not our targeting, and no choice of element fixes an
+  // intermittent rejection of isTrusted:false events. A human clicking the
+  // same pixel has never failed. Input.dispatchMouseEvent produces events
+  // the compositor routes exactly like a physical click.
+  const manifestJson = JSON.parse(readFileSync(resolve(REPO, 'manifest.json'), 'utf-8'));
+  // Read background.js locally: bgSpiral is declared further down this file.
+  const bgTrusted = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
+  assert(manifestJson.permissions.includes('debugger'), 'TRUSTED.1 debugger permission declared');
+  assert(/action === 'trustedClick'/.test(bgTrusted),    'TRUSTED.2 background handles trustedClick');
+  assert(/Input\.dispatchMouseEvent/.test(bgTrusted),    'TRUSTED.3 uses the DevTools input domain');
+  assert(/type: 'mouseMoved'/.test(bgTrusted),           'TRUSTED.4 moves before pressing (Material tracks hover)');
+  assert(/type: 'mouseReleased'/.test(bgTrusted),        'TRUSTED.5 releases as well as presses');
+  // A stuck attachment leaves the "being debugged" banner up and blocks
+  // DevTools for whoever uses the machine next.
+  assert(/finally \{[\s\S]{0,200}chrome\.debugger\.detach/.test(bgTrusted),
+    'TRUSTED.6 detaches even when the click throws');
+  assert(/async function trustedClick\(el\)/.test(kpJs), 'TRUSTED.7 content script requests a trusted click');
+  assert(/const wasTrusted = await trustedClick\(target\);\s*\n\s*if \(!wasTrusted\) await aggressiveClick\(target\);/.test(kpJs),
+    'TRUSTED.8 trusted first, synthetic only as fallback');
+  // getBoundingClientRect is already CSS-pixel viewport space, which is what
+  // CDP expects — converting by devicePixelRatio would land the click wrong
+  // on any HiDPI worker.
+  assert(/no devicePixelRatio conversion/.test(kpJs),    'TRUSTED.9 coordinates are documented as CSS pixels');
+
   assert(/function topmostAt\(el\)/.test(kpJs),          'KP-HIT.1 resolves the topmost element at the target centre');
   assert(/const target = topmostAt\(el\) \|\| el;/.test(kpJs), 'KP-HIT.2 the click is dispatched there, with a fallback');
   assert(/await aggressiveClick\(target\);/.test(kpJs),  'KP-HIT.3 the resolved target is what gets clicked');
@@ -2548,10 +2576,18 @@ async function run() {
   // The spinner check and the hit-point probe both sit inside the click
   // loop, ahead of the dispatch — assert the ordering rather than adjacency,
   // since the probe now sits between them.
-  assert(/await waitForLoadingOverlayToClear\(6000\);[\s\S]{0,1400}await aggressiveClick\(target\);/.test(kpJs),
-    'KP-TARGET.7 the spinner is re-checked before every click');
-  assert(/waitForLoadingOverlayToClear\(6000\);[\s\S]{0,1200}topmostAt\(el\)/.test(kpJs),
-    'KP-TARGET.8 spinner clears first, then the topmost element is resolved');
+  // Assert ORDERING by index, not by a regex distance window. The window
+  // version broke twice as comments grew between the two calls, which is a
+  // property of the prose rather than of the code — exactly the kind of
+  // assertion that fails for the wrong reason and trains you to widen it.
+  {
+    const iSpinner = kpJs.indexOf('await waitForLoadingOverlayToClear(6000);');
+    const iTop     = kpJs.indexOf('const target = topmostAt(el) || el;');
+    const iClick   = kpJs.indexOf('await trustedClick(target);');
+    assert(iSpinner > -1 && iTop > -1 && iClick > -1, 'KP-TARGET.7a all three click-loop steps are present');
+    assert(iSpinner < iTop,   'KP-TARGET.7 the spinner is re-checked before every click');
+    assert(iTop < iClick,     'KP-TARGET.8 spinner clears, then the topmost element is resolved, then it is clicked');
+  }
 
   assert(/if \(card\.contains\(hit\)\) \{/.test(kpJs),
     'KP-TARGET.1 a hit inside the card becomes the click target');

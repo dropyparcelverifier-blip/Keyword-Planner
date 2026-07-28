@@ -2261,6 +2261,55 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // KP's manual-fallback: when synthetic clicks fail, the content script asks
   // background to bring its tab to the foreground so the user can click it.
+  // Dispatch a TRUSTED mouse click via the DevTools protocol.
+  //
+  // Synthetic events (MouseEvent, el.click(), keyboard activation) open the
+  // KP Discover card only intermittently. Measured over the only period
+  // where both outcomes were logged, the rate swung between 48% and 0% on
+  // IDENTICAL code, one hour apart — so the variable is Google's page state,
+  // not our targeting, and no amount of choosing a different element fixes
+  // an intermittent rejection of untrusted events. A human clicking the same
+  // pixel has never failed.
+  //
+  // Input.dispatchMouseEvent produces events Chrome treats as real user
+  // gestures — isTrusted, routed by the compositor exactly as a physical
+  // click would be. That is the one thing known to work every time.
+  //
+  // Deliberately scoped: attach, click, detach, all within one call. No
+  // standing attachment, so the "being debugged" banner appears only for the
+  // moment of the click rather than for the life of the run.
+  if (action === 'trustedClick') {
+    const tabId = sender.tab?.id;
+    const { x, y } = msg || {};
+    if (!tabId || !Number.isFinite(x) || !Number.isFinite(y)) {
+      sendResponse({ ok: false, error: 'tabId + numeric x/y required' });
+      return false;
+    }
+    (async () => {
+      let attached = false;
+      try {
+        await chrome.debugger.attach({ tabId }, '1.3');
+        attached = true;
+        const base = { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 };
+        // Move first: Material components track hover state, and a press
+        // with no preceding move can be discarded as spurious.
+        await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent',
+          { type: 'mouseMoved', x, y, buttons: 0 });
+        await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', base);
+        await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent',
+          { ...base, type: 'mouseReleased', buttons: 0 });
+        sendResponse({ ok: true });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      } finally {
+        // Detach even on failure — a stuck attachment leaves the banner up
+        // and blocks DevTools for whoever uses this machine next.
+        if (attached) { try { await chrome.debugger.detach({ tabId }); } catch {} }
+      }
+    })();
+    return true;   // async sendResponse
+  }
+
   if (action === 'activateMyTab') {
     // Focus stealing is OFF by default.
     //
