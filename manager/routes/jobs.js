@@ -503,7 +503,45 @@ function resumeState({ res, url, ctx }) {
   });
 }
 
+// Diagnostic screenshots from a worker's browser.
+//
+// Added because the KP Discover click could not be diagnosed from selectors
+// alone: 22 TRUSTED clicks (DevTools protocol, indistinguishable from a
+// physical click) were dispatched with no errors and the pane never opened.
+// That ruled out isTrusted and left two possibilities no log could separate
+// — the coordinates are not over the card, or the pane opens and detection
+// misses it. A picture at the moment of the click answers both.
+//
+// Kept deliberately small: newest N only, disk-backed rather than in the DB
+// so the activity log is not flooded with megabyte data URIs.
+const SHOT_KEEP = 40;
+
+async function saveScreenshot({ req, res, ctx }) {
+  const { send, readJson } = ctx;
+  const b = await readJson(req);
+  const dataUrl = String(b.dataUrl || '');
+  if (!dataUrl.startsWith('data:image/')) return send(res, 400, { ok: false, error: 'dataUrl (image) required' });
+  const fs = require('fs'), path = require('path');
+  const dir = path.join(__dirname, '..', 'debug-shots');
+  try {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+    const safe = (s) => String(s || 'unknown').replace(/[^\w.-]/g, '_').slice(0, 40);
+    const name = `${safe(b.workerId)}-${safe(b.label)}-${Date.now()}.png`;
+    fs.writeFileSync(path.join(dir, name), Buffer.from(b64, 'base64'));
+    // Prune oldest.
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.png'))
+      .map(f => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }))
+      .sort((a, b2) => b2.t - a.t);
+    for (const old of files.slice(SHOT_KEEP)) { try { fs.unlinkSync(path.join(dir, old.f)); } catch {} }
+    return send(res, 200, { ok: true, saved: name, kept: Math.min(files.length, SHOT_KEEP) });
+  } catch (e) {
+    return send(res, 500, { ok: false, error: e.message });
+  }
+}
+
 function register(router) {
+  router.post('/api/debug/screenshot',        saveScreenshot);
   router.get ('/api/jobs/round-progress',     roundProgress);
   router.get ('/api/jobs/resume-state',       resumeState);
   router.post('/api/jobs/claim',              claim);

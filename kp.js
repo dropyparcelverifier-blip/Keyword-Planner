@@ -530,8 +530,19 @@
       // getBoundingClientRect returns — no devicePixelRatio conversion.
       const x = Math.round(r.left + r.width / 2);
       const y = Math.round(r.top + r.height / 2);
-      const resp = await chrome.runtime.sendMessage({ action: 'trustedClick', x, y });
-      if (resp?.ok) { kpLog(`trusted click dispatched at (${x}, ${y}) via DevTools protocol`); return true; }
+      // Capture a before/after frame so the coordinate can be checked against
+      // what is actually on screen. 22 trusted clicks opened nothing, which
+      // ruled out isTrusted and left two possibilities selectors cannot
+      // separate: the point is not over the card, or the pane opens and
+      // detection misses it.
+      const resp = await chrome.runtime.sendMessage({ action: 'trustedClick', x, y, capture: true });
+      if (resp?.ok) {
+        // Log the geometry alongside the click so the screenshot can be
+        // correlated: if scrollY is non-zero and the rect sits offscreen,
+        // the coordinate is the bug rather than the click.
+        kpLog(`trusted click at (${x}, ${y}) — rect=${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)} scroll=${Math.round(window.scrollX)},${Math.round(window.scrollY)} viewport=${window.innerWidth}x${window.innerHeight}`);
+        return true;
+      }
       kpLog(`trusted click unavailable (${resp?.error || 'no response'}) — falling back to synthetic events`, 'warn');
       return false;
     } catch (e) {

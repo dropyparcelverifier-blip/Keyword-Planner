@@ -2259,17 +2259,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
-  // KP's manual-fallback: when synthetic clicks fail, the content script asks
-  // background to bring its tab to the foreground so the user can click it.
+  // Ship a diagnostic frame to the manager. Disk-backed there (newest N
+  // only) so megabyte data URIs never reach the activity log.
+  async function postDebugScreenshot(label, dataUrl) {
+    try {
+      const d = await chrome.storage.local.get(['adbrainManagerUrl', 'adbrainManagerToken']);
+      const base = String(d.adbrainManagerUrl || '').trim().replace(/\/+$/, '');
+      if (!base) return;
+      const headers = { 'Content-Type': 'application/json' };
+      const tok = String(d.adbrainManagerToken || '').trim();
+      if (tok) headers['X-Manager-Token'] = tok;
+      await fetch(base + '/api/debug/screenshot', {
+        method: 'POST', headers,
+        body: JSON.stringify({ workerId: state.workerId, label, dataUrl }),
+      });
+    } catch { /* diagnostics are best-effort */ }
+  }
+
   // Dispatch a TRUSTED mouse click via the DevTools protocol.
   //
-  // Synthetic events (MouseEvent, el.click(), keyboard activation) open the
-  // KP Discover card only intermittently. Measured over the only period
-  // where both outcomes were logged, the rate swung between 48% and 0% on
-  // IDENTICAL code, one hour apart — so the variable is Google's page state,
-  // not our targeting, and no amount of choosing a different element fixes
-  // an intermittent rejection of untrusted events. A human clicking the same
-  // pixel has never failed.
+  // Sends events Chrome treats as genuine user gestures — isTrusted, routed
+  // by the compositor exactly as a physical click would be.
+  //
+  // NOTE: this did NOT fix the KP Discover card. 22 trusted clicks were
+  // dispatched with no errors and the pane never opened, which disproves the
+  // theory it was built on (that Google was rejecting untrusted events).
+  // Kept because a real gesture is still the most faithful thing to send,
+  // and because the attachment gives us Page.captureScreenshot — the frames
+  // are what finally make this diagnosable. The remaining candidates are
+  // that the coordinate is not over the card, or that the pane opens and
+  // isOnIdeasPage misses it; a before/after frame separates the two.
   //
   // Input.dispatchMouseEvent produces events Chrome treats as real user
   // gestures — isTrusted, routed by the compositor exactly as a physical
@@ -2295,9 +2314,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // with no preceding move can be discarded as spurious.
         await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent',
           { type: 'mouseMoved', x, y, buttons: 0 });
+        // Screenshot BEFORE and AFTER. 22 trusted clicks produced zero pane
+        // opens, which ruled out isTrusted and left two possibilities no log
+        // could separate: the coordinate is not over the card, or the pane
+        // opens and detection misses it. A before/after pair answers both —
+        // and since we are already attached, it costs one extra round trip.
+        const shoot = async (label) => {
+          if (!msg.capture) return;
+          try {
+            const r = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', { format: 'png' });
+            if (r?.data) await postDebugScreenshot(label, `data:image/png;base64,${r.data}`);
+          } catch { /* diagnostics must never break the click */ }
+        };
+        await shoot('before-click');
         await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', base);
         await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent',
           { ...base, type: 'mouseReleased', buttons: 0 });
+        // Give the pane a moment to render before the second frame.
+        await new Promise(r => setTimeout(r, 2500));
+        await shoot('after-click');
         sendResponse({ ok: true });
       } catch (e) {
         sendResponse({ ok: false, error: e?.message || String(e) });

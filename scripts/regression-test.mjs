@@ -2550,6 +2550,22 @@ async function run() {
   assert(/finally \{[\s\S]{0,200}chrome\.debugger\.detach/.test(bgTrusted),
     'TRUSTED.6 detaches even when the click throws');
   assert(/async function trustedClick\(el\)/.test(kpJs), 'TRUSTED.7 content script requests a trusted click');
+  // Diagnostic frames. Trusted clicks alone did NOT open the pane — 22
+  // dispatched, 0 opens — which disproved the isTrusted theory and left two
+  // possibilities selectors cannot separate: the coordinate is not over the
+  // card, or the pane opens and isOnIdeasPage misses it. A before/after
+  // frame settles it, and the debugger attachment we already make gives us
+  // Page.captureScreenshot for free.
+  assert(/Page\.captureScreenshot/.test(bgTrusted),      'SHOT.1 captures a frame via the existing attachment');
+  assert(/shoot\('before-click'\)/.test(bgTrusted),      'SHOT.2 captures before the click');
+  assert(/shoot\('after-click'\)/.test(bgTrusted),       'SHOT.3 captures after the click');
+  assert(/async function postDebugScreenshot/.test(bgTrusted), 'SHOT.4 frames are shipped to the manager');
+  assert(/if \(!msg\.capture\) return;/.test(bgTrusted), 'SHOT.5 capture is opt-in per call, not always on');
+  const jobsShot = readFileSync(resolve(REPO, 'manager/routes/jobs.js'), 'utf-8');
+  assert(/\/api\/debug\/screenshot/.test(jobsShot),      'SHOT.6 manager endpoint registered');
+  assert(/SHOT_KEEP/.test(jobsShot),                     'SHOT.7 oldest frames are pruned');
+  assert(/scroll=\$\{Math\.round\(window\.scrollX\)\}/.test(kpJs),
+    'SHOT.8 click geometry is logged so the frame can be correlated');
   assert(/const wasTrusted = await trustedClick\(target\);\s*\n\s*if \(!wasTrusted\) await aggressiveClick\(target\);/.test(kpJs),
     'TRUSTED.8 trusted first, synthetic only as fallback');
   // getBoundingClientRect is already CSS-pixel viewport space, which is what
