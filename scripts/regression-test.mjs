@@ -2718,19 +2718,32 @@ async function run() {
     const tabs = new Map(); const wins = new Map();
     let nextId = 1;
     const sessionStore = {};
+    // Listener registries. The adoption fix hangs off tabs.onCreated, so a
+    // fake without events would silently skip the very behaviour under test.
+    let onCreated = [], onRemoved = [];
+    const fire = (ls, arg) => { for (const l of ls) l(arg); };
     const fakeChrome = {
       tabs: {
-        create: async ({ url, windowId, active }) => {
-          const id = nextId++; tabs.set(id, { id, url, windowId, active: !!active }); return tabs.get(id);
+        onCreated: { addListener: l => onCreated.push(l) },
+        onRemoved: { addListener: l => onRemoved.push(l) },
+        create: async ({ url, windowId, active, openerTabId }) => {
+          const id = nextId++;
+          tabs.set(id, { id, url, windowId, active: !!active, openerTabId });
+          fire(onCreated, tabs.get(id));
+          return tabs.get(id);
         },
         get:    async id => { if (!tabs.has(id)) throw new Error('no tab'); return tabs.get(id); },
-        update: async (id, { url }) => { if (!tabs.has(id)) throw new Error('no tab'); tabs.get(id).url = url; },
-        remove: async id => { if (!tabs.has(id)) throw new Error('gone'); tabs.delete(id); },
+        update: async (id, { url, active }) => {
+          if (!tabs.has(id)) throw new Error('no tab');
+          const t = tabs.get(id); t.url = url;
+          if (active) { for (const o of tabs.values()) if (o.windowId === t.windowId) o.active = false; t.active = true; }
+        },
+        remove: async id => { if (!tabs.has(id)) throw new Error('gone'); tabs.delete(id); fire(onRemoved, id); },
       },
       windows: {
         getAll: async () => [...wins.values()],
         create: async ({ url, focused, state }) => {
-          const wid = nextId++; const t = { id: nextId++, url, windowId: wid };
+          const wid = nextId++; const t = { id: nextId++, url, windowId: wid, active: true };
           tabs.set(t.id, t); wins.set(wid, { id: wid, focused: !!focused, state });
           return { id: wid, tabs: [t] };
         },
@@ -2747,6 +2760,9 @@ async function run() {
     // Rebuild ONLY the module state — the browser (and session storage)
     // survives, which is precisely an MV3 service-worker recycle.
     const newWorker = () => {
+      // A recycle drops runtime-registered listeners too; the module must
+      // re-register them on the way back up or adoption dies after 30s idle.
+      onCreated = []; onRemoved = [];
       const fn = new Function('chrome', 'waitForNavigationComplete',
         `return (${workerSrc.replace(/^const Worker = /, '').replace(/;\s*$/, '')});`);
       return fn(fakeChrome, async () => {});
@@ -2755,11 +2771,17 @@ async function run() {
     let W = newWorker();
     await W.navigate('https://kp/1');
     assert(tabs.size === 1, `TABLIFE.1 first navigate opens exactly one tab (got ${tabs.size})`);
-    assert([...tabs.values()].every(t => !t.active), 'TABLIFE.2 the engine tab is never created active/focused');
+    // The engine owns its window now, so selecting the working tab inside it
+    // costs the operator nothing — and answers "which tab is it on?".
+    assert([...tabs.values()].every(t => t.active), 'TABLIFE.2 the working tab is selected in the engine window');
     assert([...wins.values()].every(w => !w.focused), 'TABLIFE.3 an engine-created window is never focused');
+    assert([...wins.values()].every(w => w.state === 'minimized'), 'TABLIFE.10 the engine window starts minimized');
 
+    const winBefore = [...wins.keys()][0];
     for (let i = 0; i < 15; i++) await W.navigate('https://kp/n' + i);
     assert(tabs.size === 1, `TABLIFE.4 16 navigations still leave one tab (got ${tabs.size})`);
+    assert([...wins.keys()][0] === winBefore && wins.size === 1,
+      'TABLIFE.11 navigation reuses the engine window rather than churning windows');
 
     // THE regression: recycle the service worker repeatedly. Before session
     // persistence this leaked one tab per recycle.
@@ -2772,15 +2794,34 @@ async function run() {
     await W.navigate('https://kp/after-crash');
     assert(tabs.size === 1, `TABLIFE.6 a killed tab is replaced, not duplicated (got ${tabs.size})`);
 
+    // THE new regression: tabs opened BY the page. Keyword Planner's account
+    // chooser and every target="_blank" SERP link do this. They were never in
+    // the owned set, so nothing ever closed them — the pile the operator kept
+    // seeing after the last fix.
+    const engineTab = W.getId();
+    for (let i = 0; i < 4; i++) await fakeChrome.tabs.create({ url: 'https://popup/' + i, openerTabId: engineTab });
+    assert(tabs.size === 5, `TABLIFE.12 harness sanity: page-opened tabs exist (got ${tabs.size})`);
+    await W.navigate('https://kp/after-popups');
+    assert(tabs.size === 1, `TABLIFE.13 page-opened child tabs are swept on the next navigate (got ${tabs.size})`);
+    // A tab with no engine ancestry is the operator's and must survive.
+    await fakeChrome.tabs.create({ url: 'https://operator/own', windowId: 9999 });
+    await W.navigate('https://kp/again');
+    assert([...tabs.values()].some(t => t.url === 'https://operator/own'),
+      'TABLIFE.14 a tab the engine did not spawn is left alone');
+    for (const t of [...tabs.values()]) if (t.url === 'https://operator/own') await fakeChrome.tabs.remove(t.id);
+
     // Cleanup must remove the tab AND any window the engine created.
     await W.close();
     assert(tabs.size === 0, `TABLIFE.7 close() removes the engine tab (got ${tabs.size})`);
     assert(wins.size === 0, `TABLIFE.8 close() removes windows the engine created (got ${wins.size})`);
 
-    // An operator's own window must never be touched.
+    // An operator's own window must never be touched — and, since the fix,
+    // never even borrowed: engine tabs must not land among their tabs.
     wins.set(9999, { id: 9999, focused: true });
     W = newWorker();
-    await W.navigate('https://kp/in-operator-window');
+    await W.navigate('https://kp/not-in-operator-window');
+    assert([...tabs.values()].every(t => t.windowId !== 9999),
+      'TABLIFE.15 the engine does not put tabs in the operator window');
     await W.close();
     assert(wins.has(9999), 'TABLIFE.9 a window the engine did not create is left alone');
   }
@@ -3079,8 +3120,14 @@ async function run() {
   const djOpts = readFileSync(resolve(REPO, 'modules/discovery-jobs.js'), 'utf-8');
   assert(/cfg\.keep_awake_level/.test(djOpts),  'UNATTENDED.5 keep_awake_level comes from manager config');
   assert(/cfg\.allow_focus_steal/.test(djOpts), 'UNATTENDED.6 allow_focus_steal comes from manager config');
-  // Engine tabs must never be created focused/active.
-  assert(!/tabs\.create\(\{ url, active: true/.test(kwDisc), 'UNATTENDED.7 engine tabs are never created active');
+  // The invariant is about FOCUS, not tab selection. Now that the engine owns
+  // its window it is free to select the working tab inside it — that is how
+  // the operator sees what is being worked on. What must never happen is that
+  // window taking the foreground.
+  assert(!/windows\.(create|update)\([\s\S]{0,80}focused: true/.test(kwDisc),
+    'UNATTENDED.7 the engine window is never focused');
+  assert(/chrome\.windows\.create\(\{ url, focused: false, state: 'minimized' \}\)/.test(kwDisc),
+    'UNATTENDED.8 the engine window is created minimized and unfocused');
   assert(/chrome\.windows\.create\(\{ url, focused: false, state: 'minimized' \}\)/.test(kwDisc),
     'UNATTENDED.8 an engine-created window is minimized and unfocused');
   // Tab ownership must survive a service-worker recycle, or every recycle
@@ -3109,7 +3156,17 @@ async function run() {
     'INCPUSH.9 manager upserts keywords so repeated pushes are idempotent');
 
   assert(kwDisc.includes('createWorkerTab'), 'TABWIN.1 engine routes tab creation through a helper');
-  assert(/chrome\.windows\.getAll\(\{ windowTypes: \['normal'\] \}\)/.test(kwDisc), 'TABWIN.2 binds to an existing normal window when one exists');
+  // TABWIN.2 was the opposite assertion — the engine used to borrow the
+  // operator's window, which is why its tabs showed up among theirs.
+  assert(!/windowTypes: \['normal'\]/.test(kwDisc), 'TABWIN.2 engine never borrows the operator window');
+  assert(/onCreated\.addListener[\s\S]{0,300}openerTabId/.test(kwDisc), 'TABWIN.5 tabs opened BY our tabs are adopted');
+  assert(/onRemoved[\s\S]{0,120}ownedTabs\.delete/.test(kwDisc),        'TABWIN.6 closed tabs drop out of the owned set');
+  assert(/keepWindows/.test(kwDisc),                                     'TABWIN.7 sweeping tabs can spare the engine window');
+  assert(/chrome\.tabs\.update\(tabId, \{ url, active: true \}\)/.test(kwDisc),
+    'TABWIN.8 the working tab is the selected tab inside the engine window');
+  // Create-then-sweep, not sweep-then-create: emptying the window closes it.
+  assert(/chrome\.tabs\.create\(\{ url, active: true, windowId: wid \}\)[\s\S]{0,300}closeOwned\(\{ except: t\.id, keepWindows: true \}\)/.test(kwDisc),
+    'TABWIN.9 replacement tab opens before the old ones are swept');
   assert(/chrome\.windows\.create\(\{ url, focused: false/.test(kwDisc), 'TABWIN.3 creates a window when none exists');
   assert(!/chrome\.tabs\.create\(\{ url, active: false \}\)/.test(kwDisc), 'TABWIN.4 no window-less tabs.create left in the engine');
 

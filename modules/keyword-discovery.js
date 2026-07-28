@@ -856,7 +856,35 @@ const Worker = (() => {
   const ownedWindows = new Set();
   let ownedLoaded = false;
 
+  // Adopt tabs that PAGES open, not us.
+  //
+  // The set above only ever held tabs the engine created, which is why tabs
+  // still piled up after the last fix: Keyword Planner's account chooser,
+  // Google's consent interstitials and every target="_blank" result link open
+  // a tab we never asked for and therefore never tracked or closed. Chrome
+  // stamps such a tab with openerTabId = the tab that spawned it, so anything
+  // descended from an engine tab is engine debris and ours to clean up.
+  //
+  // Adopt rather than close-on-sight: a click that legitimately navigates via
+  // a new tab (KP does this) must be allowed to finish. The next navigate()
+  // sweeps it, and the run's finally sweeps whatever is left.
+  let adoptionWired = false;
+  function wireAdoption() {
+    if (adoptionWired || !chrome.tabs?.onCreated) return;
+    adoptionWired = true;
+    chrome.tabs.onCreated.addListener((t) => {
+      if (t?.openerTabId == null || !ownedTabs.has(t.openerTabId)) return;
+      ownedTabs.add(t.id);
+      saveOwned();
+    });
+    // Stop the set growing without bound across a long run.
+    chrome.tabs.onRemoved?.addListener((id) => {
+      if (ownedTabs.delete(id)) saveOwned();
+    });
+  }
+
   async function loadOwned() {
+    wireAdoption();
     if (ownedLoaded) return;
     ownedLoaded = true;
     try {
@@ -875,13 +903,14 @@ const Worker = (() => {
     } catch { /* non-fatal — worst case we leak a tab after a recycle */ }
   }
 
-  async function closeOwned({ except = null } = {}) {
+  async function closeOwned({ except = null, keepWindows = false } = {}) {
     await loadOwned();
     for (const id of [...ownedTabs]) {
       if (id === except) continue;
       try { await chrome.tabs.remove(id); } catch { /* already gone */ }
       ownedTabs.delete(id);
     }
+    if (keepWindows) { await saveOwned(); return; }
     // Only close windows WE created, and only once they hold none of our
     // tabs — never touch a window the operator opened.
     for (const wid of [...ownedWindows]) {
@@ -901,22 +930,35 @@ const Worker = (() => {
   // window, so create() throws "No current window" and the whole round dies.
   // Live logs showed the Amazon Round failing exactly this way.
   //
-  // So: bind explicitly to a normal window if one exists, and otherwise make
-  // one. Minimized + unfocused because this is unattended background work on
-  // a machine someone may be using.
+  // So: the engine gets its OWN window and never borrows the operator's.
+  //
+  // It used to join whatever normal window existed, which is where both of the
+  // operator's complaints came from. Engine tabs appeared among their own tabs
+  // (so "it opens too many tabs" was literally true from where they sat), and
+  // the tab could not be made active to show what was being worked on without
+  // yanking the foreground away mid-typing. A dedicated window separates the
+  // two concerns: inside it we are free to mark the working tab active, and
+  // outside it the operator's windows are never touched. Created minimized and
+  // unfocused, so restoring it is a deliberate act — glance at progress when
+  // you want to, undisturbed otherwise.
   async function createWorkerTab(url) {
-    // Close whatever we had open first, so a new tab replaces the old one
-    // rather than joining it.
-    await closeOwned();
-    try {
-      const wins = await chrome.windows.getAll({ windowTypes: ['normal'] });
-      if (wins.length) {
-        const t = await chrome.tabs.create({ url, active: false, windowId: wins[0].id });
+    await loadOwned();
+    for (const wid of [...ownedWindows]) {
+      try {
+        await chrome.windows.get(wid);
+        // Open the replacement BEFORE sweeping the old tabs. Emptying a window
+        // makes Chrome close it, and closing it costs the next round a fresh
+        // window — which is the tab-churn the operator was watching.
+        const t = await chrome.tabs.create({ url, active: true, windowId: wid });
+        ownedTabs.add(t.id);
+        await closeOwned({ except: t.id, keepWindows: true });
         ownedTabs.add(t.id);
         await saveOwned();
         return t;
-      }
-    } catch { /* fall through to creating one */ }
+      } catch { ownedWindows.delete(wid); }
+    }
+    // No engine window yet (first round, or the operator closed it).
+    await closeOwned();
     const win = await chrome.windows.create({ url, focused: false, state: 'minimized' });
     const tab = win?.tabs?.[0];
     if (!tab) throw new Error('could not create a window for the engine tab');
@@ -941,7 +983,12 @@ const Worker = (() => {
         await closeOwned({ except: tabId });
         ownedTabs.add(tabId);
         await saveOwned();
-        await chrome.tabs.update(tabId, { url });
+        // active: true selects the tab WITHIN the engine's own minimized
+        // window — it does not raise that window or take focus from whatever
+        // the operator is doing. It is what makes "which tab is it working
+        // on?" answerable: restore the engine window and the live tab is the
+        // one showing.
+        await chrome.tabs.update(tabId, { url, active: true });
       } else {
         tabId = (await createWorkerTab(url)).id;
       }
