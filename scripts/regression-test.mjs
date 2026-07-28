@@ -2909,8 +2909,16 @@ async function run() {
     'FLEETCLAIM.1 nothing releases the whole fleet under the guise of releasing its own');
   assert(/releaseThisWorkerClaims[\s\S]{0,900}releaseByWorker\(state\.workerId\)/.test(bgRel),
     'FLEETCLAIM.2 self-release goes through release-by-worker');
-  assert(/b\.allClaims === true \? asked : Math\.max\(1, asked\)/.test(readFileSync(resolve(REPO, 'manager/routes/jobs.js'), 'utf-8')),
+  const jobsRouteSrc = readFileSync(resolve(REPO, 'manager/routes/jobs.js'), 'utf-8');
+  assert(/b\.allClaims === true \? asked : Math\.max\(CLAIM_FLOOR_MIN, asked\)/.test(jobsRouteSrc),
     'FLEETCLAIM.3 manager floors the stale cutoff unless allClaims is explicit');
+  // The floor must clear the claim heartbeat, or it reaps live work. Claims
+  // are heartbeated by a one-minute chrome.alarms tick that the browser may
+  // delay, so a one-minute floor is not a floor at all.
+  const floorMin = Number(/CLAIM_FLOOR_MIN = (\d+)/.exec(jobsRouteSrc)?.[1]);
+  assert(floorMin >= 3, `FLEETCLAIM.4 the floor clears the 1-min claim heartbeat with margin (got ${floorMin})`);
+  assert(/HEARTBEAT_ALARM, \{ periodInMinutes: 1/.test(bgRel),
+    'FLEETCLAIM.5 the claim heartbeat period the floor is sized against is still 1 minute');
   // The STALE reaper must NOT refund: there the attempt was genuinely spent
   // by a worker that died mid-SKU, and refunding would defeat the guard.
   const staleStmt = (srvFull.match(/releaseStale: db\.prepare\(`[^`]*`\)/) || [''])[0];

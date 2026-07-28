@@ -122,14 +122,19 @@ function reapStaleClaims(Q, now, cutoff) {
 async function releaseStale({ req, res, ctx }) {
   const { Q, send, readJson, now } = ctx;
   const b = await readJson(req);
-  // Floor the cutoff at one minute. staleMinutes = 0 means "released before
-  // now", i.e. EVERY claim in the fleet — which reads like "release mine" and
-  // is nothing of the sort. A worker restart wiped all six workers' claims
-  // that way. Releasing everything on purpose is still possible, but it has
-  // to be asked for by name; per-worker cleanup belongs on
-  // /api/jobs/release-by-worker.
+  // Floor the cutoff. staleMinutes = 0 means "released before now", i.e.
+  // EVERY claim in the fleet — which reads like "release mine" and is nothing
+  // of the sort. A worker restart wiped all six workers' claims that way.
+  // Releasing everything on purpose is still possible, but it has to be asked
+  // for by name; per-worker cleanup belongs on /api/jobs/release-by-worker.
+  //
+  // Three minutes, not one: claims are heartbeated by a chrome.alarms tick
+  // whose period is one minute and which the browser is free to delay. A
+  // one-minute floor therefore sits exactly on the heartbeat and reaps live
+  // work — it took five healthy claims the first time it ran.
+  const CLAIM_FLOOR_MIN = 3;
   const asked = Number.isFinite(b.staleMinutes) ? b.staleMinutes : 10;
-  const mins  = b.allClaims === true ? asked : Math.max(1, asked);
+  const mins  = b.allClaims === true ? asked : Math.max(CLAIM_FLOOR_MIN, asked);
   const r = reapStaleClaims(Q, now, now() - mins * 60000);
   return send(res, 200, { ok: true, ...r });
 }
