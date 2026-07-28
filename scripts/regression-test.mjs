@@ -240,7 +240,15 @@ async function run() {
   // ===== 11. RELEASE-STALE =====
   // Manually re-claim to test release-stale.
   await req('POST', '/api/jobs/claim', { workerId: 'ghost-worker', batchId: BATCH_A, limit: 1 });
-  const rel = await req('POST', '/api/jobs/release-stale', { staleMinutes: -1 });
+  // A sub-minute cutoff must NOT take a claim that was heartbeated seconds
+  // ago. Worker Stop used to call this with 0 to drop its own claims and took
+  // the whole fleet's with it — six workers kept processing SKUs they no
+  // longer held, and the dashboard showed three.
+  const relFloor = await req('POST', '/api/jobs/release-stale', { staleMinutes: 0 });
+  assertEq(relFloor.status, 200, '11.0 release-stale 200 for a 0-minute cutoff');
+  assertEq(relFloor.data.released, 0, '11.0b a 0-minute cutoff is floored and spares live claims');
+  // Releasing everything is still possible — but it has to be asked for.
+  const rel = await req('POST', '/api/jobs/release-stale', { staleMinutes: -1, allClaims: true });
   assertEq(rel.status, 200, '11.1 release-stale 200');
   assert(rel.data.released >= 1, '11.2 release-stale released the ghost claim');
 
@@ -2892,6 +2900,17 @@ async function run() {
   // four healthy SKUs with "exceeded 3 attempts (retry loop)".
   assert(/releaseByWorker:[\s\S]{0,260}attempts=MAX\(0, attempts-1\)/.test(srvFull),
     'REQUEUE-ATTEMPTS.7 release-by-worker refunds the attempt it did not use');
+
+  // A worker dropping ITS claims must scope by worker id. release-stale takes
+  // a cutoff, not an id, so calling it with 0 released every claim in the
+  // fleet — the "only 3 PCs running" symptom.
+  const bgRel = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
+  assert(!/releaseStaleJobs\(0\)/.test(bgRel),
+    'FLEETCLAIM.1 nothing releases the whole fleet under the guise of releasing its own');
+  assert(/releaseThisWorkerClaims[\s\S]{0,900}releaseByWorker\(state\.workerId\)/.test(bgRel),
+    'FLEETCLAIM.2 self-release goes through release-by-worker');
+  assert(/b\.allClaims === true \? asked : Math\.max\(1, asked\)/.test(readFileSync(resolve(REPO, 'manager/routes/jobs.js'), 'utf-8')),
+    'FLEETCLAIM.3 manager floors the stale cutoff unless allClaims is explicit');
   // The STALE reaper must NOT refund: there the attempt was genuinely spent
   // by a worker that died mid-SKU, and refunding would defeat the guard.
   const staleStmt = (srvFull.match(/releaseStale: db\.prepare\(`[^`]*`\)/) || [''])[0];

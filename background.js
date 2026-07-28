@@ -1365,7 +1365,16 @@ async function pollWorkerCommands() {
 // left 'stopped' workers showing '6 in-flight' on the dashboard and
 // blocked those SKUs from being picked up by an active worker.
 async function releaseThisWorkerClaims(reasonForLog) {
-  await releaseStaleJobs(0).catch(() => {});
+  // Scoped by worker id, NOT by a zero staleness cutoff.
+  //
+  // release-stale takes a staleness cutoff, not a worker id: a 0-minute
+  // cutoff means "every claim heartbeated before now", which is every claim
+  // IN THE FLEET. One worker stopping — or being restarted by a deploy —
+  // therefore yanked the jobs out from under all five of its peers, who kept
+  // working products they no longer held. The dashboard then showed three
+  // workers running instead of six, and those SKUs sat in pending waiting to
+  // be done twice.
+  await releaseByWorker(state.workerId).catch(() => {});
   state.claimedJobs = [];
   await chrome.storage.local.set({ [STORAGE_KEY_CLAIMED_JOBS]: [] }).catch(() => {});
   bufferActivity({ level: 'warn', source: 'cmd', message: `${reasonForLog} — released claims back to queue.` });
@@ -2480,7 +2489,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // Storage failed — release our claims so another worker can pick
           // them up (rather than letting them sit locked for 10 min).
           pushLog(`Storage persist failed (${e.message}) — releasing claims and aborting`, 'err');
-          await releaseStaleJobs(0).catch(() => {});  // 0 minutes = release ALL claims (will only hit those still 'claimed')
+          await releaseByWorker(state.workerId).catch(() => {});  // ours only — a 0-minute stale cutoff would release the whole fleet's
           state.claimedJobs = [];
           throw new Error(`Could not persist claim list: ${e.message}`);
         }
