@@ -436,8 +436,23 @@
     if (!hit) return card;
     // Spinner/overlay on top — click the card itself.
     if (isLoadingOverlay(hit)) return card;
-    // Hit is the card or a child of it — click the card.
-    if (hit === card || card.contains(hit)) return card;
+    // Hit is the card itself — nothing deeper to aim at.
+    if (hit === card) return card;
+    // Hit is a CHILD of the card: that is the element a real user click
+    // lands on, so it is the element we must dispatch on.
+    //
+    // This used to `return card` here, throwing the hit away and clicking
+    // the outer container instead. A genuine click fires on the deepest
+    // element under the cursor and BUBBLES UP; a synthetic click on the
+    // container never passes through that child at all, so any handler
+    // bound to it — or any handler that inspects event.target — never runs.
+    // The card duly reported "clicked" and the pane never opened, which is
+    // why a human clicking the same pixel always worked and the engine
+    // never did.
+    if (card.contains(hit)) {
+      kpLog(`spatial hit resolved to <${hit.tagName?.toLowerCase()}>${hit.getAttribute?.('role') ? `[role=${hit.getAttribute('role')}]` : ''}${hit.getAttribute?.('jsname') ? `[jsname=${hit.getAttribute('jsname')}]` : ''} inside the card — dispatching there, not on the container`);
+      return hit;
+    }
     // Some OTHER element covers the card — return it as the actual target.
     return hit;
   }
@@ -591,10 +606,56 @@
         const ja = a.getAttribute?.('jsaction') || '';
         if (ja.includes('click')) { add(a, 'jsaction-ancestor'); break; }
       }
+      // The TEXT first — this is where a human actually clicks.
+      //
+      // Forensics from the fleet showed the card's geometric centre is an
+      // <svg> icon (and sometimes an <ipl-progress-indicator> spinner), not
+      // the actionable region:
+      //   under-cursor=<svg>  target=<div>[role=button]  same=false
+      // So every spatial click landed on the picture in the middle of the
+      // card. Nobody clicks a card by aiming at its icon; they click the
+      // label. Finding the smallest element that carries the heading text
+      // reproduces that, and it is stable against layout changes in a way
+      // that centre-of-bounding-box is not.
+      const headingEl = (() => {
+        const wanted = SELECTORS.discoverCardTexts.map(t => t.toLowerCase());
+        let best = null;
+        for (const el of card.querySelectorAll('*')) {
+          const txt = (el.textContent || '').trim().toLowerCase();
+          if (!txt || txt.length > 80) continue;
+          if (!wanted.some(w => txt.includes(w))) continue;
+          if (!visible(el)) continue;
+          // Smallest match = the label itself rather than a wrapper.
+          if (!best || (el.textContent || '').length < (best.textContent || '').length) best = el;
+        }
+        return best;
+      })();
+      add(headingEl, 'card-label-text');
       add(card.querySelector?.('button, a[role="button"], a[href], [role="link"][tabindex], material-button, mat-button'), 'nested-clickable');
       add(findRealClickTarget(card), 'spatial-hit');
       add(card, 'card-container');
       kpLog(`${candidates.length} click candidate(s): ${candidates.map(c => c.why).join(', ')}`);
+      // One-line forensic dump of what we are about to click and what a real
+      // user click would actually land on. If a future attempt still fails,
+      // this says WHY without another round of guessing: whether our target
+      // is the element under the cursor, what it is, and whether anything is
+      // covering it.
+      try {
+        const cr = card.getBoundingClientRect();
+        const cx = cr.left + cr.width / 2, cy = cr.top + cr.height / 2;
+        const under = document.elementFromPoint(cx, cy);
+        const brief = (el) => el
+          ? `<${el.tagName?.toLowerCase()}>` +
+            (el.getAttribute?.('role')       ? `[role=${el.getAttribute('role')}]` : '') +
+            (el.getAttribute?.('jsname')     ? `[jsname=${el.getAttribute('jsname')}]` : '') +
+            (el.getAttribute?.('jsaction')   ? `[jsaction]` : '') +
+            (el.getAttribute?.('jscontroller') ? `[jsctl]` : '')
+          : '(none)';
+        const target = candidates[0]?.el;
+        kpLog(`click forensics: under-cursor=${brief(under)} target=${brief(target)} ` +
+              `same=${under === target} target-contains-hit=${!!(target && under && target.contains(under))} ` +
+              `card-rect=${Math.round(cr.width)}x${Math.round(cr.height)} dialogs=${document.querySelectorAll('[role="dialog"]').length}`);
+      } catch {}
       let opened = false;
       for (let i = 0; i < candidates.length && !opened; i++) {
         const { el, why } = candidates[i];
@@ -618,6 +679,13 @@
         while (clicked < CLICK_TRIES && !isOnIdeasPage()) {
           clicked++;
           if (clicked > 1) kpLog(`re-clicking ${why} (try ${clicked}/${CLICK_TRIES}) — handler may not have attached yet`);
+          // Re-check the spinner IMMEDIATELY before every click. Clearing it
+          // once before the loop is not enough: KP re-renders the card as it
+          // hydrates, and the forensics caught a click landing on
+          // <ipl-progress-indicator> — i.e. straight onto the spinner, where
+          // Material's handlers are inert. A click through a spinner is
+          // indistinguishable from a click that silently did nothing.
+          await waitForLoadingOverlayToClear(6000);
           await aggressiveClick(el);
           if (clicked < CLICK_TRIES) await humanPause(2200, 0.25);
         }

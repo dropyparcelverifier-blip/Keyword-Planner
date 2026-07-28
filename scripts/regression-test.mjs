@@ -2505,6 +2505,37 @@ async function run() {
   // fires the ripple and nothing else — every automated click was logged as
   // "click attempt 1/1" against it and never opened the pane, while the only
   // successes in the logs came from a human clicking.
+  // elementFromPoint returns the DEEPEST element under the cursor — exactly
+  // what a real click dispatches on, and bubbles up from. findRealClickTarget
+  // used to discard that hit and click the outer card container instead, so a
+  // synthetic click never passed through the child carrying the handler.
+  // That is why a human clicking the same pixel always worked and the engine
+  // never did: the card reported "clicked" and the pane never opened.
+  // Fleet forensics showed the card's geometric centre is an <svg> icon, and
+  // sometimes an <ipl-progress-indicator> spinner:
+  //   under-cursor=<svg> target=<div>[role=button] same=false
+  // So every spatial click landed on the picture in the middle of the card.
+  // A human clicks the LABEL, and the label is also stable across layout
+  // changes in a way that centre-of-bounding-box is not.
+  assert(/add\(headingEl, 'card-label-text'\)/.test(kpJs),
+    'KP-TARGET.5 the card label is the first click candidate');
+  assert(/el\.textContent \|\| ''\)\.length < \(best\.textContent/.test(kpJs),
+    'KP-TARGET.6 the SMALLEST text match wins (the label, not a wrapper)');
+  // Clearing the spinner once before the loop is not enough — KP re-renders
+  // the card while hydrating, and a click through a spinner is inert and
+  // indistinguishable from one that silently did nothing.
+  assert(/await waitForLoadingOverlayToClear\(6000\);\s*\n\s*await aggressiveClick\(el\);/.test(kpJs),
+    'KP-TARGET.7 the spinner is re-checked immediately before every click');
+
+  assert(/if \(card\.contains\(hit\)\) \{/.test(kpJs),
+    'KP-TARGET.1 a hit inside the card becomes the click target');
+  assert(!/if \(hit === card \|\| card\.contains\(hit\)\) return card;/.test(kpJs),
+    'KP-TARGET.2 the old discard-the-hit branch is gone');
+  assert(/click forensics: under-cursor=/.test(kpJs),
+    'KP-TARGET.3 forensics records what a real click would hit');
+  assert(/spatial hit resolved to/.test(kpJs),
+    'KP-TARGET.4 the resolved target is logged for diagnosis');
+
   assert(/\[jsaction\*="click"\]/.test(kpJs),        'KP-CLICK.1 jsaction descendants are click candidates');
   assert(/jsaction-ancestor/.test(kpJs),             'KP-CLICK.2 delegated ancestor handlers are tried too');
   assert(/jsaction-descendant/.test(kpJs),           'KP-CLICK.3 jsaction candidates are labelled for diagnosis');
