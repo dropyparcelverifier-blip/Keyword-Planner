@@ -2734,9 +2734,13 @@ async function run() {
       tabs: {
         onCreated: { addListener: l => onCreated.push(l) },
         onRemoved: { addListener: l => onRemoved.push(l) },
+        // Chrome RESTORES a minimized window when a tab in it is created or
+        // selected. Modelling that is the point: without it the harness
+        // cannot see the engine window popping open on the operator's desktop.
         create: async ({ url, windowId, active, openerTabId }) => {
           const id = nextId++;
           tabs.set(id, { id, url, windowId, active: !!active, openerTabId });
+          if (wins.has(windowId)) wins.get(windowId).state = 'normal';
           fire(onCreated, tabs.get(id));
           return tabs.get(id);
         },
@@ -2744,7 +2748,11 @@ async function run() {
         update: async (id, { url, active }) => {
           if (!tabs.has(id)) throw new Error('no tab');
           const t = tabs.get(id); t.url = url;
-          if (active) { for (const o of tabs.values()) if (o.windowId === t.windowId) o.active = false; t.active = true; }
+          if (active) {
+            for (const o of tabs.values()) if (o.windowId === t.windowId) o.active = false;
+            t.active = true;
+            if (wins.has(t.windowId)) wins.get(t.windowId).state = 'normal';
+          }
         },
         remove: async id => { if (!tabs.has(id)) throw new Error('gone'); tabs.delete(id); fire(onRemoved, id); },
       },
@@ -2755,7 +2763,11 @@ async function run() {
           tabs.set(t.id, t); wins.set(wid, { id: wid, focused: !!focused, state });
           return { id: wid, tabs: [t] };
         },
-        get:    async id => { if (!wins.has(id)) throw new Error('no win'); return { id, tabs: [...tabs.values()].filter(t => t.windowId === id) }; },
+        get:    async id => {
+          if (!wins.has(id)) throw new Error('no win');
+          return { id, state: wins.get(id).state, tabs: [...tabs.values()].filter(t => t.windowId === id) };
+        },
+        update: async (id, { state }) => { if (wins.has(id) && state) wins.get(id).state = state; },
         remove: async id => { wins.delete(id); },
       },
       storage: {
@@ -2790,6 +2802,16 @@ async function run() {
     assert(tabs.size === 1, `TABLIFE.4 16 navigations still leave one tab (got ${tabs.size})`);
     assert([...wins.keys()][0] === winBefore && wins.size === 1,
       'TABLIFE.11 navigation reuses the engine window rather than churning windows');
+    // THE desktop-covering regression: selecting a tab restores its window,
+    // so every round popped the engine window open on top of the operator.
+    assert(wins.get(winBefore).state === 'minimized',
+      `TABLIFE.16 the engine window stays minimized across rounds (got ${wins.get(winBefore).state})`);
+    // ...but an operator who restores it on purpose keeps it restored.
+    wins.get(winBefore).state = 'normal';
+    await W.navigate('https://kp/operator-is-watching');
+    assert(wins.get(winBefore).state === 'normal',
+      'TABLIFE.17 a window the operator restored is not re-minimized under them');
+    wins.get(winBefore).state = 'minimized';
 
     // THE regression: recycle the service worker repeatedly. Before session
     // persistence this leaked one tab per recycle.

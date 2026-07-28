@@ -949,7 +949,8 @@ const Worker = (() => {
         // Open the replacement BEFORE sweeping the old tabs. Emptying a window
         // makes Chrome close it, and closing it costs the next round a fresh
         // window — which is the tab-churn the operator was watching.
-        const t = await chrome.tabs.create({ url, active: true, windowId: wid });
+        const t = await preservingWindowState(wid, () =>
+          chrome.tabs.create({ url, active: true, windowId: wid }));
         ownedTabs.add(t.id);
         await closeOwned({ except: t.id, keepWindows: true });
         ownedTabs.add(t.id);
@@ -962,10 +963,36 @@ const Worker = (() => {
     const win = await chrome.windows.create({ url, focused: false, state: 'minimized' });
     const tab = win?.tabs?.[0];
     if (!tab) throw new Error('could not create a window for the engine tab');
+    // Re-assert minimized. Chrome does not reliably honour `state` on create
+    // when a url is supplied, and a full-size engine window landing on top of
+    // the operator is the whole complaint.
+    try { await chrome.windows.update(win.id, { state: 'minimized' }); } catch {}
     ownedWindows.add(win.id);
     ownedTabs.add(tab.id);
     await saveOwned();
     return tab;
+  }
+
+  // Run something that touches a window, and leave that window's state
+  // exactly as we found it.
+  //
+  // Chrome RESTORES a minimized window when you create or select a tab in it.
+  // So making the working tab the selected tab — the thing that answers "what
+  // is it working on?" — popped the engine window open on top of whatever the
+  // operator was doing, every single round. Two of them, on two profiles,
+  // covering the desktop.
+  //
+  // Snapshot-and-restore rather than "always minimize": if the operator has
+  // deliberately restored the engine window to watch it, re-minimizing it
+  // under them is the same rudeness in the other direction.
+  async function preservingWindowState(wid, fn) {
+    let before = null;
+    if (wid != null) { try { before = (await chrome.windows.get(wid))?.state ?? null; } catch {} }
+    const out = await fn();
+    if (before === 'minimized') {
+      try { await chrome.windows.update(wid, { state: 'minimized' }); } catch {}
+    }
+    return out;
   }
 
   async function existsAndAlive() {
@@ -983,12 +1010,12 @@ const Worker = (() => {
         await closeOwned({ except: tabId });
         ownedTabs.add(tabId);
         await saveOwned();
-        // active: true selects the tab WITHIN the engine's own minimized
-        // window — it does not raise that window or take focus from whatever
-        // the operator is doing. It is what makes "which tab is it working
-        // on?" answerable: restore the engine window and the live tab is the
-        // one showing.
-        await chrome.tabs.update(tabId, { url, active: true });
+        // active: true selects the tab WITHIN the engine's own window, so
+        // restoring that window shows the live page. Wrapped because
+        // selecting a tab un-minimizes the window it lives in.
+        let wid = null;
+        try { wid = (await chrome.tabs.get(tabId))?.windowId ?? null; } catch {}
+        await preservingWindowState(wid, () => chrome.tabs.update(tabId, { url, active: true }));
       } else {
         tabId = (await createWorkerTab(url)).id;
       }
