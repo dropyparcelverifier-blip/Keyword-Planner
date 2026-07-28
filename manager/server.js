@@ -1131,6 +1131,16 @@ const Q = {
   claimById: db.prepare(`UPDATE jobs SET status='claimed', claimed_by=?, claimed_at=?, heartbeat_at=?, attempts=attempts+1 WHERE id=? AND status='pending'`),
   jobById: db.prepare(`SELECT * FROM jobs WHERE id=?`),
   heartbeatById: db.prepare(`UPDATE jobs SET heartbeat_at=? WHERE id=? AND claimed_by=? AND status='claimed'`),
+  // Re-assert a claim a live worker is still working but no longer holds.
+  //
+  // A heartbeat for a job that has gone back to 'pending' used to be a silent
+  // no-op, so a claim lost to a reap was lost permanently: the worker kept
+  // processing the product while the manager offered it to someone else. That
+  // is a worker that looks idle on the dashboard and a SKU that gets done
+  // twice. Only ever re-takes a job nobody else has since claimed.
+  reassertClaim: db.prepare(
+    `UPDATE jobs SET status='claimed', claimed_by=?, claimed_at=COALESCE(claimed_at, ?), heartbeat_at=?
+       WHERE id=? AND status='pending'`),
   markDone: db.prepare(`UPDATE jobs SET status='done', done_at=? WHERE batch_id=? AND product_url=?`),
   markFailed: db.prepare(`UPDATE jobs SET status='failed', failed_reason=?, done_at=? WHERE batch_id=? AND product_url=?`),
   releaseStale: db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL WHERE status='claimed' AND (heartbeat_at IS NULL OR heartbeat_at < ?) AND attempts < 3`),

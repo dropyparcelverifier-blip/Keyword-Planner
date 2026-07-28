@@ -53,11 +53,17 @@ async function heartbeat({ req, res, ctx }) {
   const { Q, send, readJson, now } = ctx;
   const b = await readJson(req);
   const t = now();
-  let n = 0;
-  for (const id of (Array.isArray(b.jobIds) ? b.jobIds : [])) {
-    n += Q.heartbeatById.run(t, Number(id), b.workerId).changes;
+  let n = 0, reclaimed = 0;
+  for (const raw of (Array.isArray(b.jobIds) ? b.jobIds : [])) {
+    const id = Number(raw);
+    const hit = Q.heartbeatById.run(t, id, b.workerId).changes;
+    if (hit) { n += hit; continue; }
+    // The worker is telling us it is still on this job and we no longer agree.
+    // If nobody else has taken it, take its word — it is the one with the tab
+    // open. Anything already claimed or finished elsewhere is left alone.
+    reclaimed += Q.reassertClaim.run(b.workerId, t, t, id).changes;
   }
-  return send(res, 200, { ok: true, updated: n, active_batch_id: resolveActiveBatch(Q) });
+  return send(res, 200, { ok: true, updated: n, reclaimed, active_batch_id: resolveActiveBatch(Q) });
 }
 
 function activeBatch({ res, ctx }) {

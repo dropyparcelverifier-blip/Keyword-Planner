@@ -252,6 +252,23 @@ async function run() {
   assertEq(rel.status, 200, '11.1 release-stale 200');
   assert(rel.data.released >= 1, '11.2 release-stale released the ghost claim');
 
+  // A live worker heartbeating a job it still holds must get it back if the
+  // job fell to pending. Without this, a claim lost to a reap was lost for
+  // good: the worker kept processing the product while the manager handed it
+  // to someone else — an idle-looking worker and a SKU done twice.
+  const rcClaim = await req('POST', '/api/jobs/claim', { workerId: 'reclaim-worker', batchId: BATCH_A, limit: 1 });
+  const rcJob = (rcClaim.data.jobs || [])[0];
+  assert(!!rcJob, '11.3 claimed a job to test reassertion');
+  await req('POST', '/api/jobs/release-stale', { staleMinutes: -1, allClaims: true });
+  const rcHb = await req('POST', '/api/jobs/heartbeat', { workerId: 'reclaim-worker', jobIds: [rcJob.id] });
+  assertEq(rcHb.data.reclaimed, 1, '11.4 heartbeat re-asserts a claim that fell back to pending');
+  // ...but never steals one another worker has since taken.
+  await req('POST', '/api/jobs/release-stale', { staleMinutes: -1, allClaims: true });
+  await req('POST', '/api/jobs/claim', { workerId: 'other-worker', batchId: BATCH_A, limit: 1 });
+  const rcHb2 = await req('POST', '/api/jobs/heartbeat', { workerId: 'reclaim-worker', jobIds: [rcJob.id] });
+  assertEq(rcHb2.data.reclaimed, 0, '11.5 heartbeat never takes a job another worker holds');
+  await req('POST', '/api/jobs/release-stale', { staleMinutes: -1, allClaims: true });
+
   // ===== 12. ACTIVITY LOG =====
   const act1 = await req('POST', '/api/activity', {
     batchId: BATCH_A, workerId: 'worker-1',
