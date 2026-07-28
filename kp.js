@@ -484,38 +484,28 @@
   // same tick as mousedown). Explicit 'click' MouseEvent added — 'mousedown'
   // + 'mouseup' alone does NOT synthesize 'click' on most Material widgets
   // (previously the biggest reason auto-click failed on Discover).
-  // Wait until a click at el's centre would actually LAND on el.
+  // The topmost element at el's centre — the node the browser would route a
+  // real click to. Returns null if el has no box, nothing is there, or the
+  // point is occupied by a spinner.
   //
-  // 50 forensic samples from the fleet: 49 failed clicks, and in every one of
-  // them the point we clicked was occupied by something else —
-  //   35x <svg>                    (the card's icon sits dead centre)
-  //   14x <ipl-progress-indicator> (still hydrating; the spinner covers it)
-  // The single success was the one sample where neither was in the way.
+  // Dispatching here rather than on the element we happened to pick is the
+  // whole point. 50 forensic samples showed <svg> under the cursor 35 times:
+  // that icon is not an obstruction, it is exactly where a user's click
+  // lands, and the event bubbles up to the card's handler. Aiming instead at
+  // a node sitting underneath it produces an event the compositor would
+  // never have generated, which Material quietly ignores. Refusing to click
+  // the icon (my first attempt at this) produced 16 skips and 0 opens.
   //
-  // Dispatching on a covered element is not a click a user could ever make:
-  // the event goes to our chosen node while the compositor would have routed
-  // a real one to whatever is on top. Material's handlers see the mismatch as
-  // nothing at all — no error, no ripple, no pane. That is the whole failure.
-  //
-  // So probe the actual hit-point first and only click once it resolves to
-  // our element (or something inside it). Returns false if it never clears,
-  // which the caller treats as "try the next candidate" rather than firing a
-  // click we already know will be swallowed.
-  async function waitUntilClickable(el, timeoutMs = 10000) {
-    if (!el) return false;
-    const start = Date.now();
-    let lastBlocker = '';
-    while (Date.now() - start < timeoutMs) {
-      const r = el.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) {
-        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-        if (hit && (hit === el || el.contains(hit) || hit.contains(el))) return true;
-        lastBlocker = hit ? `<${hit.tagName?.toLowerCase()}>` : '(nothing)';
-      }
-      await sleep(300);
-    }
-    kpLog(`click point still blocked by ${lastBlocker} after ${Math.round(timeoutMs / 1000)}s — this click would have been swallowed`, 'warn');
-    return false;
+  // A spinner IS a genuine obstruction — mid-teardown, handler inert — so
+  // that one case returns null and the caller waits instead.
+  function topmostAt(el) {
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return null;
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (!hit) return null;
+    if (isLoadingOverlay(hit)) return null;
+    return hit;
   }
 
   async function aggressiveClick(el) {
@@ -720,13 +710,29 @@
           // Material's handlers are inert. A click through a spinner is
           // indistinguishable from a click that silently did nothing.
           await waitForLoadingOverlayToClear(6000);
-          // Only dispatch once the hit-point resolves to this element. The
-          // forensics showed 49/50 failed clicks were fired at a point
-          // covered by the card's icon or a spinner, so this is the check
-          // that turns a coin-flip into a deterministic click.
-          const landable = await waitUntilClickable(el, 10000);
-          if (!landable) { clicked = CLICK_TRIES; break; }
-          await aggressiveClick(el);
+          // Click whatever is actually on top at this element's centre.
+          //
+          // The forensics showed <svg> under the cursor on 35 of 50 samples,
+          // and my first reaction — refuse to click a "blocked" point — was
+          // wrong and made things strictly worse (16 skips, 0 opens). The
+          // icon is not an obstruction: it is what a real click LANDS on,
+          // and the event then bubbles up to the card's handler. Declining
+          // to click it means clicking nothing at all.
+          //
+          // What genuinely must be avoided is the spinner: a click into
+          // <ipl-progress-indicator> hits an element that is about to be
+          // torn down, and Material's handler is inert behind it. That is
+          // what waitForLoadingOverlayToClear above is for.
+          //
+          // So: resolve the topmost element at the target's centre and
+          // dispatch there, exactly as the compositor would route a real
+          // click. Falls back to the element itself if the probe returns
+          // nothing useful.
+          const target = topmostAt(el) || el;
+          if (target !== el) {
+            kpLog(`dispatching on <${target.tagName?.toLowerCase()}> — the element actually on top at ${why}'s centre (a real click lands here and bubbles up)`);
+          }
+          await aggressiveClick(target);
           if (clicked < CLICK_TRIES) await humanPause(2200, 0.25);
         }
         // WAIT for the pane, don't glance at it once.
