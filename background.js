@@ -1709,7 +1709,16 @@ async function _handleStartInner(msg) {
             // re-push of an already-sent row is an idempotent update, and
             // anything that fails still falls through to the existing
             // pending-push retry queue at product completion.
-            if (runOpts.autoExport && state.workerId) await maybeFlushIncremental();
+            // NOT gated on autoExport. That flag is a CSV-export preference
+            // — whether to write a per-product spreadsheet — and it is
+            // undefined in worker mode, because the manager config has no
+            // auto_export key. Gating durability on it meant this mechanism
+            // was switched off on exactly the machines it was written for:
+            // three workers ran 16.8 hours, matched images, verified links,
+            // and delivered zero rows, because nothing flushes until a
+            // product completes and no product completed. Worker mode is the
+            // only precondition that matters, and state.workerId is it.
+            if (state.workerId) await maybeFlushIncremental();
           },
           onProductDone: async (cleanUrl) => {
             if (!state.doneProducts.includes(cleanUrl)) {

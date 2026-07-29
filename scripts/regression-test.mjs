@@ -3202,7 +3202,15 @@ async function run() {
   assert((kwDisc.match(/await saveOwned\(\)/g) || []).length >= 4, 'UNATTENDED.10 ownership is saved at every mutation point');
 
   assert(bgSpiral.includes('maybeFlushIncremental'),        'INCPUSH.1 incremental flush helper exists');
-  assert(/onRowAdded[\s\S]{0,1200}maybeFlushIncremental\(\)/.test(bgSpiral), 'INCPUSH.2 flush is driven from onRowAdded');
+  assert(/onRowAdded: async \(\) => \{[\s\S]{0,2200}maybeFlushIncremental\(\)/.test(bgSpiral), 'INCPUSH.2 flush is driven from onRowAdded');
+  // The flush is a DURABILITY mechanism, not an export preference. It was
+  // gated on autoExport — a CSV-export flag that is undefined in worker mode
+  // — so it was switched off on exactly the machines it was written for.
+  // Three workers ran 16.8 hours and delivered zero rows.
+  assert(!/runOpts\.autoExport && state\.workerId/.test(bgSpiral),
+    'INCPUSH.12 the flush is not gated on the CSV-export preference');
+  assert(/if \(state\.workerId\) await maybeFlushIncremental\(\)/.test(bgSpiral),
+    'INCPUSH.13 worker mode is the only precondition for flushing');
   assert(bgSpiral.includes('INCREMENTAL_FLUSH_MS'),         'INCPUSH.3 time-based throttle');
   assert(bgSpiral.includes('INCREMENTAL_FLUSH_ROWS'),       'INCPUSH.4 row-count threshold');
   assert(bgSpiral.includes('_incrementalInFlight'),         'INCPUSH.5 guards against overlapping pushes');
