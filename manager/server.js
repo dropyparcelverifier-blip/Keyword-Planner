@@ -1471,10 +1471,23 @@ if (BACKUP_KEEP_N > 0) {
 // already truncates the WAL but only runs on demand, so between restarts
 // nothing reclaimed it. PASSIVE, not TRUNCATE: passive yields immediately if a
 // reader or writer holds the log, so this can never stall a claim.
+// PASSIVE folds pages back so the log stops GROWING, but it never shrinks the
+// file — after the first PASSIVE pass the WAL was still 107 MB, because SQLite
+// reuses that space rather than returning it. TRUNCATE is what reclaims it, so
+// the frequent cheap pass is PASSIVE and an hourly pass truncates.
+//
+// TRUNCATE is safe to schedule here even though it can block: node:sqlite is
+// synchronous and Node is single-threaded, so no request handler can hold a
+// transaction while this callback runs. It returns busy rather than waiting if
+// an external reader (a diagnostic query) holds the log, and the next hour
+// picks it up.
 const WAL_CHECKPOINT_MS = 5 * 60_000;
+const WAL_TRUNCATE_EVERY = 12;   // every 12th pass = hourly
+let _walPasses = 0;
 setInterval(() => {
-  try { db.exec('PRAGMA wal_checkpoint(PASSIVE)'); }
-  catch (e) { console.error('[manager] periodic WAL checkpoint failed (non-fatal):', e.message); }
+  const mode = (++_walPasses % WAL_TRUNCATE_EVERY === 0) ? 'TRUNCATE' : 'PASSIVE';
+  try { db.exec(`PRAGMA wal_checkpoint(${mode})`); }
+  catch (e) { console.error(`[manager] periodic WAL checkpoint (${mode}) failed (non-fatal):`, e.message); }
 }, WAL_CHECKPOINT_MS).unref?.();
 
 // Atomic claim — one synchronous transaction (node:sqlite is sync + Node is

@@ -1537,12 +1537,12 @@ async function run() {
   // Periodic WAL checkpoint: the log reached 113 MB against a 161 MB database
   // because nothing folded it back between restarts.
   const srvWal = readFileSync(resolve(REPO, 'manager/server.js'), 'utf-8');
-  assert(/setInterval\([\s\S]{0,200}wal_checkpoint\(PASSIVE\)/.test(srvWal),
+  assert(/setInterval\([\s\S]{0,300}wal_checkpoint\(\$\{mode\}\)/.test(srvWal),
     '20r.10 the WAL is checkpointed on a timer');
-  // PASSIVE, never TRUNCATE, on a timer: TRUNCATE blocks on readers/writers
-  // and this fires while claims are in flight.
-  assert(!/setInterval\([\s\S]{0,200}wal_checkpoint\(TRUNCATE\)/.test(srvWal),
-    '20r.11 the periodic checkpoint cannot stall a claim');
+  // PASSIVE alone never shrinks the file — SQLite reuses the space. The WAL
+  // was still 107 MB after a PASSIVE pass. TRUNCATE is what reclaims it.
+  assert(/WAL_TRUNCATE_EVERY/.test(srvWal) && /'TRUNCATE' : 'PASSIVE'/.test(srvWal),
+    '20r.11 an occasional pass truncates, or the log never actually shrinks');
 
   // PowerShell 5.1 reads a .ps1 without a BOM as ANSI. A UTF-8 em-dash then
   // decodes to bytes ending 0x94 = U+201D, which PowerShell accepts as a
