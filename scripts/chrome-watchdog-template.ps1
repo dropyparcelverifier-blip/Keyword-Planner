@@ -84,7 +84,7 @@ function Download-To($url, $destPath) {
 # Go through Mgr-Get so the auth header is attached. This probe used to
 # build its own WebRequest and send NO token; /api/health is token-gated,
 # so on any manager with MANAGER_TOKEN set it answered 401, GetResponse()
-# threw, and the catch below exited 0 — silently, every run. The watchdog
+# threw, and the catch below exited 0 - silently, every run. The watchdog
 # therefore never reached the auto-update or the Chrome relaunch, and
 # workers sat on stale code indefinitely with nothing in the log to show
 # for it.
@@ -129,7 +129,7 @@ try {
                     # comment claiming hard_reset. A worker with a SKU in
                     # flight DEFERS a graceful reload until that SKU
                     # finishes, and a SKU stuck in a KP retry loop runs for
-                    # ten minutes or more — so freshly downloaded files sat
+                    # ten minutes or more - so freshly downloaded files sat
                     # on disk while the old code kept running, indefinitely.
                     # /api/commands/update-all sends graceful_reload now and
                     # escalates to hard_reset on the MANAGER after 30s, so
@@ -155,7 +155,7 @@ try {
 # The watchdog could not previously update itself: it runs from $root while
 # auto-update only writes into $extDir, and the template was not in
 # WORKER_FILES. So any bug in THIS script was permanent until someone re-ran
-# the installer by hand on every worker PC — which is exactly what happened
+# the installer by hand on every worker PC - which is exactly what happened
 # with the unauthenticated health probe: it exited 0 silently for hours on
 # every machine, and no amount of pushing from the manager could fix it.
 #
@@ -172,7 +172,7 @@ try {
         # the wrong string. That is exactly how the token guard broke: it
         # compared $token against the token placeholder, the installer
         # rewrote that placeholder too, and the check became "send the token
-        # only if it differs from itself" — never true, so nothing was ever
+        # only if it differs from itself" - never true, so nothing was ever
         # authenticated. This comment avoids spelling the placeholders out
         # for the same reason.
         $u = '__'
@@ -192,7 +192,7 @@ try {
         # Compare NORMALISED text, not raw bytes.
         #
         # A raw comparison never matched and the watchdog rewrote itself on
-        # every single run — the log filled with "[self-update] watchdog
+        # every single run - the log filled with "[self-update] watchdog
         # script updated" every two minutes forever. Three reasons, any one
         # of which is enough: the manager serves LF while Set-Content writes
         # CRLF, Set-Content -Encoding utf8 prepends a BOM on Windows

@@ -18,3 +18,7 @@ test-results/
 playwright-report/
 .playwright/
 manager/debug-shots/
+
+# Generated per-machine by scripts/manager-autostart.ps1 (absolute paths inside).
+scripts/manager-watchdog.ps1
+scripts/manager-watchdog-hidden.vbs

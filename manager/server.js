@@ -1463,6 +1463,20 @@ if (BACKUP_KEEP_N > 0) {
   }, BACKUP_INTERVAL_MS);
 }
 
+// Fold the write-ahead log back into the database on a timer.
+//
+// WAL mode only checkpoints opportunistically, and a manager under constant
+// worker writes never reaches a quiet moment to do it — the log grew to 113 MB
+// against a 161 MB database, all of it replayed on every open. reclaimSpace()
+// already truncates the WAL but only runs on demand, so between restarts
+// nothing reclaimed it. PASSIVE, not TRUNCATE: passive yields immediately if a
+// reader or writer holds the log, so this can never stall a claim.
+const WAL_CHECKPOINT_MS = 5 * 60_000;
+setInterval(() => {
+  try { db.exec('PRAGMA wal_checkpoint(PASSIVE)'); }
+  catch (e) { console.error('[manager] periodic WAL checkpoint failed (non-fatal):', e.message); }
+}, WAL_CHECKPOINT_MS).unref?.();
+
 // Atomic claim — one synchronous transaction (node:sqlite is sync + Node is
 // single-threaded → no concurrent claim can interleave, so no double-claims).
 function claimJobs(workerId, batchId, limit) {

@@ -1500,6 +1500,64 @@ async function run() {
   assert(wd.body.includes('__MGR__'),             '20q.10 template has manager URL placeholder');
   assert(wd.body.includes('/api/health'),         '20q.11 watchdog pings manager health first');
   assert(wd.body.includes("exit 0"),              '20q.12 watchdog exits silently when manager down');
+
+  // ===== 20r. MANAGER WATCHDOG =====
+  // Chrome had a watchdog; the manager had none. Its Startup shortcut fires
+  // once at logon and nothing checks afterwards, so a killed manager stayed
+  // dead — twice in one day, once for over two hours, with no crash in the
+  // log. Every worker is blind for the duration.
+  const mgrAuto = readFileSync(resolve(REPO, 'scripts/manager-autostart.ps1'), 'utf-8');
+  assert(mgrAuto.includes('AdBrain Manager Watchdog'), '20r.1 manager watchdog task is named');
+  assert(/ValidateSet\([^)]*'watchdog'[^)]*'unwatchdog'/.test(mgrAuto), '20r.2 install and remove are both reachable actions');
+  // schtasks.exe: Register-ScheduledTask is denied for a non-elevated user
+  // and reports it non-terminatingly, so the installer once printed success
+  // over a task that did not exist.
+  assert(/schtasks\.exe \/Create/.test(mgrAuto),       '20r.3 registers via schtasks so no elevation is needed');
+  assert(/if \(-not \(Get-ScheduledTask -TaskName \$taskName[\s\S]{0,600}throw/.test(mgrAuto),
+    '20r.3b registration is verified by reading the task back, and fails loudly');
+  assert(/schtasks\.exe \/Delete/.test(mgrAuto),       '20r.4 the task can be removed again, without elevation');
+  // Uninstall must undo everything install can put in place. Removing only
+  // the Startup shortcut would leave a watchdog relaunching the manager every
+  // two minutes -- an uninstall that does not uninstall.
+  assert(/function Cmd-Uninstall \{[\s\S]{0,900}Cmd-Unwatchdog/.test(mgrAuto),
+    '20r.4b uninstall also removes the watchdog');
+  assert(/foreach \(\$f in @\(\$watchdogPs1, \$watchdogVbs\)\)[\s\S]{0,160}Remove-Item/.test(mgrAuto),
+    '20r.4c the generated shim and probe are cleaned up too');
+  // Health, not liveness: a wedged process still owns the port.
+  assert(/api\/health/.test(mgrAuto),                  '20r.5 probes health rather than the port');
+  assert(/X-Manager-Token/.test(mgrAuto),              '20r.6 the probe authenticates, or a token-gated manager reads as down');
+  // The Chrome watchdog flashed a console window every 2 minutes until it was
+  // moved behind a wscript shim. Same mistake, same fix.
+  assert(/\/TR "wscript\.exe/.test(mgrAuto),           '20r.7 runs through a wscript shim, not powershell.exe directly');
+  assert(/\/SC MINUTE \/MO 2/.test(mgrAuto),           '20r.8 probes every 2 minutes');
+  // Must clear a wedged listener first — otherwise the relaunch cannot bind.
+  assert(/Stop-Process[\s\S]{0,200}Start-Sleep[\s\S]{0,400}manager\/server\.js/.test(mgrAuto),
+    '20r.9 frees port 8787 before relaunching');
+
+  // Periodic WAL checkpoint: the log reached 113 MB against a 161 MB database
+  // because nothing folded it back between restarts.
+  const srvWal = readFileSync(resolve(REPO, 'manager/server.js'), 'utf-8');
+  assert(/setInterval\([\s\S]{0,200}wal_checkpoint\(PASSIVE\)/.test(srvWal),
+    '20r.10 the WAL is checkpointed on a timer');
+  // PASSIVE, never TRUNCATE, on a timer: TRUNCATE blocks on readers/writers
+  // and this fires while claims are in flight.
+  assert(!/setInterval\([\s\S]{0,200}wal_checkpoint\(TRUNCATE\)/.test(srvWal),
+    '20r.11 the periodic checkpoint cannot stall a claim');
+
+  // PowerShell 5.1 reads a .ps1 without a BOM as ANSI. A UTF-8 em-dash then
+  // decodes to bytes ending 0x94 = U+201D, which PowerShell accepts as a
+  // STRING TERMINATOR. One em-dash inside a Write-Host string swallowed the
+  // next 22 lines and left the file unparseable. Keep these files ASCII.
+  // A leading BOM is the other valid answer: it forces PowerShell to decode
+  // the file as UTF-8, at which point non-ASCII is safe. Either is fine; what
+  // is not fine is non-ASCII in a BOM-less file.
+  for (const f of readdirSync(resolve(REPO, 'scripts')).filter(n => n.endsWith('.ps1'))) {
+    const src = readFileSync(resolve(REPO, 'scripts', f), 'utf-8');
+    if (src.charCodeAt(0) === 0xFEFF) continue;
+    const bad = [...src].filter(c => c.charCodeAt(0) > 127);
+    assert(bad.length === 0,
+      `20r.12 ${f} is ASCII-only or BOM-marked (found ${bad.length}: ${JSON.stringify(bad.slice(0, 4).join(''))})`);
+  }
   assert(ps.body.includes("'__MGR__'"),           '20q.13 installer substitutes __MGR__ placeholder');
 
   // ===== 20r. BATCH NAMES (human-readable batch labels) =====
