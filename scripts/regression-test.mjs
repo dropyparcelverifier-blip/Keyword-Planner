@@ -3155,7 +3155,9 @@ async function run() {
   // kp.js can click through from that hub via waitForInteractiveDiscoverCard.
   assert(kwDisc.includes('function cleanKpUrl'),      'KPURL.3 param cleaning preserves the configured path');
   assert(kwDisc.includes('function toIdeasDeepLink'), 'KPURL.4 deep link retained as a fallback');
-  assert(/urlForAttempt = \(n\) => \(n <= 1 \? hubUrl : deepUrl\)/.test(kwDisc), 'KPURL.5 attempt 1 = configured URL, attempt 2 = deep link');
+  // Rung 3 (authuser dropped) was added for the account chooser — see KPAUTH.
+  assert(/if \(n <= 1\) return hubUrl;[\s\S]{0,80}if \(n === 2\) return deepUrl;/.test(kwDisc),
+    'KPURL.5 attempt 1 = configured URL, attempt 2 = deep link');
   assert(!/transformToIdeasUrl/.test(kwDisc),         'KPURL.6 unconditional path rewrite removed');
   assert(!/Worker\.navigate\(ideasUrl\)/.test(kwDisc), 'KPURL.7 no navigation hardcoded to the deep link');
   for (const volatileParam of ['euid', '__u', 'uscid', '__c']) {
@@ -3170,8 +3172,17 @@ async function run() {
   // Every ping-failure site must consult it, or the misleading message
   // survives on whichever path we forgot.
   assert((kwDisc.match(/explainKpLandingPage\(/g) || []).length >= 4, 'KPLAND.4 all ping-failure paths use it');
-  // A chooser redirect will not resolve itself, so don't burn retries on it.
-  assert(/if \(why\) \{[\s\S]{0,700}break;/.test(kwDisc), 'KPLAND.5 redirect fails the seed immediately instead of retrying');
+  // A redirect still fails the seed rather than burning retries at the SAME
+  // url — but an account chooser is the one kind we can actually fix, by
+  // asking for a url that pins no account index. It gets exactly one more
+  // try, and only when the next rung is a different url. Everything else
+  // (wrong ocid, no KP access, unexpected page) still fails on the spot.
+  // Structural, not length-based: the terminal path records the reason and
+  // breaks. A comment growing must not decide whether this passes.
+  assert(/seedErrors\.push\([^)]*why[^)]*\);\s*break;/.test(kwDisc),
+    'KPLAND.5 a redirect still ends the seed rather than looping');
+  assert(/const isChooser = \/ACCOUNT CHOOSER\/\.test\(why\);/.test(kwDisc),
+    'KPLAND.6 the chooser is distinguished from other redirects');
 
   const wdTpl = readFileSync(resolve(REPO, 'scripts/chrome-watchdog-template.ps1'), 'utf-8');
   assert(/\$healthBody = Mgr-Get '\/api\/health'/.test(wdTpl), 'WATCHDOG-AUTH.1 health probe goes through Mgr-Get (which attaches the token)');
@@ -3272,6 +3283,27 @@ async function run() {
   // orphans the current tab and they pile up.
   assert(/chrome\.storage\.session \|\| chrome\.storage\.local/.test(kwDisc), 'UNATTENDED.9 owned tabs persist across SW recycles');
   assert((kwDisc.match(/await saveOwned\(\)/g) || []).length >= 4, 'UNATTENDED.10 ownership is saved at every mutation point');
+
+  // ===== KP account chooser is now recoverable =====
+  // authuser pins a signed-in profile BY INDEX. A worker profile has exactly
+  // one account, so any index other than 0 -- or one that shifted after a
+  // re-sign-in -- lands on the account chooser instead of Keyword Planner.
+  // 108 failures in two hours on four machines, each burning every attempt,
+  // and no retry at the same URL could ever fix it: the URL was the problem.
+  {
+    const kd = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+    assert(/searchParams\.delete\('authuser'\)/.test(kd),
+      'KPAUTH.1 a retry rung drops the pinned authuser');
+    assert(/const SEED_MAX_ATTEMPTS = 3;/.test(kd),
+      'KPAUTH.2 the attempt cap reaches the third rung (at 2 it was dead code)');
+    assert(/if \(n === 2\) return deepUrl;[\s\S]{0,120}noAuthUserUrl \|\| deepUrl/.test(kd),
+      'KPAUTH.3 the ladder is three distinct URLs');
+    // Previously this branch failed the seed on the spot.
+    assert(/isChooser && attempt < SEED_MAX_ATTEMPTS && nextUrl !== navUrl/.test(kd),
+      'KPAUTH.4 a chooser retries only while a DIFFERENT url is left to try');
+    assert(/if \(!u\.searchParams\.has\('authuser'\)\) return null;/.test(kd),
+      'KPAUTH.5 no authuser pinned means no pointless extra attempt');
+  }
 
   // ===== TDZ: const used before its declaration =====
   // keyFor was declared 780 lines BELOW the resume path that calls it. As a

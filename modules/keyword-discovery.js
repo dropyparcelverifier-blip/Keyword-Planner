@@ -1227,7 +1227,34 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
   // there was no working path left at all.
   const hubUrl  = cleanKpUrl(kpUrl);
   const deepUrl = toIdeasDeepLink(kpUrl);
-  const urlForAttempt = (n) => (n <= 1 ? hubUrl : deepUrl);
+
+  // Attempt 3 drops authuser entirely.
+  //
+  // authuser pins WHICH signed-in Google profile to use, by index. A worker
+  // profile has exactly one account signed in, so the only correct index is
+  // 0 -- and any other value, or an index that shifted after a re-sign-in,
+  // makes Google show the account chooser instead of Keyword Planner. That
+  // is 108 failures in two hours on four machines, each burning three
+  // attempts, and it is not something a retry at the same URL can ever fix:
+  // the URL is the problem.
+  //
+  // With no authuser, Google resolves to the only account there is. We do
+  // not do this first, because on a profile that genuinely has several
+  // accounts the operator's pinned index is the right answer and dropping it
+  // would pick the wrong one.
+  const noAuthUserUrl = (() => {
+    try {
+      const u = new URL(hubUrl);
+      if (!u.searchParams.has('authuser')) return null;   // nothing to drop
+      u.searchParams.delete('authuser');
+      return u.toString();
+    } catch { return null; }
+  })();
+  const urlForAttempt = (n) => {
+    if (n <= 1) return hubUrl;
+    if (n === 2) return deepUrl;
+    return noAuthUserUrl || deepUrl;
+  };
   if (hubUrl !== kpUrl) log(`KP: cleaned URL -> ${hubUrl.slice(0, 140)}`);
 
   const accumulated = [];
@@ -1258,7 +1285,11 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
   // the BG service worker) drives the navigation, not the content
   // script suiciding itself.
   const TRANSIENT_RE = /timed out|hydrate|never responded|shell|get results button|discover keywords|message port closed|message channel closed|receiving end does not exist|asynchronous response by returning true|KP_NEEDS_FRESH_NAV/i;
-  const SEED_MAX_ATTEMPTS = 2;
+  // Three, because the URL ladder now has three distinct rungs: the
+  // operator's own URL, the /ideas/new deep link, and the same URL with
+  // authuser dropped. At 2 the third rung was unreachable, so the account
+  // chooser -- the fleet's single biggest KP failure -- had no escape.
+  const SEED_MAX_ATTEMPTS = 3;
 
   // Website-only mode: skip the text-seed flow entirely and go straight
   // to KP's "Start with a website" flow. Text-seed input is Google's most
@@ -1303,9 +1334,19 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
           // Find out WHERE the tab actually is before blaming kp.js.
           const why = await explainKpLandingPage(tabId);
           if (why) {
-            // A redirect to a chooser/sign-in page will not fix itself on a
-            // retry, so fail this seed immediately with the real reason
-            // rather than burning another navigate + 15s ping.
+            // An account chooser IS fixable -- by asking for a URL that does
+            // not pin an account index. Previously this branch failed the
+            // seed on the spot, which is why the same four machines produced
+            // the identical error 108 times in two hours and never once got
+            // past it. Retry only while a DIFFERENT url is still to be tried;
+            // repeating the same one would just burn a navigate and 15s.
+            const isChooser = /ACCOUNT CHOOSER/.test(why);
+            const nextUrl = urlForAttempt(attempt + 1);
+            if (isChooser && attempt < SEED_MAX_ATTEMPTS && nextUrl !== navUrl) {
+              log(`KP: account chooser on ${attempt === 1 ? 'the configured URL' : 'the deep link'} — retrying without the pinned authuser`);
+              await sleep(2000);
+              continue;
+            }
             log(`⚠ KP BLOCKED: ${why}`);
             seedErrors.push(`seed ${i + 1}: ${why}`);
             break;
