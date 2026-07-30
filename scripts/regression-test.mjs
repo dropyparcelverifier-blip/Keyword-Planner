@@ -1531,8 +1531,22 @@ async function run() {
   assert(/\/TR "wscript\.exe/.test(mgrAuto),           '20r.7 runs through a wscript shim, not powershell.exe directly');
   assert(/\/SC MINUTE \/MO 2/.test(mgrAuto),           '20r.8 probes every 2 minutes');
   // Must clear a wedged listener first — otherwise the relaunch cannot bind.
-  assert(/Stop-Process[\s\S]{0,200}Start-Sleep[\s\S]{0,400}manager\/server\.js/.test(mgrAuto),
+  assert(/Stop-Process[\s\S]{0,300}manager\/server\.js/.test(mgrAuto),
     '20r.9 frees port 8787 before relaunching');
+  // Killing on ONE failed probe made the watchdog the thing killing the
+  // manager: it is single-threaded on synchronous SQLite, so a backup or a
+  // wide query blocks the event loop for seconds. Six restarts in an
+  // afternoon, no crash in any log, because there was no crash.
+  assert(/for \(`?\$i = 1; `?\$i -le 3; `?\$i\+\+\)/.test(mgrAuto),
+    '20r.13 a busy manager is probed repeatedly before being declared dead');
+  assert(/-TimeoutSec 20/.test(mgrAuto),
+    '20r.14 the probe tolerates a blocked event loop');
+  // Without this the two cases are indistinguishable in the log, which is
+  // what made the first diagnosis guesswork.
+  assert(/held port 8787 but failed 3 health probes/.test(mgrAuto),
+    '20r.15 the log says whether a LIVE listener was killed');
+  assert(/nothing listening on 8787 - manager is gone/.test(mgrAuto),
+    '20r.16 ...or whether the manager was already gone');
 
   // Periodic WAL checkpoint: the log reached 113 MB against a 161 MB database
   // because nothing folded it back between restarts.

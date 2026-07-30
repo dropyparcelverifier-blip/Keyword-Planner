@@ -181,25 +181,43 @@ function Write-WatchdogFiles {
 
 # Health, not liveness. A wedged process still owns port 8787, so a port check
 # would report a manager that answers nothing as healthy.
+#
+# THREE probes, not one. The first version killed on a single timeout, and the
+# manager is single-threaded on synchronous SQLite -- a VACUUM INTO backup, a
+# WAL truncate or a wide activity-log query legitimately blocks the event loop
+# for seconds. So a merely BUSY manager was being killed and restarted, six
+# times in an afternoon, with no crash in any log because there was no crash.
+# The watchdog was the thing killing it. Only a manager that fails every probe
+# across ~40s is actually gone.
+`$headers = @{}
+if (`$token) { `$headers['X-Manager-Token'] = `$token }
 `$healthy = `$false
-try {
-    `$headers = @{}
-    if (`$token) { `$headers['X-Manager-Token'] = `$token }
-    `$r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8787/api/health' ``
-                            -Headers `$headers -TimeoutSec 10
-    if (`$r.StatusCode -eq 200) { `$healthy = `$true }
-} catch { `$healthy = `$false }
+for (`$i = 1; `$i -le 3; `$i++) {
+    try {
+        `$r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8787/api/health' ``
+                                -Headers `$headers -TimeoutSec 20
+        if (`$r.StatusCode -eq 200) { `$healthy = `$true; break }
+    } catch { }
+    if (`$i -lt 3) { Start-Sleep -Seconds 8 }
+}
 
 if (`$healthy) { exit 0 }
 
-# Clear a wedged process before relaunching, or the new one cannot bind.
-Get-NetTCPConnection -LocalPort 8787 -State Listen -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty OwningProcess -Unique |
-    ForEach-Object { Stop-Process -Id `$_ -Force -ErrorAction SilentlyContinue }
-Start-Sleep -Seconds 2
-
+# Was anything actually listening? This is the line that distinguishes "the
+# manager died" from "the watchdog killed a live one", which is exactly what
+# could not be told apart last time.
+`$listener = Get-NetTCPConnection -LocalPort 8787 -State Listen -ErrorAction SilentlyContinue |
+             Select-Object -ExpandProperty OwningProcess -Unique
 `$stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-Add-Content -Path `$logPath -Value "[watchdog] `$stamp manager not answering /api/health - relaunching."
+if (`$listener) {
+    Add-Content -Path `$logPath -Value "[watchdog] `$stamp PID `$listener held port 8787 but failed 3 health probes over 40s - killing it and relaunching."
+} else {
+    Add-Content -Path `$logPath -Value "[watchdog] `$stamp nothing listening on 8787 - manager is gone, relaunching."
+}
+
+# Clear a wedged process before relaunching, or the new one cannot bind.
+`$listener | ForEach-Object { Stop-Process -Id `$_ -Force -ErrorAction SilentlyContinue }
+if (`$listener) { Start-Sleep -Seconds 2 }
 `$inner = "Set-Location '`$repoRoot'; & '`$node' manager/server.js *>> '`$logPath'"
 Start-Process -FilePath powershell.exe ``
               -ArgumentList @('-WindowStyle','Hidden','-NoProfile','-Command', `$inner) ``
