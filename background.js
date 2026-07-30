@@ -2279,6 +2279,49 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Ship a diagnostic frame to the manager. Disk-backed there (newest N
   // only) so megabyte data URIs never reach the activity log.
+  // One debugger session at a time, and take over a leaked one.
+  //
+  // captureFrame and trustedClick each attached on their own, and they
+  // overlap: trustedClick holds the tab for ~2.5s between its before and
+  // after frames, and kp.js can fire captureFrame inside that window. Chrome
+  // permits exactly one debugger per tab, so the second call died with
+  // "Another debugger is already attached to the tab" -- 50 times in two
+  // hours, and since the trusted click is what opens the Discover card, each
+  // one is a lost click.
+  //
+  // Serialising is half the fix. The other half is that an attachment can
+  // LEAK: if the service worker is recycled between attach and detach, the
+  // session survives with no one to release it, and every subsequent attach
+  // on that tab fails until the tab closes. So on "already attached" we
+  // detach first and take the tab over, rather than giving up.
+  let _dbgChain = Promise.resolve();
+  function withDebugger(tabId, fn) {
+    const run = async () => {
+      let attached = false;
+      try {
+        try {
+          await chrome.debugger.attach({ tabId }, '1.3');
+        } catch (e) {
+          if (!/already attached/i.test(e?.message || '')) throw e;
+          try { await chrome.debugger.detach({ tabId }); } catch {}
+          await chrome.debugger.attach({ tabId }, '1.3');
+        }
+        attached = true;
+        return await fn();
+      } finally {
+        // Detach even on failure -- a stuck attachment leaves the "being
+        // debugged" banner up and blocks DevTools for whoever uses this
+        // machine next.
+        if (attached) { try { await chrome.debugger.detach({ tabId }); } catch {} }
+      }
+    };
+    // Queue on both fulfilment and rejection, so one failure does not wedge
+    // every later caller.
+    const p = _dbgChain.then(run, run);
+    _dbgChain = p.then(() => {}, () => {});
+    return p;
+  }
+
   async function postDebugScreenshot(label, dataUrl) {
     try {
       const d = await chrome.storage.local.get(['adbrainManagerUrl', 'adbrainManagerToken']);
@@ -2307,18 +2350,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const tabId = sender.tab?.id;
     if (!tabId) { sendResponse({ ok: false, error: 'no tab' }); return false; }
     (async () => {
-      let attached = false;
       try {
-        await chrome.debugger.attach({ tabId }, '1.3');
-        attached = true;
-        await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
-        const r = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', { format: 'png' });
-        if (r?.data) await postDebugScreenshot(String(msg.label || 'frame'), `data:image/png;base64,${r.data}`);
-        sendResponse({ ok: !!r?.data });
+        const data = await withDebugger(tabId, async () => {
+          await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
+          const r = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', { format: 'png' });
+          return r?.data || null;
+        });
+        if (data) await postDebugScreenshot(String(msg.label || 'frame'), `data:image/png;base64,${data}`);
+        sendResponse({ ok: !!data });
       } catch (e) {
         sendResponse({ ok: false, error: e?.message || String(e) });
-      } finally {
-        if (attached) { try { await chrome.debugger.detach({ tabId }); } catch {} }
       }
     })();
     return true;
@@ -2353,10 +2394,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return false;
     }
     (async () => {
-      let attached = false;
       try {
-        await chrome.debugger.attach({ tabId }, '1.3');
-        attached = true;
+        await withDebugger(tabId, async () => {
         const base = { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 };
         // Move first: Material components track hover state, and a press
         // with no preceding move can be discarded as spurious.
@@ -2385,13 +2424,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // Give the pane a moment to render before the second frame.
         await new Promise(r => setTimeout(r, 2500));
         await shoot('after-click');
+        });
         sendResponse({ ok: true });
       } catch (e) {
         sendResponse({ ok: false, error: e?.message || String(e) });
-      } finally {
-        // Detach even on failure — a stuck attachment leaves the banner up
-        // and blocks DevTools for whoever uses this machine next.
-        if (attached) { try { await chrome.debugger.detach({ tabId }); } catch {} }
       }
     })();
     return true;   // async sendResponse

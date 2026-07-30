@@ -2644,7 +2644,7 @@ async function run() {
   assert(/type: 'mouseReleased'/.test(bgTrusted),        'TRUSTED.5 releases as well as presses');
   // A stuck attachment leaves the "being debugged" banner up and blocks
   // DevTools for whoever uses the machine next.
-  assert(/finally \{[\s\S]{0,200}chrome\.debugger\.detach/.test(bgTrusted),
+  assert(/finally \{[\s\S]{0,400}chrome\.debugger\.detach/.test(bgTrusted),
     'TRUSTED.6 detaches even when the click throws');
   assert(/async function trustedClick\(el\)/.test(kpJs), 'TRUSTED.7 content script requests a trusted click');
   // Diagnostic frames. Trusted clicks alone did NOT open the pane — 22
@@ -3272,6 +3272,38 @@ async function run() {
   // orphans the current tab and they pile up.
   assert(/chrome\.storage\.session \|\| chrome\.storage\.local/.test(kwDisc), 'UNATTENDED.9 owned tabs persist across SW recycles');
   assert((kwDisc.match(/await saveOwned\(\)/g) || []).length >= 4, 'UNATTENDED.10 ownership is saved at every mutation point');
+
+  // ===== TDZ: const used before its declaration =====
+  // keyFor was declared 780 lines BELOW the resume path that calls it. As a
+  // `const` that is a temporal dead zone, so every resume threw "Cannot
+  // access 'keyFor' before initialization", the try/catch logged it as
+  // "Resume state unavailable", and the product re-ran every round from
+  // scratch -- the whole resume feature silently doing nothing.
+  {
+    const kd = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+    const decls = (kd.match(/const keyFor =/g) || []).length;
+    assertEq(decls, 1, 'TDZ.1 keyFor is declared exactly once');
+    assert(kd.indexOf('const keyFor =') < kd.indexOf('keyFor('),
+      'TDZ.2 keyFor is declared before its first use');
+  }
+
+  // ===== chrome.debugger session collisions =====
+  // captureFrame and trustedClick attached independently and overlap:
+  // trustedClick holds the tab ~2.5s between frames. Chrome allows one
+  // debugger per tab, so the loser died with "Another debugger is already
+  // attached" -- 50 times in two hours, each one a lost Discover-card click.
+  assert(/function withDebugger\(tabId, fn\)/.test(bgSpiral),
+    'DBG.1 debugger sessions go through one helper');
+  assert(!/action === 'captureFrame'[\s\S]{0,600}chrome\.debugger\.attach/.test(bgSpiral),
+    'DBG.2 captureFrame no longer attaches on its own');
+  assert(!/action === 'trustedClick'[\s\S]{0,900}chrome\.debugger\.attach/.test(bgSpiral),
+    'DBG.3 trustedClick no longer attaches on its own');
+  assert(/_dbgChain = p\.then/.test(bgSpiral),
+    'DBG.4 calls are serialised so two cannot hold the same tab');
+  // A recycled service worker leaks the session; every later attach then
+  // fails until the tab closes. Take it over instead of giving up.
+  assert(/already attached[\s\S]{0,200}chrome\.debugger\.detach[\s\S]{0,120}chrome\.debugger\.attach/.test(bgSpiral),
+    'DBG.5 a leaked session is detached and taken over');
 
   assert(bgSpiral.includes('maybeFlushIncremental'),        'INCPUSH.1 incremental flush helper exists');
   assert(/onRowAdded: async \(\) => \{[\s\S]{0,2200}maybeFlushIncremental\(\)/.test(bgSpiral), 'INCPUSH.2 flush is driven from onRowAdded');

@@ -3227,6 +3227,22 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
 
       const p = sorted[pi];
       const cleanUrl = cleanProductUrl(p.url);
+
+      // Composite report key: (product, keyword).
+      //
+      // Declared HERE, next to cleanUrl -- the only thing it closes over --
+      // rather than 780 lines further down beside addRow. It was a `const`
+      // used by the resume path above its own declaration, which is a
+      // temporal dead zone: every resume threw "Cannot access 'keyFor'
+      // before initialization", the try/catch swallowed it as "Resume state
+      // unavailable", and the product re-ran every round from scratch. That
+      // is the entire feature silently doing nothing, 16 times in two hours.
+      //
+      // Why composite: a bare keyword collides across products, so two SKUs
+      // sharing a keyword shared one row -- and one product's image counts
+      // leaked into the other's. Every (product, keyword) pair gets its own
+      // row, its own SERP and its own image-match calculation.
+      const keyFor = (k) => `${cleanUrl}|${k}`;
       if (excludeUrls.has(cleanUrl)) continue;
       const productName = deriveName(cleanUrl);
 
@@ -4068,15 +4084,8 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         }
       };
 
-      // Composite report key = `${cleanUrl}|${normalizedKeyword}`. Previously
-      // `report` was keyed by keyword alone, which meant that if "aquaphor
-      // diaper rash cream" was discovered for Product A AND for Product B,
-      // the second product would silently merge into Product A's row —
-      // inheriting Product A's image_count (which was matched against
-      // Product A's image, not B's). Result: per-product image counts mixed
-      // across products. Composite keys give every (product, keyword) pair
-      // its own row, its own SERP, and its own image-match calculation.
-      const keyFor = (k) => `${cleanUrl}|${k}`;
+      // keyFor is declared up beside cleanUrl -- see the note there for why
+      // it cannot live down here.
 
       const addRow = (keyword, source, parentKeyword, kpMeta) => {
         const key = (keyword || '').toLowerCase().trim();
