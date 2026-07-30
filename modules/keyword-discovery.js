@@ -1343,7 +1343,14 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
             const isChooser = /ACCOUNT CHOOSER/.test(why);
             const nextUrl = urlForAttempt(attempt + 1);
             if (isChooser && attempt < SEED_MAX_ATTEMPTS && nextUrl !== navUrl) {
-              log(`KP: account chooser on ${attempt === 1 ? 'the configured URL' : 'the deep link'} — retrying without the pinned authuser`);
+              // Say what we are ACTUALLY about to try. This logged "retrying
+              // without the pinned authuser" on the hop to the deep link,
+              // which still carries authuser -- so the log claimed a fix was
+              // being applied one rung before it was.
+              const nextLabel = (nextUrl === noAuthUserUrl) ? 'the same URL with authuser dropped'
+                              : (nextUrl === deepUrl)       ? 'the /ideas/new deep link'
+                              : 'the configured URL';
+              log(`KP: account chooser — retrying with ${nextLabel}`);
               await sleep(2000);
               continue;
             }
@@ -3284,6 +3291,12 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // leaked into the other's. Every (product, keyword) pair gets its own
       // row, its own SERP and its own image-match calculation.
       const keyFor = (k) => `${cleanUrl}|${k}`;
+
+      // Same story: the resume path adds restored keywords to this set, and
+      // it too was declared ~670 lines below its first use. Fixing keyFor
+      // alone just moved the ReferenceError one line down -- resume still
+      // never ran, it only changed which name it complained about.
+      const productKeywordSet = new Set();
       if (excludeUrls.has(cleanUrl)) continue;
       const productName = deriveName(cleanUrl);
 
@@ -3370,8 +3383,15 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           onProgress?.({
             currentProduct: productName,
             currentSource: 'round1',
-            currentAction: `Resume state unavailable (${e.message}) — running every round from the start.`,
-            logKind: 'warn',
+            // A ReferenceError or TypeError here is a BUG in this file, not a
+            // manager that failed to answer -- and reporting both as the same
+            // mild "state unavailable" warning is how two temporal-dead-zone
+            // errors (keyFor, then productKeywordSet) hid in plain sight for
+            // days while resume silently never ran. Say which it is.
+            currentAction: (e instanceof ReferenceError || e instanceof TypeError)
+              ? `BUG in resume (${e.name}: ${e.message}) — resume is broken, every round is re-running from the start. This is a code defect, not a manager problem.`
+              : `Resume state unavailable (${e.message}) — running every round from the start.`,
+            logKind: (e instanceof ReferenceError || e instanceof TypeError) ? 'err' : 'warn',
           });
         }
       }
@@ -4025,7 +4045,8 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // expand each via /complete/search (free) until we hit the cap.
       const productStartTs = Date.now();
       const productRows = [];
-      const productKeywordSet = new Set();
+      // productKeywordSet is declared up beside cleanUrl and keyFor -- the
+      // resume path needs it, and the resume path runs long before here.
       // Word-order dedup: "now foods super enzymes" and "super enzymes now
       // foods" return effectively the same SERP. Tokenize → sort → join to
       // build a canonical key per token-set; subsequent reorderings of the

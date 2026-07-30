@@ -3317,6 +3317,20 @@ async function run() {
     assertEq(decls, 1, 'TDZ.1 keyFor is declared exactly once');
     assert(kd.indexOf('const keyFor =') < kd.indexOf('keyFor('),
       'TDZ.2 keyFor is declared before its first use');
+    // Fixing keyFor alone only moved the ReferenceError to the next name:
+    // productKeywordSet was declared ~670 lines below the resume path too,
+    // so resume STILL never ran, it just complained about something else.
+    assertEq((kd.match(/const productKeywordSet =/g) || []).length, 1,
+      'TDZ.3 productKeywordSet is declared exactly once');
+    assert(kd.indexOf('const productKeywordSet =') < kd.indexOf('productKeywordSet.add'),
+      'TDZ.4 productKeywordSet is declared before its first use');
+    // Both hid because the resume catch reported a code defect in the same
+    // words as a manager that did not answer. A ReferenceError/TypeError is
+    // a bug and must be logged as an error, not a warning.
+    assert(/e instanceof ReferenceError \|\| e instanceof TypeError/.test(kd),
+      'TDZ.5 the resume catch separates code defects from missing data');
+    assert(/BUG in resume/.test(kd),
+      'TDZ.6 a code defect in resume says so, loudly');
   }
 
   // ===== chrome.debugger session collisions =====
