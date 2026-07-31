@@ -5529,7 +5529,14 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         const lastResort = (productName && productName.trim())
           || (p.sku || cleanUrl.split('/').pop() || '').replace(/[^a-z0-9\s-]/gi, ' ').replace(/[-_]+/g, ' ').trim();
         if (lastResort) {
-          const r = addRow(lastResort, 'fallback_no_kp', '');
+          // addRow returns null for a keyword this product ALREADY has -- it
+          // merges instead of duplicating. On a resume the product name is
+          // very often already in the report from the previous attempt, so
+          // the last-resort seed came back null, round1Seeds stayed empty and
+          // the SKU was failed -- while holding hundreds of restored rows.
+          // Fall back to the existing row: it is the same keyword either way.
+          const r = addRow(lastResort, 'fallback_no_kp', '')
+                 || report.get(keyFor(lastResort.toLowerCase().trim()));
           if (r) round1Seeds.push(r);
           onProgress?.({
             currentProduct: productName,
@@ -5539,7 +5546,22 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           });
         }
       }
-      if (round1Seeds.length === 0 && kp1RowsArr.length === 0) {
+      // A product holding rows is not a failure, whatever this round produced.
+      //
+      // FAIL-FAST was written for a genuinely empty SKU. It fired on resumed
+      // products too, which arrive with rows already restored from the
+      // manager -- so a SKU that had gathered hundreds of keywords was marked
+      // FAILED for producing no NEW seed this pass. Three of those and the
+      // manager auto-failed it for exceeding its attempts, which is where
+      // 22 failed jobs came from.
+      if (round1Seeds.length === 0 && kp1RowsArr.length === 0 && report.size > 0) {
+        onProgress?.({
+          currentProduct: productName,
+          currentSource: 'round1',
+          currentAction: `No new Round-1 seeds, but ${report.size} row(s) already gathered for this product — continuing instead of failing.`,
+          logKind: 'ok',
+        });
+      } else if (round1Seeds.length === 0 && kp1RowsArr.length === 0) {
         const failReason = 'zero seeds + zero KP rows — likely KP session dead or product name unrecognised. Fix Google Ads session on this worker + requeue.';
         onProgress?.({
           currentProduct: productName,

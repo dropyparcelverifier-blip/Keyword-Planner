@@ -3411,6 +3411,19 @@ async function run() {
     }
   }
 
+  // FAIL-FAST was written for a genuinely empty SKU and fired on RESUMED ones
+  // too: they arrive with rows restored from the manager, addRow returns null
+  // for a keyword the product already has, so the last-resort seed came back
+  // null and a SKU holding hundreds of rows was marked FAILED. Three of those
+  // and the manager auto-failed it for exceeding attempts -- 22 failed jobs.
+  {
+    const kdf = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+    assert(/report\.size > 0/.test(kdf) && /continuing instead of failing/.test(kdf),
+      'FAILFAST.1 a product that already holds rows is never failed for producing no new seed');
+    assert(/addRow\(lastResort, 'fallback_no_kp', ''\)\s*\|\|\s*report\.get\(keyFor/.test(kdf),
+      'FAILFAST.2 the last-resort seed falls back to the existing row when addRow merges');
+  }
+
   // ===== parallel leaf SERPs =====
   // Leaf searches are the highest-volume operation in the engine (11,528 a
   // week vs 965 product SERP loads) and ran one at a time, mostly waiting on
