@@ -269,6 +269,13 @@ export function workerConfigToRunOpts(cfg) {
   if (!cfg) return {};
   const out = {};
   if (cfg.kp_url)                     out.kpUrl                 = cfg.kp_url;
+  // Every configured Ads account, so a worker that cannot open the one it was
+  // given can TRY THE OTHERS rather than failing. A KP url only works from a
+  // Chrome profile signed into the Google login that owns its ocid, and which
+  // login a given PC has is not knowable from here — so the worker probes.
+  if (Array.isArray(cfg.kp_accounts)) {
+    out.kpAccountUrls = cfg.kp_accounts.map(a => a && a.url).filter(Boolean);
+  }
   if (cfg.kp_max_per_product != null) out.kpMaxPerProduct       = cfg.kp_max_per_product;
   if (cfg.match_profile)              out.matchProfile          = cfg.match_profile;
   if (cfg.clip_threshold_override != null) out.clipThresholdOverride = Number(cfg.clip_threshold_override);

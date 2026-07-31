@@ -3438,8 +3438,19 @@ async function run() {
     // a chooser now jumps straight to the URL with nothing pinned.
     assert(/const bareKpUrl = 'https:\/\/ads\.google\.com\/aw\/keywordplanner\/home';/.test(kd),
       'KPAUTH.4 an unpinned KP url exists (no ocid, no authuser)');
-    assert(/if \(isChooser && !triedBareKp\)/.test(kd),
-      'KPAUTH.4b a chooser goes straight to it rather than walking the ladder');
+    // A KP url only works from a profile signed into the login that OWNS its
+    // ocid, and which login a given PC has is not knowable from the manager --
+    // which is why auto-assignment was left opt-in. So the worker PROBES: each
+    // chooser advances to the next known account, ending at no-account-pinned.
+    assert(/if \(isChooser && candidateIdx < kpCandidates\.length\)/.test(kd),
+      'KPAUTH.4b a chooser advances through the known accounts');
+    assert(/const kpCandidates = \[/.test(kd) && /kpOpts\.kpAccountUrls/.test(kd),
+      'KPAUTH.4d every configured Ads account is a fallback');
+    assert(/a\.indexOf\(u\) === i && u !== hubUrl/.test(kd),
+      'KPAUTH.4e the already-rejected url is not retried as a candidate');
+    const dj3 = readFileSync(resolve(REPO, 'modules/discovery-jobs.js'), 'utf-8');
+    assert(/out\.kpAccountUrls = cfg\.kp_accounts\.map/.test(dj3),
+      'KPAUTH.4f the account list reaches the worker');
     assert(/const navUrl = forceUrl \|\| urlForAttempt\(attempt\);/.test(kd),
       'KPAUTH.4c once unpinned, later attempts do not fall back to the rejected ocid');
     assert(/if \(!u\.searchParams\.has\('authuser'\)\) return null;/.test(kd),

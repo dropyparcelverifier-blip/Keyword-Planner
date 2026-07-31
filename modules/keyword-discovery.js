@@ -1350,6 +1350,20 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
   // signed-in account's own default -- "use whatever account this profile
   // has", which is the intent for an unassigned worker.
   const bareKpUrl = 'https://ads.google.com/aw/keywordplanner/home';
+
+  // Every Ads account this fleet knows about, as fallbacks.
+  //
+  // A KP url only works from a Chrome profile signed into the Google login
+  // that OWNS its ocid. Which login a given PC has is not knowable from the
+  // manager -- that is precisely why auto-assignment was left opt-in, since
+  // hashing accounts across the fleet sends most workers to a login they do
+  // not own. So instead of guessing: try the configured url, and on a chooser
+  // work through the other known accounts until one opens. Whichever works is
+  // this profile's account, discovered rather than assumed.
+  const kpCandidates = [
+    ...(Array.isArray(kpOpts.kpAccountUrls) ? kpOpts.kpAccountUrls : []).map(u => cleanKpUrl(u)),
+    bareKpUrl,
+  ].filter((u, i, a) => u && a.indexOf(u) === i && u !== hubUrl);
   const urlForAttempt = (n) => {
     if (n <= 1) return hubUrl;
     if (n === 2) return deepUrl;
@@ -1431,7 +1445,9 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
     // Set when a chooser sends us to the unpinned URL; pins that URL for the
     // remaining attempts instead of falling back onto the rejected ocid.
     let forceUrl = null;
-    let triedBareKp = false;
+    // Position in kpCandidates. Each chooser advances one step, so a profile
+    // works through the known accounts instead of retrying the rejected one.
+    let candidateIdx = 0;
     for (let attempt = 1; attempt <= SEED_MAX_ATTEMPTS && !succeeded; attempt++) {
       try {
         // Navigate the KP tab for this seed. The Worker reuses the same tab id;
@@ -1478,10 +1494,12 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
             // authuser-dropped variant both land on the identical chooser.
             // Walking them was three navigations to reach the one URL that
             // could work.
-            if (isChooser && !triedBareKp) {
-              triedBareKp = true;
-              forceUrl = bareKpUrl;
-              log(`KP: account chooser — this profile's Google login cannot open the pinned Ads account (ocid). Retrying with no account pinned, so Ads uses whichever account this profile owns.`);
+            if (isChooser && candidateIdx < kpCandidates.length) {
+              forceUrl = kpCandidates[candidateIdx++];
+              const which = forceUrl === bareKpUrl
+                ? 'no account pinned at all (Ads picks whichever account this profile owns)'
+                : `another configured Ads account (${(forceUrl.match(/ocid=(\d+)/) || [,'?'])[1]})`;
+              log(`KP: account chooser — this profile's Google login cannot open that Ads account. Trying ${which}.`);
               await sleep(2000);
               continue;
             }

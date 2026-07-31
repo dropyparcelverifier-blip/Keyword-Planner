@@ -1448,6 +1448,7 @@ function pickRunOpts(msg) {
     maxImageMatchRows: msg.maxImageMatchRows,
     autoExport:        msg.autoExport,
     serpConcurrency:   msg.serpConcurrency,
+    kpAccountUrls:     msg.kpAccountUrls,
     searchDelayMinMs:  msg.searchDelayMinMs,
     searchDelayMaxMs:  msg.searchDelayMaxMs,
     productDelayMinMs: msg.productDelayMinMs,
