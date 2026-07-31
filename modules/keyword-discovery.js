@@ -1304,7 +1304,15 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
     // Fall through to the website-fallback block below by leaving
     // accumulated empty and skipping the seedList loop.
   } else {
+  // Set the moment a seed proves this profile's Ads session is dead. Every
+  // later seed would hit the identical account chooser.
+  let sessionBroken = null;
+
   for (let i = 0; i < seedList.length; i++) {
+    if (sessionBroken) {
+      log(`KP: skipping seed ${i + 1}/${seedList.length} and the rest — the Ads session on this profile is broken, every seed lands on the same account chooser`);
+      break;
+    }
     const seed = seedList[i];
     if (accumulated.length >= maxResults) break;
     // URL-shaped seeds (http:// or https:// prefix) don't work in the
@@ -1329,10 +1337,29 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
         log(`KP seed ${i + 1}/${seedList.length}: navigating to ${attempt <= 1 ? 'the configured KP page' : 'the /ideas/new deep link'}${attemptLabel}`);
         const tabId = await Worker.navigate(navUrl);
         await sleep(randInt(2500, 4000));
-        const ready = await pingContentScript(tabId, 'KP_PING', 15, 1000);
+
+        // Check WHERE we landed BEFORE waiting on the content script.
+        //
+        // kp.js only injects on ads.google.com/aw/keywordplanner/*. If Google
+        // bounced us to an account chooser, no amount of pinging will ever
+        // succeed -- yet we spent 15 seconds (15 tries x 1s) finding that out,
+        // on every seed, on every attempt. Across the fleet that was 638 KP
+        // navigations in 24 hours of which 618 were the chooser: roughly two
+        // and a half hours per day spent pinging a page that cannot answer.
+        // Reading tab.url costs a millisecond and gives the same verdict.
+        // Confirm it has SETTLED before believing it. Google can pass through
+        // accounts.google.com mid-handshake and still land on Keyword Planner,
+        // and treating that instant as a dead session would fail seeds that
+        // were about to work. Two looks 2s apart costs 2 seconds on the
+        // failure path against the 15 it saves, and removes the false positive.
+        let earlyWhy = await explainKpLandingPage(tabId);
+        if (earlyWhy) {
+          await sleep(2000);
+          earlyWhy = await explainKpLandingPage(tabId);
+        }
+        const ready = earlyWhy ? false : await pingContentScript(tabId, 'KP_PING', 15, 1000);
         if (!ready) {
-          // Find out WHERE the tab actually is before blaming kp.js.
-          const why = await explainKpLandingPage(tabId);
+          const why = earlyWhy || await explainKpLandingPage(tabId);
           if (why) {
             // An account chooser IS fixable -- by asking for a URL that does
             // not pin an account index. Previously this branch failed the
@@ -1356,6 +1383,13 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
             }
             log(`⚠ KP BLOCKED: ${why}`);
             seedErrors.push(`seed ${i + 1}: ${why}`);
+            // A broken Google Ads session is a property of the PROFILE, not
+            // of this seed. Seeds 2..N will land on the same chooser, so
+            // walking the whole ladder again for each of them buys nothing --
+            // it just multiplies the cost by the seed count. Stop the product's
+            // text-seed flow here and let the caller fall through to PAA /
+            // autosuggest / Amazon, which do not need Ads at all.
+            if (isChooser) sessionBroken = why;
             break;
           }
           if (attempt < SEED_MAX_ATTEMPTS) {

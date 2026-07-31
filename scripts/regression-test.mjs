@@ -3179,7 +3179,10 @@ async function run() {
   // (wrong ocid, no KP access, unexpected page) still fails on the spot.
   // Structural, not length-based: the terminal path records the reason and
   // breaks. A comment growing must not decide whether this passes.
-  assert(/seedErrors\.push\([^)]*why[^)]*\);\s*break;/.test(kwDisc),
+  // Ends the seed: reaches a `break` with no `continue` in between, so it can
+  // never loop on the same dead page. Structural, and immune to statements or
+  // comments being added between the two.
+  assert(/seedErrors\.push\([^)]*why[^)]*\);(?:(?!continue;)[\s\S]){0,800}break;/.test(kwDisc),
     'KPLAND.5 a redirect still ends the seed rather than looping');
   assert(/const isChooser = \/ACCOUNT CHOOSER\/\.test\(why\);/.test(kwDisc),
     'KPLAND.6 the chooser is distinguished from other redirects');
@@ -3308,6 +3311,28 @@ async function run() {
     // The read path must not hand back a raw string for it again.
     assert(!/autosuggestions: x\.autosuggestions\b/.test(dJobs),
       'ROUNDTRIP.4 autosuggestions is never passed through as raw text');
+  }
+
+  // ===== KP must not spend 15s discovering a page it cannot use =====
+  // kp.js only injects on ads.google.com/aw/keywordplanner/*. Pinging it on
+  // an account chooser can never succeed, yet we waited 15 tries x 1s on
+  // every seed of every attempt: 618 of 638 KP navigations in 24h were the
+  // chooser, ~3h/day of fleet time spent waiting on a page that cannot answer.
+  {
+    const kd = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+    assert(/const earlyWhy = await explainKpLandingPage\(tabId\)|let earlyWhy = await explainKpLandingPage\(tabId\)/.test(kd),
+      'KPFAST.1 the landing page is checked BEFORE the long ping');
+    assert(/earlyWhy \? false : await pingContentScript/.test(kd),
+      'KPFAST.2 a known-bad landing page skips the ping entirely');
+    // Google can transit accounts.google.com mid-handshake; one instant look
+    // would fail seeds that were about to succeed.
+    assert(/if \(earlyWhy\) \{[\s\S]{0,200}sleep\(2000\)[\s\S]{0,120}explainKpLandingPage\(tabId\)/.test(kd),
+      'KPFAST.3 a bad landing page is confirmed settled before being believed');
+    // A dead Ads session belongs to the profile, not the seed.
+    assert(/if \(isChooser\) sessionBroken = why;/.test(kd),
+      'KPFAST.4 a chooser marks the whole session broken');
+    assert(/if \(sessionBroken\) \{[\s\S]{0,300}break;/.test(kd),
+      'KPFAST.5 remaining seeds are skipped once the session is known broken');
   }
 
   // ===== KP account chooser is now recoverable =====
