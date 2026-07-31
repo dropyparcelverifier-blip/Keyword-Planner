@@ -3365,6 +3365,20 @@ async function run() {
       'RESUMECFG.3 an unreachable manager falls back to saved options');
   }
 
+  // KP disabled centrally must disable the WEBSITE flow too -- it is the same
+  // Keyword Planner and the same dead account. skipR1Kp skipped only the
+  // text-seed scrape, so the fallback kept walking into the account chooser
+  // after KP was supposedly off.
+  {
+    const kdk = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+    assert(/const websiteFallbackAllowed = opts\.skipR1Kp !== true && !websiteFallbackUsedFor\.has\(cleanUrl\);/.test(kdk),
+      'KPOFF.1 the website fallback honours the KP-disabled flag');
+    // The decision must be observable, or "the flag never arrived" and "the
+    // flag arrived and was overridden" look identical in the log.
+    assert(/KP decision: skip=\$\{skipR1Kp\}/.test(kdk),
+      'KPOFF.2 the KP skip decision is logged with its inputs');
+  }
+
   // ===== parallel leaf SERPs =====
   // Leaf searches are the highest-volume operation in the engine (11,528 a
   // week vs 965 product SERP loads) and ran one at a time, mostly waiting on

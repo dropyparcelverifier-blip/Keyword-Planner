@@ -4075,6 +4075,17 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       const skipR1Kp = opts.skipR1Kp === true
         || roundAlreadyDone('kp')
         || kpDeadStreakIsArmed(r1KpStreak);
+      // Say the decision out loud, with the inputs.
+      //
+      // "KP is disabled" was set centrally and workers kept scraping anyway,
+      // and nothing in the log distinguished "the flag never arrived" from
+      // "the flag arrived and something else re-enabled it". Two wrong guesses
+      // went by before this was measurable. One line, once per SKU.
+      onProgress?.({
+        currentProduct: productName,
+        currentSource: 'kp',
+        currentAction: `KP decision: skip=${skipR1Kp} (opts.skipR1Kp=${opts.skipR1Kp === true}, alreadyDone=${roundAlreadyDone('kp')}, deadStreak=${r1KpStreak})`,
+      });
       let kpResult;
       if (skipR1Kp) {
         const skipReason = opts.skipR1Kp === true ? 'operator flag'
@@ -4116,7 +4127,12 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         // false; stating it explicitly here (rather than leaning on the
         // `!== false` default) means the once-per-SKU guarantee is visible
         // at the call site instead of implied three functions away.
-        const websiteFallbackAllowed = !websiteFallbackUsedFor.has(cleanUrl);
+        // The website flow is the same Keyword Planner, so a disabled KP must
+        // disable it too. skipR1Kp skipped only the text-seed scrape, and the
+        // website fallback carried on walking into the same dead account --
+        // which is what kept the account chooser in the logs after KP was
+        // supposedly turned off.
+        const websiteFallbackAllowed = opts.skipR1Kp !== true && !websiteFallbackUsedFor.has(cleanUrl);
         websiteFallbackUsedFor.add(cleanUrl);
         kpResult = await getKeywordPlannerIdeas(kpSeeds, kpUrl, kpMaxPerProduct,
           (m) => onProgress?.({ currentProduct: productName, currentAction: m }),
