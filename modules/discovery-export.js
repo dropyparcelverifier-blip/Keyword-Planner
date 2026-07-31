@@ -6,6 +6,19 @@
 import * as XLSX from '../lib/xlsx.mjs';
 
 // SheetJS rejects strings longer than 32767 chars per cell.
+// Join a value that SHOULD be an array but may already be joined text.
+//
+// Rows restored from the manager carry these columns as ' | ' strings, and a
+// bare .join on one threw "(r.autosuggestions || []).join is not a function",
+// failing the entire incremental push -- every row in the batch, not just the
+// offending field. A push is the durability path; it must not be able to die
+// on a type mismatch in one cosmetic column.
+function joinList(v, sep = ' | ') {
+  if (Array.isArray(v)) return v.filter(Boolean).join(sep);
+  if (typeof v === 'string') return v;
+  return '';
+}
+
 // matched_thumbnails (many image URLs) and autosuggestions can blow past this
 // for high-volume keywords — truncate with a clear suffix.
 const MAX_CELL = 32700;
@@ -199,7 +212,7 @@ function rowsForExport(report) {
       kp_bid_high:         r.kpBidHigh         || '',
       // --- Autosuggest expansion ---
       autosuggest_count: r.autosuggestCount,
-      autosuggestions:   safeCell((r.autosuggestions || []).join(' | ')),
+      autosuggestions:   safeCell(joinList(r.autosuggestions, ' | ')),
       // --- Amazon Round (R3) ---
       amazon_suggest_count: r.amazon_suggest_count || 0,
       amazon_rank:          r.amazon_rank          || 0,
@@ -216,12 +229,12 @@ function rowsForExport(report) {
       // Per-match quality tag (clean / partial_spec_confirmed /
       // ambiguous_brand_match / dhash / url_match). Lets the user filter
       // out ambiguous matches or audit them in Excel.
-      matched_qualities:  safeCell((r.matchedQualities || []).join(' | ')),
+      matched_qualities:  safeCell(joinList(r.matchedQualities, ' | ')),
       ambiguous_match_count: r.ambiguousMatchCount || 0,
       pack_variant_count:    r.packVariantCount     || 0,
       // Destination links for matched results + which of them verified.
-      matched_links:  safeCell((r.matchedLinks  || []).filter(Boolean).join(' | ')),
-      verified_links: safeCell((r.verifiedLinks || []).filter(Boolean).join(' | ')),
+      matched_links:  safeCell(joinList(r.matchedLinks, ' | ')),
+      verified_links: safeCell(joinList(r.verifiedLinks, ' | ')),
       product_url:   r.productUrl,
       product_image: r.productImage,
     };
@@ -502,13 +515,13 @@ export async function pushToAdBrain(report) {
         matched_thumbnails:  paired.map(p => `${p.url} [${p.conf}]`).join(' | '),
         matched_sellers:     paired.map(p => p.seller).filter(Boolean).join(' | ') || null,
         matched_prices:      paired.map(p => p.price ).filter(Boolean).join(' | ') || null,
-        matched_qualities:   (r.matchedQualities || []).join(' | ') || null,
+        matched_qualities:   joinList(r.matchedQualities, ' | ') || null,
         ambiguous_match_count: r.ambiguousMatchCount || 0,
         pack_variant_count:    r.packVariantCount    || 0,
-        matched_links:  (r.matchedLinks  || []).filter(Boolean).join(' | ') || null,
-        verified_links: (r.verifiedLinks || []).filter(Boolean).join(' | ') || null,
+        matched_links:  joinList(r.matchedLinks, ' | ') || null,
+        verified_links: joinList(r.verifiedLinks, ' | ') || null,
         autosuggest_count: r.autosuggestCount,
-        autosuggestions: (r.autosuggestions || []).join(' | '),
+        autosuggestions: joinList(r.autosuggestions, ' | '),
         amazon_suggest_count: r.amazon_suggest_count || 0,
         amazon_rank:          r.amazon_rank          || 0,
         amazon_price:         r.amazon_price         || null,

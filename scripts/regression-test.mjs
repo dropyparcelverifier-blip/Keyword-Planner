@@ -3284,6 +3284,32 @@ async function run() {
   assert(/chrome\.storage\.session \|\| chrome\.storage\.local/.test(kwDisc), 'UNATTENDED.9 owned tabs persist across SW recycles');
   assert((kwDisc.match(/await saveOwned\(\)/g) || []).length >= 4, 'UNATTENDED.10 ownership is saved at every mutation point');
 
+  // ===== array columns must survive the manager round trip =====
+  // pushToAdBrain stores these as ' | ' text. Once resume actually started
+  // working, restored rows carried strings where arrays were expected and the
+  // next push threw "(r.autosuggestions || []).join is not a function" --
+  // failing the WHOLE batch, not just that column. 9 lost pushes in 6h.
+  {
+    const dExp  = readFileSync(resolve(REPO, 'modules/discovery-export.js'), 'utf-8');
+    const dJobs = readFileSync(resolve(REPO, 'modules/discovery-jobs.js'), 'utf-8');
+    assert(/function joinList\(v, sep = ' \| '\)/.test(dExp),
+      'ROUNDTRIP.1 a tolerant join helper exists');
+    // Every column that is STORED as ' | ' text must join through the helper,
+    // because those are the ones that can come back as strings. Arrays built
+    // locally (r.sellers -> .map(...).join) are never restored and are fine.
+    for (const prop of ['autosuggestions', 'matchedQualities', 'matchedLinks', 'verifiedLinks']) {
+      assert(!new RegExp(`\\(r\\.${prop}\\s*\\|\\|\\s*\\[\\]\\)[^,;]*\\.join\\(`).test(dExp),
+        `ROUNDTRIP.2 ${prop} has no bare .join a string could break`);
+      assert(new RegExp(`joinList\\(r\\.${prop}`).test(dExp),
+        `ROUNDTRIP.2b ${prop} joins through the tolerant helper`);
+    }
+    assert(/typeof x\.autosuggestions === 'string'/.test(dJobs),
+      'ROUNDTRIP.3 autosuggestions is split back into an array on read');
+    // The read path must not hand back a raw string for it again.
+    assert(!/autosuggestions: x\.autosuggestions\b/.test(dJobs),
+      'ROUNDTRIP.4 autosuggestions is never passed through as raw text');
+  }
+
   // ===== KP account chooser is now recoverable =====
   // authuser pins a signed-in profile BY INDEX. A worker profile has exactly
   // one account, so any index other than 0 -- or one that shifted after a

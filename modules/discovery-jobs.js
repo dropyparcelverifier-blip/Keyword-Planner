@@ -140,7 +140,17 @@ export async function fetchBatchReportFromManager(batchId, onProgress) {
     totalSellers: x.total_sellers, seller_type: x.seller_type, dropyIsSeller: x.dropy_is_seller, dropyOnSerp: x.dropy_on_serp,
     adsOnSerp: x.ads_on_serp, sellers_on_serp: x.sellers_on_serp, seller_titles: x.seller_titles, serp_url: x.serp_url,
     kpMonthlySearches: x.kp_monthly_searches, kpBidLow: x.kp_bid_low, kpBidHigh: x.kp_bid_high,
-    autosuggestCount: x.autosuggest_count, autosuggestions: x.autosuggestions,
+    autosuggestCount: x.autosuggest_count,
+    // Split back into an array, the way matchedLinks/verifiedLinks below do.
+    // pushToAdBrain stores this as `(r.autosuggestions || []).join(' | ')`,
+    // so it comes back as TEXT. Handing that straight to a restored row made
+    // the NEXT incremental push call .join on a string -- "(r.autosuggestions
+    // || []).join is not a function" -- and the whole push failed, taking
+    // every other row in that batch with it. Latent until resume started
+    // working, because nothing else ever read rows back from the manager.
+    autosuggestions: typeof x.autosuggestions === 'string'
+      ? x.autosuggestions.split(' | ').filter(Boolean)
+      : (Array.isArray(x.autosuggestions) ? x.autosuggestions : []),
     amazonSuggestCount: x.amazon_suggest_count, amazonRank: x.amazon_rank, amazonPrice: x.amazon_price,
     amazonRating: x.amazon_rating, amazonReviews: x.amazon_reviews, amazonTitle: x.amazon_title,
     amazonCompetitors: x.amazon_competitors, amazonTotalResults: x.amazon_total_results,
