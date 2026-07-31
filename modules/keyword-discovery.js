@@ -4628,7 +4628,19 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         // skip the filter on purpose so KP's broader set isn't over-pruned).
         // For any KP keyword that reached the SERP-cycle subset and is
         // clearly off-product, skip the SERP load entirely.
-        if (typeof opts.isRelevantToProduct === 'function' && productContext &&
+        // ...but NEVER for a last-resort seed. It is built from the product's
+        // own name, so it is relevant by construction, and this gate is
+        // brand-strict: for any product whose brand aliases the classifier
+        // could not extract, the product's OWN NAME is judged irrelevant.
+        // addRow already exempts these (isLastResortSeed); this second gate
+        // did not, so the seed was added and then skipped before its SERP --
+        // "skipped irrelevant keyword (no SERP load)" on the very row that
+        // exists to rescue a SKU with nothing else. The SKU then yielded
+        // nothing and hit FAIL-FAST on the next pass. Same bug as addRow's,
+        // fixed in one place and not the other.
+        const isLastResortRow = row.source === 'fallback_no_kp';
+        if (!isLastResortRow &&
+            typeof opts.isRelevantToProduct === 'function' && productContext &&
             !opts.isRelevantToProduct(row.keyword, productContext)) {
           // If the rejection was specifically a form-factor mismatch, name
           // the wrong-form in the log so the user can see why.

@@ -3424,6 +3424,23 @@ async function run() {
       'FAILFAST.2 the last-resort seed falls back to the existing row when addRow merges');
   }
 
+  // The last-resort seed exists to rescue a SKU that has nothing else. It is
+  // built from the product's OWN NAME, and the relevance gate is brand-strict
+  // -- for a product whose brand aliases could not be extracted, its own name
+  // is judged irrelevant. addRow exempts it; the pre-SERP gate in the cycle
+  // did NOT, so the seed was added and then skipped before its SERP, the SKU
+  // yielded nothing, and it hit FAIL-FAST next pass.
+  {
+    const kdl = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+    assert(/const isLastResortRow = row\.source === 'fallback_no_kp';/.test(kdl),
+      'LASTRESORT.1 the cycle recognises a last-resort row');
+    assert(/if \(!isLastResortRow &&[\s\S]{0,60}typeof opts\.isRelevantToProduct/.test(kdl),
+      'LASTRESORT.2 it is exempt from the pre-SERP relevance gate');
+    // Both gates must agree, or the exemption only half works.
+    assert(/const isLastResortSeed = source === 'fallback_no_kp';/.test(kdl),
+      'LASTRESORT.3 addRow uses the same definition');
+  }
+
   // ===== parallel leaf SERPs =====
   // Leaf searches are the highest-volume operation in the engine (11,528 a
   // week vs 965 product SERP loads) and ran one at a time, mostly waiting on
