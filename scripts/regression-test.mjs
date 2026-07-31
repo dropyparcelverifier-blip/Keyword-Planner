@@ -3431,8 +3431,17 @@ async function run() {
     assert(/if \(n === 2\) return deepUrl;[\s\S]{0,120}noAuthUserUrl \|\| deepUrl/.test(kd),
       'KPAUTH.3 the ladder is three distinct URLs');
     // Previously this branch failed the seed on the spot.
-    assert(/isChooser && attempt < SEED_MAX_ATTEMPTS && nextUrl !== navUrl/.test(kd),
-      'KPAUTH.4 a chooser retries only while a DIFFERENT url is left to try');
+    // ocid names a SPECIFIC Ads account. Unassigned workers all got the same
+    // one, so on a profile signed in as anyone else Ads refuses the deep link
+    // and bounces via /nav/login to a chooser -- on a profile with exactly one
+    // account, already signed in. Every ladder rung carried that same ocid, so
+    // a chooser now jumps straight to the URL with nothing pinned.
+    assert(/const bareKpUrl = 'https:\/\/ads\.google\.com\/aw\/keywordplanner\/home';/.test(kd),
+      'KPAUTH.4 an unpinned KP url exists (no ocid, no authuser)');
+    assert(/if \(isChooser && !triedBareKp\)/.test(kd),
+      'KPAUTH.4b a chooser goes straight to it rather than walking the ladder');
+    assert(/const navUrl = forceUrl \|\| urlForAttempt\(attempt\);/.test(kd),
+      'KPAUTH.4c once unpinned, later attempts do not fall back to the rejected ocid');
     assert(/if \(!u\.searchParams\.has\('authuser'\)\) return null;/.test(kd),
       'KPAUTH.5 no authuser pinned means no pointless extra attempt');
   }

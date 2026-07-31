@@ -1334,6 +1334,22 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
       return u.toString();
     } catch { return null; }
   })();
+
+  // The URL with NO account pinned at all -- no ocid, no authuser.
+  //
+  // ocid names a SPECIFIC Google Ads account. Every worker without an explicit
+  // assignment was being handed the same one (8431942470, owned by one
+  // particular Google login), so on a profile signed in as anybody else Ads
+  // cannot open it, bounces to /nav/login, and Google shows an account
+  // chooser. The give-away is in the chooser URL itself:
+  // continue=https://ads.google.com/nav/login?dst=/aw/... -- that is Ads
+  // refusing the deep link, not Google asking who you are. Which is why it
+  // kept happening on profiles that ARE signed in, with exactly one account.
+  //
+  // Asking for Keyword Planner with no account pinned makes Ads open the
+  // signed-in account's own default -- "use whatever account this profile
+  // has", which is the intent for an unassigned worker.
+  const bareKpUrl = 'https://ads.google.com/aw/keywordplanner/home';
   const urlForAttempt = (n) => {
     if (n <= 1) return hubUrl;
     if (n === 2) return deepUrl;
@@ -1412,12 +1428,16 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
       continue;
     }
     let succeeded = false;
+    // Set when a chooser sends us to the unpinned URL; pins that URL for the
+    // remaining attempts instead of falling back onto the rejected ocid.
+    let forceUrl = null;
+    let triedBareKp = false;
     for (let attempt = 1; attempt <= SEED_MAX_ATTEMPTS && !succeeded; attempt++) {
       try {
         // Navigate the KP tab for this seed. The Worker reuses the same tab id;
         // the navigation forces kp.js to re-inject cleanly.
         const attemptLabel = attempt > 1 ? ` (retry ${attempt}/${SEED_MAX_ATTEMPTS})` : '';
-        const navUrl = urlForAttempt(attempt);
+        const navUrl = forceUrl || urlForAttempt(attempt);
         log(`KP seed ${i + 1}/${seedList.length}: navigating to ${attempt <= 1 ? 'the configured KP page' : 'the /ideas/new deep link'}${attemptLabel}`);
         const tabId = await Worker.navigate(navUrl);
         await sleep(randInt(2500, 4000));
@@ -1452,16 +1472,16 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
             // past it. Retry only while a DIFFERENT url is still to be tried;
             // repeating the same one would just burn a navigate and 15s.
             const isChooser = /ACCOUNT CHOOSER/.test(why);
-            const nextUrl = urlForAttempt(attempt + 1);
-            if (isChooser && attempt < SEED_MAX_ATTEMPTS && nextUrl !== navUrl) {
-              // Say what we are ACTUALLY about to try. This logged "retrying
-              // without the pinned authuser" on the hop to the deep link,
-              // which still carries authuser -- so the log claimed a fix was
-              // being applied one rung before it was.
-              const nextLabel = (nextUrl === noAuthUserUrl) ? 'the same URL with authuser dropped'
-                              : (nextUrl === deepUrl)       ? 'the /ideas/new deep link'
-                              : 'the configured URL';
-              log(`KP: account chooser — retrying with ${nextLabel}`);
+            // A chooser goes STRAIGHT to the unpinned URL rather than walking
+            // the ladder. Every other rung carries the same ocid, and the ocid
+            // is what Ads is rejecting -- so the deep link and the
+            // authuser-dropped variant both land on the identical chooser.
+            // Walking them was three navigations to reach the one URL that
+            // could work.
+            if (isChooser && !triedBareKp) {
+              triedBareKp = true;
+              forceUrl = bareKpUrl;
+              log(`KP: account chooser — this profile's Google login cannot open the pinned Ads account (ocid). Retrying with no account pinned, so Ads uses whichever account this profile owns.`);
               await sleep(2000);
               continue;
             }
