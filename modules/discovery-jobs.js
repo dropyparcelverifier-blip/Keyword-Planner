@@ -122,12 +122,16 @@ export async function getJobSummary() {
 // MANAGER UI: pull every discovered-keyword row for a batch back from the
 // manager, converting snake_case export columns to the camelCase shape the
 // export layer expects (inverse of pushToAdBrain's mapping).
-export async function fetchBatchReportFromManager(batchId, onProgress) {
-  if (!batchId) throw new Error('Batch ID required.');
-  const r = await _get(`/api/keywords?batchId=${encodeURIComponent(batchId)}`);
-  const rows = Array.isArray(r.rows) ? r.rows : [];
-  onProgress?.({ fetched: rows.length });
-  return rows.map(x => ({
+// Manager row (snake_case, as stored) -> engine/report row (camelCase).
+//
+// The two shapes are NOT interchangeable and the boundary is easy to miss:
+// the manager stores batch_id / product_url, while the engine and the export
+// layer read batchId / productUrl. Feeding a stored row straight into the
+// report gives it neither, and the next push is rejected with `no_batch_id`
+// for product "(unknown)" -- 13,003 rows thrown away in three hours, all of
+// them work that had already been done.
+export function managerRowToReportRow(x) {
+  return ({
     batchId: x.batch_id, sku: x.sku, keyword: x.keyword, source: x.source,
     parentKeyword: x.parent_keyword, productName: x.product_name, productUrl: x.product_url,
     productImage: x.product_image, priority: x.priority, adRating: x.ad_rating, frequency: x.frequency,
@@ -157,7 +161,15 @@ export async function fetchBatchReportFromManager(batchId, onProgress) {
     topMatchSeller: x.top_match_seller, topMatchPrice: x.top_match_price, topMatchThumbnail: x.top_match_thumbnail,
     matched_thumbnails: x.matched_thumbnails, matched_sellers: x.matched_sellers, matched_prices: x.matched_prices,
     matchedLinks: (x.matched_links || '').split(' | ').filter(Boolean), verifiedLinks: (x.verified_links || '').split(' | ').filter(Boolean),
-  }));
+  });
+}
+
+export async function fetchBatchReportFromManager(batchId, onProgress) {
+  if (!batchId) throw new Error('Batch ID required.');
+  const r = await _get(`/api/keywords?batchId=${encodeURIComponent(batchId)}`);
+  const rows = Array.isArray(r.rows) ? r.rows : [];
+  onProgress?.({ fetched: rows.length });
+  return rows.map(managerRowToReportRow);
 }
 
 // MANAGER UI: per-worker breakdown for a batch (inFlight / done / failed).
@@ -354,7 +366,12 @@ export async function fetchWorkerBundleHash() {
 export async function fetchResumeState(batchId, productUrl) {
   if (!batchId || !productUrl) return null;
   try {
-    return await _get(`/api/jobs/resume-state?batchId=${encodeURIComponent(batchId)}&productUrl=${encodeURIComponent(productUrl)}`);
+    const r = await _get(`/api/jobs/resume-state?batchId=${encodeURIComponent(batchId)}&productUrl=${encodeURIComponent(productUrl)}`);
+    // priorRows come back exactly as stored -- snake_case. Convert them, or
+    // every restored row re-enters the report without a batchId and is
+    // rejected on the next push.
+    if (r && Array.isArray(r.priorRows)) r.priorRows = r.priorRows.map(managerRowToReportRow);
+    return r;
   } catch { return null; }
 }
 

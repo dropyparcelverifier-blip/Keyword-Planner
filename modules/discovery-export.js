@@ -442,6 +442,8 @@ export async function pushToAdBrain(report) {
   const managerToken = String(_cfg.adbrainManagerToken || '').trim();
   const endpoint = `${managerBase}/api/keywords`;
   const BATCH = 100;
+  // The batch every row in this push belongs to, for the manager's fallback.
+  const batchIdForPush = report.find(r => r && r.batchId)?.batchId || null;
   let success = 0, failed = 0, rejectedOrphan = 0;
   let managerActiveBatchId = null;
   const errors = [];
@@ -538,7 +540,11 @@ export async function pushToAdBrain(report) {
       const resp = await fetch(endpoint, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ rows: slice }),
+        // Top-level batchId as a floor. The manager falls back to it when a
+        // row carries none (`r.batch_id || b.batchId`), so one row arriving
+        // without an id costs that row's id, not the row. Rows still carry
+        // their own, which wins.
+        body: JSON.stringify({ rows: slice, batchId: batchIdForPush }),
       });
       if (resp.ok || resp.status === 201) {
         // Manager echoes the current active_batch_id so we can detect stale

@@ -3379,6 +3379,23 @@ async function run() {
       'KPOFF.2 the KP skip decision is logged with its inputs');
   }
 
+  // Manager rows are snake_case; the engine and exporter read camelCase.
+  // Resume fed stored rows straight into the report, so every restored row
+  // had no batchId and the next push was rejected as `no_batch_id` for
+  // product "(unknown)" -- 13,003 rows of completed work discarded in 3h.
+  {
+    const dj4 = readFileSync(resolve(REPO, 'modules/discovery-jobs.js'), 'utf-8');
+    assert(/export function managerRowToReportRow/.test(dj4),
+      'ROWSHAPE.1 one named converter for the manager->engine boundary');
+    assert(/r\.priorRows = r\.priorRows\.map\(managerRowToReportRow\)/.test(dj4),
+      'ROWSHAPE.2 resume rows are converted, not passed through raw');
+    assert(/rows\.map\(managerRowToReportRow\)/.test(dj4),
+      'ROWSHAPE.3 the batch-report path uses the same converter');
+    const de2 = readFileSync(resolve(REPO, 'modules/discovery-export.js'), 'utf-8');
+    assert(/JSON\.stringify\(\{ rows: slice, batchId: batchIdForPush \}\)/.test(de2),
+      'ROWSHAPE.4 the push carries a top-level batchId as a floor');
+  }
+
   // ===== parallel leaf SERPs =====
   // Leaf searches are the highest-volume operation in the engine (11,528 a
   // week vs 965 product SERP loads) and ran one at a time, mostly waiting on
