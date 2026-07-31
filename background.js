@@ -1534,6 +1534,31 @@ async function _handleStartInner(msg) {
     if (strippedPacing) {
       emitProgress({ currentAction: `Dropped stale pacing from saved run options — using current (faster) defaults`, logKind: 'ok' });
     }
+    // Central config WINS over saved run options on resume.
+    //
+    // Saved options are a snapshot of whatever the run started with. A resume
+    // replayed that snapshot and never looked at the manager again, so a
+    // setting changed centrally did not reach a worker until it happened to
+    // start a brand-new run -- which, on a long batch, can be hours or never.
+    // Turning Keyword Planner off fleet-wide was ignored by every worker
+    // mid-batch for exactly this reason; they kept walking into an account
+    // chooser we had already decided to stop visiting.
+    //
+    // This is the same idea as the stale-pacing strip above, generalised: the
+    // manager is the source of truth, and a resume should adopt it.
+    try {
+      const liveCfg = await fetchWorkerConfig(state.workerId);
+      const liveOpts = liveCfg ? workerConfigToRunOpts(liveCfg) : {};
+      const changed = Object.keys(liveOpts).filter(k => JSON.stringify(runOpts[k]) !== JSON.stringify(liveOpts[k]));
+      if (changed.length) {
+        runOpts = { ...runOpts, ...liveOpts };
+        emitProgress({ currentAction: `Adopted current manager config on resume (${changed.join(', ')})`, logKind: 'ok' });
+      }
+    } catch (e) {
+      // Manager unreachable — carry on with the saved options rather than
+      // refusing to resume. Stale settings beat a stalled worker.
+      emitProgress({ currentAction: `Could not refresh config on resume (${e.message}) — using saved run options`, logKind: 'warn' });
+    }
     state.lastRunOpts = runOpts;
     await chrome.storage.local.set({ [STORAGE_KEY_LAST_RUN_OPTS]: runOpts }).catch(() => {});
     emitProgress({ currentAction: `Resuming previous run (${products.length} input products; ${state.doneProducts.length} already done)`, logKind: 'ok' });

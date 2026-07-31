@@ -3350,6 +3350,21 @@ async function run() {
   assertEq(readBack.data.config.kp_enabled, false, 'CFGSHAPE.3 the value actually persists');
   await req('POST', '/api/config', { configPatch: { kp_enabled: null } });
 
+  // A resume replayed the run options the run STARTED with and never asked
+  // the manager again, so a centrally-changed setting never reached a worker
+  // mid-batch. Disabling Keyword Planner fleet-wide was ignored by every
+  // in-flight worker for exactly this reason.
+  {
+    const bgR = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
+    assert(/const liveCfg = await fetchWorkerConfig\(state\.workerId\)/.test(bgR),
+      'RESUMECFG.1 resume re-reads manager config');
+    assert(/runOpts = \{ \.\.\.runOpts, \.\.\.liveOpts \}/.test(bgR),
+      'RESUMECFG.2 central config wins over the saved snapshot');
+    // A manager blip must not stop a worker resuming.
+    assert(/Could not refresh config on resume/.test(bgR),
+      'RESUMECFG.3 an unreachable manager falls back to saved options');
+  }
+
   // ===== parallel leaf SERPs =====
   // Leaf searches are the highest-volume operation in the engine (11,528 a
   // week vs 965 product SERP loads) and ran one at a time, mostly waiting on
