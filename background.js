@@ -1649,13 +1649,22 @@ async function _handleStartInner(msg) {
           // completes with R1 data. Fetched at runKeywordDiscovery start so
           // toggle takes effect on the NEXT SKU without a full worker
           // restart.
-          skipR2Kp: (await chrome.storage.local.get('adbrainSkipR2Kp')).adbrainSkipR2Kp === true,
+          // EITHER source may disable KP: the per-machine storage toggle OR
+          // the fleet-wide manager config (kp_enabled:false -> runOpts).
+          // This used to read storage ONLY, so it silently overwrote the
+          // config-derived value with `false` at the very last step -- the
+          // manager served kp_enabled:false, workerConfigToRunOpts mapped it,
+          // pickRunOpts carried it, and then this line threw it away. The
+          // whole chain was right and the last link discarded it.
+          skipR2Kp: runOpts.skipR2Kp === true
+            || (await chrome.storage.local.get('adbrainSkipR2Kp')).adbrainSkipR2Kp === true,
           // Manual R1 KP skip — for operators whose Google Ads account is
           // known-flagged. Bypasses ALL KP calls (both R1 and R2). Every
           // SKU runs on PAA + autosuggest + Amazon only. Yield drops but
           // every SKU still completes with SOMETHING. Auto-armed when the
           // shared KP dead-streak counter hits 2 (see keyword-discovery.js).
-          skipR1Kp: (await chrome.storage.local.get('adbrainSkipR1Kp')).adbrainSkipR1Kp === true,
+          skipR1Kp: runOpts.skipR1Kp === true
+            || (await chrome.storage.local.get('adbrainSkipR1Kp')).adbrainSkipR1Kp === true,
           // Website-only KP mode — skip the text-seed flow entirely, use
           // 'Start with a website' directly. Less bot-detected (single
           // URL submit vs typed keywords with chip commits). Passed to

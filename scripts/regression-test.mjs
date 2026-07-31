@@ -3396,6 +3396,21 @@ async function run() {
       'ROWSHAPE.4 the push carries a top-level batchId as a floor');
   }
 
+  // A fleet-wide setting must survive the LAST step too. kp_enabled:false was
+  // served by the manager, mapped by workerConfigToRunOpts and carried by
+  // pickRunOpts -- then the engine call site read the flag from local storage
+  // only and overwrote it with false. The whole chain was right and the final
+  // link discarded it; the KP-decision log is what exposed it.
+  {
+    const bgK = readFileSync(resolve(REPO, 'background.js'), 'utf-8');
+    for (const k of ['skipR1Kp', 'skipR2Kp']) {
+      assert(bgK.includes(`${k}: runOpts.${k} === true`),
+        `KPOFF.3 ${k} honours the manager config, not just local storage`);
+      assert(!bgK.includes(`${k}: (await chrome.storage.local.get`),
+        `KPOFF.4 ${k} is no longer read from storage alone`);
+    }
+  }
+
   // ===== parallel leaf SERPs =====
   // Leaf searches are the highest-volume operation in the engine (11,528 a
   // week vs 965 product SERP loads) and ran one at a time, mostly waiting on
