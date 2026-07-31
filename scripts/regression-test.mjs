@@ -3313,6 +3313,31 @@ async function run() {
       'ROUNDTRIP.4 autosuggestions is never passed through as raw text');
   }
 
+  // ===== adaptive pacing =====
+  // Flat human-pacing delays charged a fixed premium against a risk that is
+  // not materialising: 10 CAPTCHAs + 23 rate-limits across 11,528 searches in
+  // seven days (0.09%). Go fast while Google is calm, back off hard when it
+  // is not -- x6 is SLOWER than the old fixed pacing, so the response to a
+  // real block is stronger than what it replaces.
+  {
+    const kd = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+    assert(/const PACE_MIN = 1, PACE_MAX = 6;/.test(kd), 'PACE.1 the factor is bounded');
+    assert(/paceFactor = Math\.min\(PACE_MAX, paceFactor \* 2\)/.test(kd), 'PACE.2 a block doubles the delay');
+    assert(/paceFactor = Math\.max\(PACE_MIN, paceFactor \/ 2\)/.test(kd), 'PACE.3 clean SERPs ease it back');
+    // Must be driven by real signals, not a timer.
+    assert(/serpData\.captcha\)[\s\S]{0,160}paceBackOff\(/.test(kd), 'PACE.4 a CAPTCHA backs off');
+    assert(/!serpData\.ok\)[\s\S]{0,160}paceBackOff\(/.test(kd),      'PACE.5 a failed SERP backs off');
+    assert(/consecutiveSerpBlocks = 0;[\s\S]{0,60}paceRecover\(\)/.test(kd), 'PACE.6 a good SERP feeds recovery');
+    // Every human-pacing sleep must go through the factor, or the slow path
+    // silently ignores the back-off.
+    assertEq((kd.match(/paced\(randInt\(/g) || []).length, 2, 'PACE.7 both SERP delay sites are paced');
+    // Recovery must need a RUN of clean results, not a single one.
+    assert(/if \(\+\+cleanSerpRun < 10\) return;/.test(kd), 'PACE.8 easing needs a sustained clean run');
+    // Leaf searches are the highest-volume operation in the whole engine.
+    assert(/LEAF_SERP_DELAY_MIN_MS = 2_000;/.test(kd) && /LEAF_SERP_DELAY_MAX_MS = 6_000;/.test(kd),
+      'PACE.9 leaf SERP delays trimmed (highest-volume path)');
+  }
+
   // ===== KP must not spend 15s discovering a page it cannot use =====
   // kp.js only injects on ads.google.com/aw/keywordplanner/*. Pinging it on
   // an account chooser can never succeed, yet we waited 15 tries x 1s on

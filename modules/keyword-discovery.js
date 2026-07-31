@@ -3303,6 +3303,49 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
   // to stop the run.
   let consecutiveSerpBlocks = 0;
 
+  // ============ Adaptive pacing ============
+  //
+  // Deliberate sleep was 30% of measured wall-clock -- 103 pauses averaging
+  // 22s in a six-hour sample, second only to SERP loading itself. It exists to
+  // look human to Google, but it was paying a fixed premium against a risk
+  // that turned out to be near zero: 10 CAPTCHAs and 23 rate-limits across
+  // 11,528 searches in seven days, 0.09%. A flat 5-12s delay on every search
+  // is insurance priced for a threat that is not materialising.
+  //
+  // So: go fast while Google is calm, slow down the moment it is not. The
+  // factor multiplies every human-pacing delay. A block doubles it (up to 6x,
+  // which is SLOWER than the old fixed pacing -- backing off harder than we
+  // ever used to when it actually matters); a run of clean SERPs decays it
+  // back toward 1. Failure is the thing that should be expensive, not success.
+  const PACE_MIN = 1, PACE_MAX = 6;
+  let paceFactor = 1;
+  let cleanSerpRun = 0;
+  const paced = (ms) => Math.round(ms * paceFactor);
+  function paceBackOff(why) {
+    const before = paceFactor;
+    paceFactor = Math.min(PACE_MAX, paceFactor * 2);
+    cleanSerpRun = 0;
+    if (paceFactor !== before) {
+      onProgress?.({
+        currentSource: 'pace',
+        currentAction: `Backing off: ${why} — pacing x${before} → x${paceFactor} (delays now ${paced(searchDelayMin)/1000}-${paced(searchDelayMax)/1000}s).`,
+        logKind: 'warn',
+      });
+    }
+  }
+  function paceRecover() {
+    if (paceFactor <= PACE_MIN) return;
+    if (++cleanSerpRun < 10) return;
+    const before = paceFactor;
+    paceFactor = Math.max(PACE_MIN, paceFactor / 2);
+    cleanSerpRun = 0;
+    onProgress?.({
+      currentSource: 'pace',
+      currentAction: `10 clean SERPs — easing pacing x${before} → x${paceFactor}.`,
+      logKind: 'ok',
+    });
+  }
+
   try {
     for (let pi = 0; pi < sorted.length; pi++) {
       if (shouldStop() || report.size >= cap) break;
@@ -3968,7 +4011,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       }
 
       // ----- Search delay BEFORE the one SERP load -----
-      const sdMs = randInt(searchDelayMin, searchDelayMax);
+      const sdMs = paced(randInt(searchDelayMin, searchDelayMax));
       onProgress?.({
         currentProduct: productName,
         currentSource: 'pace',
@@ -4032,6 +4075,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
 
       if (serpData.captcha) {
         consecutiveSerpBlocks++;
+        paceBackOff('Google verification page');
         onProgress?.({
           currentProduct: productName,
           currentSource: 'serp',
@@ -4045,6 +4089,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         }
       } else if (!serpData.ok) {
         consecutiveSerpBlocks++;
+        paceBackOff(`SERP unavailable (${serpData.error})`);
         onProgress?.({
           currentProduct: productName,
           currentSource: 'serp',
@@ -4052,6 +4097,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         });
       } else {
         consecutiveSerpBlocks = 0;
+        paceRecover();
         serpOk = true;
         productImageCount    = serpData.count;
         matchedThumbnails    = serpData.matchedThumbnails;
@@ -4373,8 +4419,8 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // Leaf-pacing knobs. Autosuggest leaves are lower-risk than initial KP
       // seed searches (Google sees them as follow-up queries, not a surge),
       // so we use a shorter randomised pause window for them.
-      const LEAF_SERP_DELAY_MIN_MS = 5_000;
-      const LEAF_SERP_DELAY_MAX_MS = 15_000;
+      const LEAF_SERP_DELAY_MIN_MS = 2_000;
+      const LEAF_SERP_DELAY_MAX_MS = 6_000;
 
       // NOTE: param renamed from `opts` -> `cycleOpts` so the outer `opts`
       // (which carries shouldKeepKeyword / isRelevantToProduct / computeAdRating /
@@ -4426,7 +4472,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         if (productFps && productFps.length > 0 && !shouldSkipSerp() && !skipSerpForBrandOnly) {
           const sdMin = cycleOpts.leaf ? LEAF_SERP_DELAY_MIN_MS : searchDelayMin;
           const sdMax = cycleOpts.leaf ? LEAF_SERP_DELAY_MAX_MS : searchDelayMax;
-          const sdMs = randInt(sdMin, sdMax);
+          const sdMs = paced(randInt(sdMin, sdMax));
           onProgress?.({
             currentProduct: productName,
             currentSource: 'serp',
