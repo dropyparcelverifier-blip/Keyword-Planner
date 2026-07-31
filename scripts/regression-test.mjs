@@ -2934,6 +2934,31 @@ async function run() {
     assert(tabs.size === 0, `TABLIFE.7 close() removes the engine tab (got ${tabs.size})`);
     assert(wins.size === 0, `TABLIFE.8 close() removes windows the engine created (got ${wins.size})`);
 
+    // ----- leases under real concurrency -----
+    // String matching cannot show that a sweep does not steal a tab another
+    // cycle is mid-navigation in. Run the real Worker with several leases
+    // open and a navigate() racing them.
+    W = newWorker();
+    await W.navigate('https://kp/before-leases');
+    const leases = await Promise.all([W.lease(), W.lease(), W.lease()]);
+    assert(new Set(leases).size === 3, `TABLIFE.18 each lease is a distinct tab (got ${new Set(leases).size})`);
+    await W.navigate('https://kp/sweeps-while-leased');
+    for (const id of leases) {
+      assert(tabs.has(id), `TABLIFE.19 a leased tab survives a concurrent navigate sweep (tab ${id} was closed)`);
+    }
+    // Released tabs are POOLED, so the next lease reuses rather than piling up.
+    const before = tabs.size;
+    leases.forEach(id => W.release(id));
+    const reused = await W.lease();
+    assert(leases.includes(reused), 'TABLIFE.20 a released tab is reused, not replaced');
+    assert(tabs.size === before, `TABLIFE.21 reuse opens no new tab (${before} -> ${tabs.size})`);
+    W.release(reused);
+    // close() must reclaim pooled + leased tabs, or a crashed cycle leaks one.
+    const stuck = await W.lease();          // never released, as if the cycle threw
+    assert(tabs.has(stuck), 'TABLIFE.22 harness sanity: the stuck lease is open');
+    await W.close();
+    assert(tabs.size === 0, `TABLIFE.23 close() reclaims even an unreleased lease (got ${tabs.size})`);
+
     // An operator's own window must never be touched — and, since the fix,
     // never even borrowed: engine tabs must not land among their tabs.
     wins.set(9999, { id: 9999, focused: true });
@@ -3311,6 +3336,37 @@ async function run() {
     // The read path must not hand back a raw string for it again.
     assert(!/autosuggestions: x\.autosuggestions\b/.test(dJobs),
       'ROUNDTRIP.4 autosuggestions is never passed through as raw text');
+  }
+
+  // ===== parallel leaf SERPs =====
+  // Leaf searches are the highest-volume operation in the engine (11,528 a
+  // week vs 965 product SERP loads) and ran one at a time, mostly waiting on
+  // Google. Each concurrent cycle needs its OWN tab or they overwrite each
+  // other's navigation.
+  {
+    const kd = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+    assert(/lease: leaseTab/.test(kd) && /release: releaseTab/.test(kd), 'PAR.1 the tab pool exposes lease/release');
+    // The old "exactly one engine tab" sweep would close tabs in active use.
+    assert(/if \(leasedTabs\.has\(id\)\) continue;/.test(kd), 'PAR.2 closeOwned never reclaims a leased tab');
+    // ...but end-of-run cleanup must still get them, or a crashed cycle leaks.
+    assert(/leasedTabs\.clear\(\);[\s\S]{0,120}await closeOwned\(\)/.test(kd),
+      'PAR.3 close() voids leases so nothing survives the run');
+    assert(/async function runPooled\(items, worker\)/.test(kd), 'PAR.4 a bounded-concurrency runner exists');
+    assert((kd.match(/await runPooled\(/g) || []).length >= 2, 'PAR.5 the high-volume loops use it');
+    assert(/if \(leased != null\) Worker\.release\(leased/.test(kd), 'PAR.6 a lease is always returned, even on throw');
+    // Parallelism during a block is when it looks least human, so the two
+    // levers move together rather than independently.
+    assert(/paceFactor > 1 \? 1 : SERP_CONCURRENCY_MAX/.test(kd),
+      'PAR.7 a back-off collapses concurrency to one tab as well as slowing down');
+    // cycleWithLease must live in safeCycle's scope, not at run level.
+    const leaseDecl = kd.split('\n').findIndex(l => /async function cycleWithLease/.test(l));
+    const safeDecl  = kd.split('\n').findIndex(l => /async function safeCycle/.test(l));
+    assert(leaseDecl > safeDecl && leaseDecl > 0,
+      'PAR.8 cycleWithLease is declared where safeCycle is actually visible');
+    const dJobs2 = readFileSync(resolve(REPO, 'modules/discovery-jobs.js'), 'utf-8');
+    assert(/cfg\.serp_concurrency/.test(dJobs2), 'PAR.9 concurrency is tunable from manager config');
+    assert(/Math\.max\(1, Math\.min\(8, Number\(cfg\.serp_concurrency\)/.test(dJobs2),
+      'PAR.10 the config value is clamped, and 1 restores serial behaviour');
   }
 
   // ===== adaptive pacing =====

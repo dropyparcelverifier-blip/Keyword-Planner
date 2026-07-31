@@ -289,6 +289,12 @@ export function workerConfigToRunOpts(cfg) {
   // Whether the KP manual-click fallback may pull its tab to the foreground.
   // Off by default: an unattended worker must never steal focus.
   if (cfg.allow_focus_steal != null)  out.allowFocusSteal       = !!cfg.allow_focus_steal;
+  // How many leaf SERPs may run at once. Tunable from the manager without a
+  // redeploy, because the right value depends on the machine and on how much
+  // parallelism Google tolerates from a given IP -- and if it turns out to be
+  // wrong, the fix should be a config change, not a code push to nine PCs.
+  // 1 restores the old strictly-serial behaviour.
+  if (cfg.serp_concurrency != null)   out.serpConcurrency       = Math.max(1, Math.min(8, Number(cfg.serp_concurrency) || 1));
   return out;
 }
 

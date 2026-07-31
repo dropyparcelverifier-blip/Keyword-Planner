@@ -1447,6 +1447,7 @@ function pickRunOpts(msg) {
     clipThresholdOverride: msg.clipThresholdOverride,
     maxImageMatchRows: msg.maxImageMatchRows,
     autoExport:        msg.autoExport,
+    serpConcurrency:   msg.serpConcurrency,
     searchDelayMinMs:  msg.searchDelayMinMs,
     searchDelayMaxMs:  msg.searchDelayMaxMs,
     productDelayMinMs: msg.productDelayMinMs,

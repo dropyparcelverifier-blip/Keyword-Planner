@@ -903,10 +903,20 @@ const Worker = (() => {
     } catch { /* non-fatal — worst case we leak a tab after a recycle */ }
   }
 
+  // Tabs currently LEASED to a concurrent SERP worker.
+  //
+  // The engine used to guarantee "at most one engine tab", and closeOwned
+  // enforced it by sweeping everything except the active one. The moment
+  // several SERPs run at once that guarantee becomes actively harmful: the
+  // sweep would close tabs other cycles are mid-navigation in. A leased tab is
+  // in use by definition, so it is exempt until its holder releases it.
+  const leasedTabs = new Set();
+
   async function closeOwned({ except = null, keepWindows = false } = {}) {
     await loadOwned();
     for (const id of [...ownedTabs]) {
       if (id === except) continue;
+      if (leasedTabs.has(id)) continue;   // in use by a concurrent cycle
       try { await chrome.tabs.remove(id); } catch { /* already gone */ }
       ownedTabs.delete(id);
     }
@@ -1001,7 +1011,66 @@ const Worker = (() => {
     catch { tabId = null; return false; }
   }
 
+  // Idle tabs kept for reuse by the next lease. Creating a tab is cheap but
+  // not free, and a SERP cycle takes one every few seconds.
+  const idlePool = [];
+
+  // Take exclusive use of a tab for one concurrent SERP cycle.
+  //
+  // Leases exist so several searches can run at once. The single-tab design
+  // was right when everything was serial -- it is what stopped tabs piling up
+  // -- so leases keep the same ownership rules rather than opting out of them:
+  // every leased tab is in ownedTabs, is swept by close(), and any tab a page
+  // spawns from it is still adopted. The only difference is that closeOwned
+  // will not reclaim it while someone holds it.
+  async function leaseTab() {
+    await loadOwned();
+    // Reuse an idle tab if it is still alive.
+    while (idlePool.length) {
+      const id = idlePool.pop();
+      try { await chrome.tabs.get(id); leasedTabs.add(id); return id; }
+      catch { ownedTabs.delete(id); }        // died while idle
+    }
+    // Otherwise put a fresh tab in the engine's own window.
+    let wid = null;
+    for (const w of [...ownedWindows]) {
+      try { await chrome.windows.get(w); wid = w; break; } catch { ownedWindows.delete(w); }
+    }
+    let t;
+    if (wid != null) {
+      t = await preservingWindowState(wid, () =>
+        chrome.tabs.create({ url: 'about:blank', active: false, windowId: wid }));
+    } else {
+      const win = await chrome.windows.create({ url: 'about:blank', focused: false, state: 'minimized' });
+      t = win?.tabs?.[0];
+      if (!t) throw new Error('could not create a window for a leased tab');
+      try { await chrome.windows.update(win.id, { state: 'minimized' }); } catch {}
+      ownedWindows.add(win.id);
+    }
+    ownedTabs.add(t.id);
+    leasedTabs.add(t.id);
+    await saveOwned();
+    return t.id;
+  }
+
+  // Hand a tab back. Kept open and pooled: closing it would mean creating a
+  // new one seconds later, and Chrome charges for both.
+  function releaseTab(id, { discard = false } = {}) {
+    if (id == null) return;
+    leasedTabs.delete(id);
+    if (discard) {
+      ownedTabs.delete(id);
+      saveOwned();
+      try { chrome.tabs.remove(id); } catch {}
+      return;
+    }
+    if (!idlePool.includes(id)) idlePool.push(id);
+  }
+
   return {
+    lease: leaseTab,
+    release: releaseTab,
+    leasedCount: () => leasedTabs.size,
     async navigate(url) {
       if (await existsAndAlive()) {
         // Reuse is the normal path — one tab, navigated repeatedly. Still
@@ -1022,7 +1091,22 @@ const Worker = (() => {
       await waitForNavigationComplete(tabId);
       return tabId;
     },
+    // Navigate a LEASED tab. Deliberately does not sweep: another cycle is
+    // very likely mid-navigation in a sibling tab right now.
+    async navigateLeased(id, url) {
+      let wid = null;
+      try { wid = (await chrome.tabs.get(id))?.windowId ?? null; } catch {}
+      // active:false — with several tabs cycling, selecting each one in turn
+      // would make the engine window flicker through every search.
+      await preservingWindowState(wid, () => chrome.tabs.update(id, { url, active: false }));
+      await waitForNavigationComplete(id);
+      return id;
+    },
     async close() {
+      // End of run: leases are void, so drop them first or closeOwned would
+      // skip exactly the tabs a crashed cycle failed to hand back.
+      leasedTabs.clear();
+      idlePool.length = 0;
       await closeOwned();
       tabId = null;
     },
@@ -2375,6 +2459,14 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
   // different buckets).
   const forceDirectUrl = loadOpts.forceMethod === 'directUrl';
 
+  // A LEASED tab, when this SERP is one of several running concurrently.
+  // Without it every parallel cycle would drive the same singleton tab and
+  // they would overwrite each other's navigation.
+  const leasedTab = loadOpts.tabId ?? null;
+  const goto = (url) => leasedTab != null
+    ? Worker.navigateLeased(leasedTab, url)
+    : Worker.navigate(url);
+
   let tabId;
   // Primary path: chrome.search.query() — Chrome's built-in extension API for
   // performing searches AS IF the user typed in the omnibox. Goes out with
@@ -2384,7 +2476,7 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
   if (!forceDirectUrl && chrome.search?.query && !_chromeSearchUnavailable) {
     try {
       // Ensure worker tab exists first (chrome.search.query needs a tabId).
-      tabId = await Worker.navigate('about:blank');
+      tabId = await goto('about:blank');
       log(`using chrome.search.query() — human-style search via Chrome's omnibox API`);
       await chrome.search.query({ text: seedQuery, tabId });
       const navRace = await withTimeout(waitForNavigationComplete(tabId), 25_000, 'chrome.search navigation');
@@ -2418,7 +2510,7 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
     const url = `https://www.google.com/search?q=${encodeURIComponent(seedQuery)}&gl=in&hl=en&pws=0`;
     log(`navigating to Google search (direct URL)`);
     try {
-      const navRace = await withTimeout(Worker.navigate(url), 25_000, 'SERP navigation');
+      const navRace = await withTimeout(goto(url), 25_000, 'SERP navigation');
       if (!navRace.ok) return { ok: false, error: navRace.error };
       tabId = navRace.value;
     } catch (e) {
@@ -3333,6 +3425,53 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       });
     }
   }
+  // ============ Parallel leaf SERPs ============
+  //
+  // Leaf searches are the engine's highest-volume operation -- 11,528 in a
+  // week against 965 product SERP loads -- and they ran strictly one at a
+  // time. Each is mostly WAITING: navigate, let Google render, scrape. The
+  // CPU is idle for almost all of it, so running several at once costs little
+  // and multiplies the dominant path.
+  //
+  // Each concurrent cycle drives its OWN leased tab (see Worker.lease), so
+  // they cannot overwrite each other's navigation.
+  //
+  // Concurrency is tied to the same signal as pacing: when Google pushes back
+  // we do not just slow down, we narrow to a single tab. Several parallel
+  // searches during a block is exactly when parallelism looks least human, so
+  // the two levers move together.
+  const SERP_CONCURRENCY_MAX = Math.max(1, Number(opts.serpConcurrency ?? 3) || 3);
+  const serpConcurrency = () => (paceFactor > 1 ? 1 : SERP_CONCURRENCY_MAX);
+
+  // Run tasks with a bounded number in flight. Order of completion does not
+  // matter -- every task writes into `report` under its own composite key.
+  async function runPooled(items, worker) {
+    const queue = items.slice();
+    const limit = Math.min(serpConcurrency(), queue.length);
+    if (limit <= 1) {
+      for (const it of queue) {
+        if (shouldStop()) break;
+        await worker(it);
+      }
+      return;
+    }
+    let active = 0;
+    await new Promise((resolve) => {
+      const pump = () => {
+        if (shouldStop()) { if (active === 0) resolve(); return; }
+        while (active < serpConcurrency() && queue.length) {
+          const it = queue.shift();
+          active++;
+          Promise.resolve(worker(it))
+            .catch(() => {})            // safeCycle already swallows; belt and braces
+            .finally(() => { active--; pump(); });
+        }
+        if (active === 0 && queue.length === 0) resolve();
+      };
+      pump();
+    });
+  }
+
   function paceRecover() {
     if (paceFactor <= PACE_MIN) return;
     if (++cleanSerpRun < 10) return;
@@ -4490,7 +4629,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           let serpData = await loadProductSerp(row.keyword, productFps, productImages, clipThreshold,
             (m) => onProgress?.({ currentProduct: productName, currentSource: 'serp', currentAction: `${label} ${m}` }),
             productContext,
-            { priorMatchedUrls: productMatchedUrls, priorMatchedConfidences: productMatchedConfidences });
+            { tabId: cycleOpts.tabId, priorMatchedUrls: productMatchedUrls, priorMatchedConfidences: productMatchedConfidences });
           try { row._prefetchedAutosuggest = await _suggestPromise; } catch { row._prefetchedAutosuggest = []; }
 
           // brand_product retry: if this keyword names our brand AND our
@@ -4517,7 +4656,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
               const retrySerp = await loadProductSerp(row.keyword, productFps, productImages, clipThreshold,
                 (m) => onProgress?.({ currentProduct: productName, currentSource: 'serp', currentAction: `${label} retry ${m}` }),
                 productContext,
-                { forceMethod: 'directUrl', priorMatchedUrls: productMatchedUrls, priorMatchedConfidences: productMatchedConfidences });
+                { tabId: cycleOpts.tabId, forceMethod: 'directUrl', priorMatchedUrls: productMatchedUrls, priorMatchedConfidences: productMatchedConfidences });
               if (retrySerp.ok && !retrySerp.captcha && (retrySerp.count || 0) > (serpData.count || 0)) {
                 onProgress?.({
                   currentProduct: productName, currentSource: 'serp',
@@ -4553,7 +4692,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
               const retrySerp = await loadProductSerp(row.keyword, productFps, productImages, clipThreshold,
                 (m) => onProgress?.({ currentProduct: productName, currentSource: 'serp', currentAction: `${label} captcha-retry ${m}` }),
                 productContext,
-                { forceMethod: flipMethod, priorMatchedUrls: productMatchedUrls, priorMatchedConfidences: productMatchedConfidences });
+                { tabId: cycleOpts.tabId, forceMethod: flipMethod, priorMatchedUrls: productMatchedUrls, priorMatchedConfidences: productMatchedConfidences });
               if (retrySerp.ok && !retrySerp.captcha) {
                 onProgress?.({
                   currentProduct: productName, currentSource: 'serp',
@@ -5116,6 +5255,32 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         }
       }
 
+      // Lease a tab for one cycle and always hand it back.
+      //
+      // Declared HERE, in safeCycle's scope, not up beside runPooled at run
+      // level -- safeCycle is an inner declaration and is invisible from
+      // there. Putting it at run level parses fine and throws a
+      // ReferenceError the first time it runs, which is the same trap that
+      // silently killed resume twice today.
+      async function cycleWithLease(row, label, cycleOpts = {}) {
+        let leased = null;
+        try {
+          leased = await Worker.lease();
+          return await safeCycle(row, label, { ...cycleOpts, tabId: leased });
+        } catch (e) {
+          onProgress?.({
+            currentProduct: productName,
+            currentAction: `${label} "${row.keyword}" — could not lease a tab (${e?.message || e}) — running on the shared tab`,
+            logKind: 'warn',
+          });
+          return await safeCycle(row, label, cycleOpts);
+        } finally {
+          // discard while stopping: the run is ending, so pooling the tab
+          // only delays cleanup.
+          if (leased != null) Worker.release(leased, { discard: shouldStop() });
+        }
+      }
+
       // ----- ROUND 1: KP1 + PAA seeds, each processed in full before next -----
       // First, classify every KP keyword:
       //   - Tier 1/3/4 (relevant, SERP-eligible) → addRow + push to kp1RowsArr.
@@ -5407,6 +5572,10 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         // Expand each relevance-passing suggestion as its own row, then
         // process it through the same cycle (with leaf-paced SERP and leaf
         // autosuggest stored).
+        // Collect the leaves first, then run them CONCURRENTLY. Each gets its
+        // own leased tab; they only touch `report` through addRow's composite
+        // key, so completion order is irrelevant.
+        const r1Leaves = [];
         for (const s of suggestions) {
           if (shouldStop() || report.size >= productCap) break;
           if (!isRelevantKeyword(s, relevanceSet)) continue;
@@ -5415,8 +5584,9 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           if (isShortTerm(s)) stCount++; else ltCount++;
           if (!isRelevantForCycle(s)) { skippedCount++; continue; }
           cycledCount++;
-          await safeCycle(child, `R1-leaf:`, { leaf: true });
+          r1Leaves.push(child);
         }
+        await runPooled(r1Leaves, (child) => cycleWithLease(child, `R1-leaf:`, { leaf: true }));
       }
       onProgress?.({
         currentProduct: productName,
@@ -5821,12 +5991,16 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             currentSource: 'related',
             currentAction: `Related-search drain: processing ${uniqueRs.length} unique seed(s) discovered during R1/R2`,
           });
+          // The related-search drain is pure fan-out -- every seed is
+          // independent -- so it parallelises with no ordering concerns at all.
+          const rsRows = [];
           for (const rs of uniqueRs) {
             if (shouldStop() || report.size >= productCap) break;
             const row = addRow(rs, 'related_search', '');
             if (!row) continue;
-            await safeCycle(row, `RS:`, { leaf: true });
+            rsRows.push(row);
           }
+          await runPooled(rsRows, (row) => cycleWithLease(row, `RS:`, { leaf: true }));
         }
 
         // ----- CAPTCHA retry drain -----
