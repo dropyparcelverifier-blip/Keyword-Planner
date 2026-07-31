@@ -3338,6 +3338,18 @@ async function run() {
       'ROUNDTRIP.4 autosuggestions is never passed through as raw text');
   }
 
+  // A config write that stores nothing must not report success. POSTing the
+  // obvious {kp_enabled:false} returned ok:true and changed nothing, because
+  // only config/configPatch/activeBatchId are read -- two settings were
+  // "applied" that way and never stored.
+  const badCfg = await req('POST', '/api/config', { kp_enabled: false });
+  assertEq(badCfg.status, 400, 'CFGSHAPE.1 an unrecognised config body is rejected');
+  const goodCfg = await req('POST', '/api/config', { configPatch: { kp_enabled: false } });
+  assertEq(goodCfg.status, 200, 'CFGSHAPE.2 configPatch is still accepted');
+  const readBack = await req('GET', '/api/config');
+  assertEq(readBack.data.config.kp_enabled, false, 'CFGSHAPE.3 the value actually persists');
+  await req('POST', '/api/config', { configPatch: { kp_enabled: null } });
+
   // ===== parallel leaf SERPs =====
   // Leaf searches are the highest-volume operation in the engine (11,528 a
   // week vs 965 product SERP loads) and ran one at a time, mostly waiting on

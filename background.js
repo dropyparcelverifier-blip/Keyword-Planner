@@ -1449,6 +1449,8 @@ function pickRunOpts(msg) {
     autoExport:        msg.autoExport,
     serpConcurrency:   msg.serpConcurrency,
     kpAccountUrls:     msg.kpAccountUrls,
+    skipR1Kp:          msg.skipR1Kp,
+    skipR2Kp:          msg.skipR2Kp,
     searchDelayMinMs:  msg.searchDelayMinMs,
     searchDelayMaxMs:  msg.searchDelayMaxMs,
     productDelayMinMs: msg.productDelayMinMs,

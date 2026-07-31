@@ -128,6 +128,17 @@ async function setConfig({ req, res, ctx }) {
   const { Q, send, readJson } = ctx;
   const b = await readJson(req);
   if (b.config !== undefined) Q.setConfig.run(JSON.stringify(b.config || {}));
+  // Reject a body that carries no recognised shape.
+  //
+  // POSTing {kp_enabled:false} -- the obvious guess -- returned {ok:true} and
+  // silently changed nothing, because only `config`, `configPatch` and
+  // `activeBatchId` are read. Two settings were "applied" that way and were
+  // never actually stored; the run carried on with defaults and looked fine.
+  // A write that does nothing must not report success.
+  if (!('config' in b) && !('configPatch' in b) && !('activeBatchId' in b)) {
+    return send(res, 400, { ok: false,
+      error: 'body must contain config, configPatch or activeBatchId — e.g. {"configPatch":{"kp_enabled":false}}' });
+  }
   if (b.configPatch && typeof b.configPatch === 'object') {
     const cur = Q.getConfig.get();
     const merged = { ...(cur?.config ? JSON.parse(cur.config) : {}) };

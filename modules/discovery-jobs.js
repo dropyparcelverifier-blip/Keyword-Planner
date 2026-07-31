@@ -273,6 +273,16 @@ export function workerConfigToRunOpts(cfg) {
   // given can TRY THE OTHERS rather than failing. A KP url only works from a
   // Chrome profile signed into the Google login that owns its ocid, and which
   // login a given PC has is not knowable from here — so the worker probes.
+  // Master switch for Keyword Planner.
+  //
+  // KP only returns search-volume data for an Ads account with billing or
+  // active spend. Neither account on this fleet has either, so KP opens and
+  // returns 0 ideas every time -- the pane loads, the seed submits, nothing
+  // comes back. Every attempt is unwinnable work: navigations, retries and
+  // minutes per SKU spent on a service that cannot answer. Turning it off
+  // routes that time into PAA, autosuggest, related-search and Amazon, which
+  // all work today. Flip it back the moment an account is funded.
+  if (cfg.kp_enabled === false) { out.skipR1Kp = true; out.skipR2Kp = true; }
   if (Array.isArray(cfg.kp_accounts)) {
     out.kpAccountUrls = cfg.kp_accounts.map(a => a && a.url).filter(Boolean);
   }
