@@ -1128,7 +1128,20 @@ const Q = {
       sku=excluded.sku, product_name=excluded.product_name, priority=excluded.priority,
       handles=excluded.handles, brands=excluded.brands`),
   pendingForClaim: db.prepare(`SELECT id FROM jobs WHERE status='pending' AND batch_id=? ORDER BY priority DESC, id ASC LIMIT ?`),
-  claimById: db.prepare(`UPDATE jobs SET status='claimed', claimed_by=?, claimed_at=?, heartbeat_at=?, attempts=attempts+1 WHERE id=? AND status='pending'`),
+  // attempts counts FAILURES, not claims.
+  //
+  // It used to increment here, on claim. Every worker reload releases its
+  // claims and re-claims them, so an ordinary redeploy burned an attempt on
+  // every job in flight whether or not anything went wrong -- three deploys
+  // auto-failed jobs that had never failed once. 27 of 44 jobs sat at
+  // attempts=3 with the only failure reason being "exceeded 3 attempts",
+  // which is the counter reporting on itself.
+  //
+  // Counting failures instead makes the retry cap mean what it says. The
+  // backstop for a worker that claims and silently dies is unchanged:
+  // releaseStale reclaims it, and failStuckClaims force-fails a claim that
+  // is stale or older than 30 minutes.
+  claimById: db.prepare(`UPDATE jobs SET status='claimed', claimed_by=?, claimed_at=?, heartbeat_at=? WHERE id=? AND status='pending'`),
   jobById: db.prepare(`SELECT * FROM jobs WHERE id=?`),
   heartbeatById: db.prepare(`UPDATE jobs SET heartbeat_at=? WHERE id=? AND claimed_by=? AND status='claimed'`),
   // Re-assert a claim a live worker is still working but no longer holds.
@@ -1142,7 +1155,7 @@ const Q = {
     `UPDATE jobs SET status='claimed', claimed_by=?, claimed_at=COALESCE(claimed_at, ?), heartbeat_at=?
        WHERE id=? AND status='pending'`),
   markDone: db.prepare(`UPDATE jobs SET status='done', done_at=? WHERE batch_id=? AND product_url=?`),
-  markFailed: db.prepare(`UPDATE jobs SET status='failed', failed_reason=?, done_at=? WHERE batch_id=? AND product_url=?`),
+  markFailed: db.prepare(`UPDATE jobs SET status='failed', failed_reason=?, done_at=?, attempts=attempts+1 WHERE batch_id=? AND product_url=?`),
   releaseStale: db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL WHERE status='claimed' AND (heartbeat_at IS NULL OR heartbeat_at < ?) AND attempts < 3`),
   // Auto-fail jobs that have retried too many times so the worker stops
   // hammering them and moves to fresh SKUs. Runs alongside releaseStale.
@@ -1196,7 +1209,10 @@ const Q = {
   // to auto-fail four healthy SKUs with "exceeded 3 attempts (retry loop)".
   // Only real work should consume attempts, so an unforced release refunds
   // it. Clamped at 0; the stale-claim reaper keeps its own accounting.
-  releaseByWorker: db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, attempts=MAX(0, attempts-1) WHERE status='claimed' AND claimed_by=?`),
+  // No attempt refund here any more: it existed purely to undo the claim-time
+  // increment, and there is nothing left to undo. Refunding now would erase
+  // real failures.
+  releaseByWorker: db.prepare(`UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL WHERE status='claimed' AND claimed_by=?`),
   // Per-job CRUD helpers. Deliberately narrow (one field family per stmt)
   // so we can never accidentally update the wrong column via body param
   // injection. Job status transitions still respect claimed_by (worker

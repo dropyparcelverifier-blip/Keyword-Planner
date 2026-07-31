@@ -3034,8 +3034,17 @@ async function run() {
   // operator Stop or a fleet update silently burned one of three lives on a
   // job that never failed — three deploy cycles in one afternoon auto-failed
   // four healthy SKUs with "exceeded 3 attempts (retry loop)".
-  assert(/releaseByWorker:[\s\S]{0,260}attempts=MAX\(0, attempts-1\)/.test(srvFull),
-    'REQUEUE-ATTEMPTS.7 release-by-worker refunds the attempt it did not use');
+  // attempts counts FAILURES now, not claims -- so there is no claim-time
+  // increment left to refund, and refunding would erase real failures.
+  // Incrementing on claim meant an ordinary redeploy burned an attempt on
+  // every in-flight job: 27 of 44 jobs auto-failed with the only reason being
+  // "exceeded 3 attempts", the counter reporting on itself.
+  assert(!/claimById:[^`]*`[^`]*attempts=attempts\+1/.test(srvFull),
+    'REQUEUE-ATTEMPTS.7 claiming a job does NOT burn an attempt');
+  assert(/markFailed:[^`]*`[^`]*attempts=attempts\+1/.test(srvFull),
+    'REQUEUE-ATTEMPTS.7a failing a job is what burns an attempt');
+  assert(!/releaseByWorker:[\s\S]{0,260}attempts=MAX\(0, attempts-1\)/.test(srvFull),
+    'REQUEUE-ATTEMPTS.7b release-by-worker no longer refunds (nothing to undo)');
 
   // A worker dropping ITS claims must scope by worker id. release-stale takes
   // a cutoff, not an id, so calling it with 0 released every claim in the
