@@ -3494,15 +3494,32 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       return;
     }
     let active = 0;
+    // A pooled task that never settles would strand the whole product: active
+    // never drops, the pool never drains, and the pipeline stops before the
+    // stages that mark the SKU done. A serial `await` had the same exposure,
+    // but with a pool ONE hung navigation blocks every remaining keyword, not
+    // just its own. Cap each task so a stuck SERP costs one keyword.
+    const TASK_TIMEOUT_MS = 4 * 60_000;
+    const guarded = (it) => new Promise((res) => {
+      let settled = false;
+      const done = () => { if (!settled) { settled = true; res(); } };
+      const t = setTimeout(() => {
+        onProgress?.({
+          currentSource: 'serp',
+          currentAction: `A keyword cycle exceeded ${TASK_TIMEOUT_MS / 60000} min and was abandoned so the product can finish.`,
+          logKind: 'warn',
+        });
+        done();
+      }, TASK_TIMEOUT_MS);
+      Promise.resolve(worker(it)).catch(() => {}).finally(() => { clearTimeout(t); done(); });
+    });
     await new Promise((resolve) => {
       const pump = () => {
         if (shouldStop()) { if (active === 0) resolve(); return; }
         while (active < serpConcurrency() && queue.length) {
           const it = queue.shift();
           active++;
-          Promise.resolve(worker(it))
-            .catch(() => {})            // safeCycle already swallows; belt and braces
-            .finally(() => { active--; pump(); });
+          guarded(it).finally(() => { active--; pump(); });
         }
         if (active === 0 && queue.length === 0) resolve();
       };
@@ -6751,6 +6768,16 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // resume re-enters the same product cleanly; any rows already added
       // to `report` dedupe by keyword on the re-run.
       const stoppedMidProduct = shouldStop();
+      // Say when a product reaches the end. Round starts and round completions
+      // were logged, but nothing marked the pipeline's tail, so "products
+      // progress but none complete" could not be localised -- the last
+      // observable event was a round finishing, several stages before done.
+      onProgress?.({
+        currentProduct: productName,
+        currentSource: 'done',
+        currentAction: `✅ PRODUCT COMPLETE: "${productName}" — ${report.size} row(s) in the report${stoppedMidProduct ? ' (stopped mid-product, not marking done)' : ''}.`,
+        logKind: 'ok',
+      });
       if (!stoppedMidProduct) {
         productsDone++;
         await onProductDone(cleanUrl);

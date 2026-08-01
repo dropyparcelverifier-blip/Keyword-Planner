@@ -3481,6 +3481,19 @@ async function run() {
       'PAR.10 the config value is clamped, and 1 restores serial behaviour');
   }
 
+  // Nothing marked the END of a product. Round starts and completions were
+  // logged, so "products progress but none complete" could not be localised:
+  // the last observable event was a round finishing, several stages early.
+  {
+    const kdc = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+    assert(/PRODUCT COMPLETE/.test(kdc), 'TAIL.1 reaching the end of a product is logged');
+    // One task that never settles strands the whole product: with a pool it
+    // blocks every remaining keyword, not just its own.
+    assert(/const TASK_TIMEOUT_MS = 4 \* 60_000;/.test(kdc), 'TAIL.2 pooled tasks are time-boxed');
+    assert(/guarded\(it\)\.finally\(\(\) => \{ active--; pump\(\); \}\)/.test(kdc),
+      'TAIL.3 the pool drains through the guard, so a hang cannot stall it');
+  }
+
   // ===== adaptive pacing =====
   // Flat human-pacing delays charged a fixed premium against a risk that is
   // not materialising: 10 CAPTCHAs + 23 rate-limits across 11,528 searches in
