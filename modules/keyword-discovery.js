@@ -6316,9 +6316,13 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                 // --- Step 1: autosuggest from Amazon ---
                 let amazonSugs = [];
                 try {
-                  const r = await chrome.tabs.sendMessage(amazonTabId, {
+                  // Time-boxed like the other Amazon round trips: a content
+                  // script that stops answering hangs sendMessage forever, and
+                  // this one runs once per Amazon keyword.
+                  const rRace = await withTimeout(chrome.tabs.sendMessage(amazonTabId, {
                     type: 'AMAZON_GET_SUGGESTIONS', keyword: parent.keyword,
-                  });
+                  }), 60_000, 'AMAZON_GET_SUGGESTIONS');
+                  const r = rRace.ok ? rRace.value : null;
                   amazonSugs = Array.isArray(r?.suggestions) ? r.suggestions : [];
                 } catch (e) {
                   onProgress?.({
@@ -6343,7 +6347,9 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                   await sleep(randInt(2500, 4500));
                   const ready = await pingContentScript(amazonTabId, 'AMAZON_PING', 10, 800);
                   if (ready) {
-                    const r = await chrome.tabs.sendMessage(amazonTabId, { type: 'AMAZON_GET_RESULTS' });
+                    const rRace = await withTimeout(
+                      chrome.tabs.sendMessage(amazonTabId, { type: 'AMAZON_GET_RESULTS' }), 90_000, 'AMAZON_GET_RESULTS');
+                    const r = rRace.ok ? rRace.value : null;
                     amazonResults = Array.isArray(r?.results) ? r.results : [];
                   }
                 } catch (e) {
@@ -6561,7 +6567,20 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                   // to 30 keywords, and the product never reached its end.
                   // This is why products got as far as "Amazon Round" and
                   // never logged PRODUCT COMPLETE.
-                  await cycleWithLease(row, `AMZN:`, { leaf: true });
+                  // Time-boxed. This is a SERIAL await, so the 4-minute guard
+                  // inside runPooled does not cover it: one hung cycle here
+                  // stalls the product forever, which is what left nine of
+                  // twelve workers frozen at "Amazon scrape" for 19-47
+                  // minutes with no error and no completion.
+                  const amzCycle = await withTimeout(
+                    cycleWithLease(row, `AMZN:`, { leaf: true }), 4 * 60_000, 'Amazon keyword cycle');
+                  if (!amzCycle.ok) {
+                    onProgress?.({
+                      currentProduct: productName, currentSource: 'amazon',
+                      currentAction: `AMZN: "${row.keyword}" — ${amzCycle.error}; skipping so the product can finish.`,
+                      logKind: 'warn',
+                    });
+                  }
                   amazonStored++;
                   processed++;
                 }

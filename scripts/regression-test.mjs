@@ -3501,10 +3501,24 @@ async function run() {
   // Products reached "Amazon Round" and never logged PRODUCT COMPLETE.
   {
     const kda = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
-    assert(/await cycleWithLease\(row, `AMZN:`/.test(kda),
+    assert(/cycleWithLease\(row, `AMZN:`/.test(kda),
       'AMZTAB.1 Amazon keyword cycles run in their own leased tab');
     assert(!/await safeCycle\(row, `AMZN:`/.test(kda),
       'AMZTAB.2 they no longer share the tab the Amazon round is driving');
+  }
+
+  // The Amazon round's calls were unguarded, and its keyword cycle is a
+  // SERIAL await -- so runPooled's 4-minute guard did not cover it. One hung
+  // call stalled the product forever: nine of twelve workers sat frozen at
+  // "Amazon scrape" for 19-47 minutes with no error and no completion.
+  {
+    const kdt = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+    assert(/withTimeout\(\s*cycleWithLease\(row, `AMZN:`/.test(kdt),
+      'AMZTIME.1 the Amazon keyword cycle is time-boxed');
+    assert(/'AMAZON_GET_RESULTS' \}\), 90_000/.test(kdt),
+      'AMZTIME.2 AMAZON_GET_RESULTS cannot hang forever');
+    assert(/'AMAZON_GET_SUGGESTIONS'\)/.test(kdt),
+      'AMZTIME.3 AMAZON_GET_SUGGESTIONS cannot hang forever');
   }
 
   // ===== adaptive pacing =====
