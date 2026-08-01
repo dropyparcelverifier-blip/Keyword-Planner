@@ -3494,6 +3494,19 @@ async function run() {
       'TAIL.3 the pool drains through the guard, so a hang cannot stall it');
   }
 
+  // The Amazon round drives amazonTabId -- the singleton Worker tab. A
+  // keyword cycle without a lease uses that same tab, so each Google SERP
+  // navigated the Amazon tab away; the loop kept addressing amazonTabId
+  // expecting Amazon and paid a failed 8s ping per keyword, up to 30 of them.
+  // Products reached "Amazon Round" and never logged PRODUCT COMPLETE.
+  {
+    const kda = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+    assert(/await cycleWithLease\(row, `AMZN:`/.test(kda),
+      'AMZTAB.1 Amazon keyword cycles run in their own leased tab');
+    assert(!/await safeCycle\(row, `AMZN:`/.test(kda),
+      'AMZTAB.2 they no longer share the tab the Amazon round is driving');
+  }
+
   // ===== adaptive pacing =====
   // Flat human-pacing delays charged a fixed premium against a risk that is
   // not materialising: 10 CAPTCHAs + 23 rate-limits across 11,528 searches in

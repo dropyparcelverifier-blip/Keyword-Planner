@@ -6550,7 +6550,18 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                   const row = addRow(sug, 'amazon_suggest', parent.keyword);
                   if (!row) { amazonRejected++; continue; }
                   row.amazon_parent_rating = parent.adRating || 0;
-                  await safeCycle(row, `AMZN:`, { leaf: true });
+                  // Its OWN tab, not the shared one.
+                  //
+                  // The Amazon round drives amazonTabId, which is the
+                  // singleton Worker tab. safeCycle without a lease also uses
+                  // the singleton -- so each keyword's Google SERP navigated
+                  // the Amazon tab away, and the loop then kept addressing
+                  // amazonTabId expecting Amazon. Every subsequent keyword
+                  // paid a failed 8s AMAZON_PING against a Google page, on up
+                  // to 30 keywords, and the product never reached its end.
+                  // This is why products got as far as "Amazon Round" and
+                  // never logged PRODUCT COMPLETE.
+                  await cycleWithLease(row, `AMZN:`, { leaf: true });
                   amazonStored++;
                   processed++;
                 }
