@@ -88,6 +88,18 @@ async function push({ req, res, ctx }) {
   for (const r of rows) {
     const bid = r.batch_id || b.batchId || null;
     if (!bid) { rejected.push({ row: r, reason: 'no_batch_id' }); continue; }
+    // A keyword row with no product is not attributable to anything. They
+    // came from rows that lost product_url in the snake_case/camelCase round
+    // trip -- sku survived because it is spelled the same in both shapes, so
+    // each one surfaced in the dashboard as a phantom SKU under whichever
+    // batch the worker happened to be running. 4,959 of them, across 19
+    // ghost SKUs, and deleting them was not enough: workers replay a
+    // pending-push queue captured before the fix, so they came straight back
+    // within twenty minutes. Refusing them here ends it at the door,
+    // whatever the sender believes.
+    if (!String(r.product_url || '').trim()) {
+      rejected.push({ row: r, reason: 'no_product_url' }); continue;
+    }
     if (!seenBatches.has(bid)) {
       if (!Q.batchExists.get(bid)) { rejected.push({ row: r, reason: 'orphan_batch' }); continue; }
       seenBatches.add(bid);

@@ -3450,6 +3450,27 @@ async function run() {
       'LASTRESORT.3 addRow uses the same definition');
   }
 
+  // A keyword row with no product is not attributable to anything, and each
+  // one surfaced as a phantom SKU under whichever batch the worker was
+  // running. Deleting them was not enough -- workers replay a pending-push
+  // queue captured before the fix, so 3,891 came back within 25 minutes.
+  // Own batch, so the orphan-batch guard cannot be what rejects these.
+  const GHOST_BATCH = 'ghost-guard-' + Date.now();
+  await req('POST', '/api/jobs/upload', { batchId: GHOST_BATCH, products: [
+    { url: 'https://example.com/p/1', sku: 'REAL' },
+  ]});
+  const noUrl = await req('POST', '/api/keywords', { rows: [
+    { batch_id: GHOST_BATCH, keyword: 'ghost row', sku: 'GHOST', product_url: '' },
+  ]});
+  assertEq(noUrl.status, 200, 'NOGHOST.1 the push still succeeds');
+  assertEq(noUrl.data.rejected, 1, 'NOGHOST.2 a row with no product_url is refused');
+  assertEq(noUrl.data.inserted, 0, 'NOGHOST.2b and nothing is stored for it');
+  const kept = await req('POST', '/api/keywords', { rows: [
+    { batch_id: GHOST_BATCH, keyword: 'real row', sku: 'REAL', product_url: 'https://example.com/p/1' },
+  ]});
+  assertEq(kept.data.rejected || 0, 0, 'NOGHOST.3 a row WITH a product_url is still accepted');
+  assertEq(kept.data.inserted, 1, 'NOGHOST.3b and it is stored');
+
   // ===== parallel leaf SERPs =====
   // Leaf searches are the highest-volume operation in the engine (11,528 a
   // week vs 965 product SERP loads) and ran one at a time, mostly waiting on
