@@ -323,6 +323,8 @@ export function workerConfigToRunOpts(cfg) {
   // parallelism Google tolerates from a given IP -- and if it turns out to be
   // wrong, the fix should be a config change, not a code push to nine PCs.
   // 1 restores the old strictly-serial behaviour.
+  // Hard per-product deadline in minutes. 0 disables it.
+  if (cfg.product_deadline_min != null) out.productDeadlineMs = Math.max(0, Number(cfg.product_deadline_min) || 0) * 60000;
   if (cfg.serp_concurrency != null)   out.serpConcurrency       = Math.max(1, Math.min(8, Number(cfg.serp_concurrency) || 1));
   return out;
 }

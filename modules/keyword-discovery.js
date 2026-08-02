@@ -3125,7 +3125,30 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
   const cap             = opts.cap             || KEYWORD_CAP;
   const kpUrl           = opts.kpUrl           || '';
   const kpMaxPerProduct = opts.kpMaxPerProduct || 5000;
-  const shouldStop      = opts.shouldStop      || (() => false);
+  // The operator's Stop button.
+  const userStop = opts.shouldStop || (() => false);
+
+  // Hard per-product deadline.
+  //
+  // Not one SKU completed in fifteen days. Five separate bugs contributed,
+  // and each time I fixed the stage I believed was slow, the next one turned
+  // out to be slower. This makes completion independent of that guess: past
+  // the deadline the product stops gathering, pushes what it has, and is
+  // marked done. A SKU with 200 keywords beats a SKU that never finishes.
+  //
+  // Composed into shouldStop so every loop in the engine already honours it
+  // -- the seed loops, runPooled, sleepInterruptible -- without touching any
+  // of them. They unwind and fall through to the completion path.
+  //
+  // Deliberately NOT the same thing as the operator pressing Stop: that
+  // leaves the product unmarked so a resume re-enters it, which is right for
+  // a human interrupting and wrong for a deadline (the work is as complete
+  // as it is going to get).
+  const PRODUCT_DEADLINE_MS = Number(opts.productDeadlineMs ?? 25 * 60_000) || 0;
+  let productDeadlineAt = 0;
+  let deadlineFired = false;
+  const productExpired = () => productDeadlineAt > 0 && Date.now() > productDeadlineAt;
+  const shouldStop = () => userStop() || productExpired();
   const matchProfile    = MATCH_PROFILES[opts.matchProfile] || MATCH_PROFILES[DEFAULT_MATCH_PROFILE];
   const matchProfileName = MATCH_PROFILES[opts.matchProfile] ? opts.matchProfile : DEFAULT_MATCH_PROFILE;
 
@@ -4334,6 +4357,8 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // Seeds: KP keywords + PAA questions. Each becomes a row, then we
       // expand each via /complete/search (free) until we hit the cap.
       const productStartTs = Date.now();
+      productDeadlineAt = PRODUCT_DEADLINE_MS > 0 ? productStartTs + PRODUCT_DEADLINE_MS : 0;
+      deadlineFired = false;
       const productRows = [];
       // productKeywordSet is declared up beside cleanUrl and keyFor -- the
       // resume path needs it, and the resume path runs long before here.
@@ -6797,7 +6822,20 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // at the FOLLOWING product instead. Leaving it unmarked means
       // resume re-enters the same product cleanly; any rows already added
       // to `report` dedupe by keyword on the re-run.
-      const stoppedMidProduct = shouldStop();
+      // userStop, not shouldStop: a deadline must still mark the product done
+      // and push its rows. Using the composed check here would make every
+      // timed-out product look like an operator interrupt and get re-run
+      // forever -- the exact loop this is meant to break.
+      const stoppedMidProduct = userStop();
+      if (productExpired() && !deadlineFired) {
+        deadlineFired = true;
+        onProgress?.({
+          currentProduct: productName,
+          currentSource: 'done',
+          currentAction: `⏱ PRODUCT DEADLINE: "${productName}" hit ${Math.round(PRODUCT_DEADLINE_MS / 60000)} min — finishing with the ${report.size} row(s) gathered rather than running on.`,
+          logKind: 'warn',
+        });
+      }
       // Say when a product reaches the end. Round starts and round completions
       // were logged, but nothing marked the pipeline's tail, so "products
       // progress but none complete" could not be localised -- the last

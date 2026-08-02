@@ -3542,6 +3542,25 @@ async function run() {
       'AMZTIME.3 AMAZON_GET_SUGGESTIONS cannot hang forever');
   }
 
+  // Not one SKU completed in fifteen days, and each time the stage I believed
+  // was slow got fixed, the next one turned out slower. A hard deadline makes
+  // completion independent of that guess.
+  {
+    const kdd = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
+    assert(/const shouldStop = \(\) => userStop\(\) \|\| productExpired\(\);/.test(kdd),
+      'DEADLINE.1 the deadline composes into shouldStop, so every loop honours it');
+    // The distinction that matters: an operator Stop leaves the product
+    // unmarked so resume re-enters it; a deadline must NOT, or the product
+    // re-runs forever -- the exact loop this breaks.
+    assert(/const stoppedMidProduct = userStop\(\);/.test(kdd),
+      'DEADLINE.2 a deadline still marks the product done and pushes its rows');
+    assert(/PRODUCT DEADLINE/.test(kdd), 'DEADLINE.3 hitting the deadline is logged');
+    assert(/PRODUCT_DEADLINE_MS = Number\(opts\.productDeadlineMs \?\? 25 \* 60_000\)/.test(kdd),
+      'DEADLINE.4 defaults to 25 min and is overridable');
+    const djd = readFileSync(resolve(REPO, 'modules/discovery-jobs.js'), 'utf-8');
+    assert(/cfg\.product_deadline_min/.test(djd), 'DEADLINE.5 tunable from manager config');
+  }
+
   // ===== adaptive pacing =====
   // Flat human-pacing delays charged a fixed premium against a risk that is
   // not materialising: 10 CAPTCHAs + 23 rate-limits across 11,528 searches in
