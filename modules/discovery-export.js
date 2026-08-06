@@ -214,14 +214,17 @@ function rowsForExport(report) {
       autosuggest_count: r.autosuggestCount,
       autosuggestions:   safeCell(joinList(r.autosuggestions, ' | ')),
       // --- Amazon Round (R3) ---
-      amazon_suggest_count: r.amazon_suggest_count || 0,
-      amazon_rank:          r.amazon_rank          || 0,
-      amazon_price:         r.amazon_price         || '',
-      amazon_rating:        r.amazon_rating        || '',
-      amazon_reviews:       r.amazon_reviews       || '',
-      amazon_title:         r.amazon_title         || '',
-      amazon_competitors:   safeCell(r.amazon_competitors || ''),
-      amazon_total_results: r.amazon_total_results || 0,
+      // Check BOTH snake_case (engine-native) and camelCase (restored from
+      // manager via managerRowToReportRow) so restored rows export their
+      // Amazon data instead of 0/empty.
+      amazon_suggest_count: r.amazon_suggest_count ?? r.amazonSuggestCount ?? 0,
+      amazon_rank:          r.amazon_rank          ?? r.amazonRank          ?? 0,
+      amazon_price:         r.amazon_price         ?? r.amazonPrice         ?? '',
+      amazon_rating:        r.amazon_rating        ?? r.amazonRating        ?? '',
+      amazon_reviews:       r.amazon_reviews       ?? r.amazonReviews       ?? '',
+      amazon_title:         r.amazon_title         ?? r.amazonTitle         ?? '',
+      amazon_competitors:   safeCell(r.amazon_competitors ?? r.amazonCompetitors ?? ''),
+      amazon_total_results: r.amazon_total_results ?? r.amazonTotalResults ?? 0,
       // --- Bulky reference data (kept for verification — moved to the end) ---
       matched_thumbnails: safeCell(matchedList),
       matched_sellers:    safeCell(sellersList),
@@ -448,8 +451,29 @@ export async function pushToAdBrain(report) {
   let managerActiveBatchId = null;
   const errors = [];
 
-  for (let i = 0; i < report.length; i += BATCH) {
-    const slice = report.slice(i, i + BATCH).map(r => {
+  // HARDENING: drop rows that lost their product_url (pre-fix data, or a
+  // snake_case/camelCase round-trip bug). The manager's orphan_guard rejects
+  // them with `no_product_url`, and retrying them 5× each just spams the
+  // activity log with err lines. They are unrecoverable — the product URL is
+  // gone — so refuse to send them at all. Count them so the caller can log
+  // the drop instead of silently losing data.
+  const rowsWithUrl = report.filter(r => r && String(r.productUrl || '').trim());
+  const droppedNoUrl = report.length - rowsWithUrl.length;
+  if (droppedNoUrl > 0) {
+    errors.push(`${droppedNoUrl} row(s) dropped locally — missing product_url (unrecoverable pre-fix data)`);
+  }
+  // Extra guard: log which SKUs are affected so the operator can trace the
+  // root cause if this ever fires again.
+  if (droppedNoUrl > 0) {
+    const badSkus = report.filter(r => r && !String(r.productUrl || '').trim()).map(r => r.sku || '(no-sku)').slice(0, 10);
+    errors.push(`  Affected SKUs: ${badSkus.join(', ')}`);
+  }
+  if (rowsWithUrl.length === 0) {
+    return { success: 0, failed: 0, rejectedOrphan: 0, managerActiveBatchId: null, total: report.length, errors, droppedNoUrl };
+  }
+
+  for (let i = 0; i < rowsWithUrl.length; i += BATCH) {
+    const slice = rowsWithUrl.slice(i, i + BATCH).map(r => {
       const paired = pairMatched(r);
       paired.sort((a, b) => b.conf - a.conf);
       const confs = paired.map(p => p.conf);
@@ -524,14 +548,18 @@ export async function pushToAdBrain(report) {
         verified_links: joinList(r.verifiedLinks, ' | ') || null,
         autosuggest_count: r.autosuggestCount,
         autosuggestions: joinList(r.autosuggestions, ' | '),
-        amazon_suggest_count: r.amazon_suggest_count || 0,
-        amazon_rank:          r.amazon_rank          || 0,
-        amazon_price:         r.amazon_price         || null,
-        amazon_rating:        r.amazon_rating        || null,
-        amazon_reviews:       r.amazon_reviews       || null,
-        amazon_title:         r.amazon_title         || null,
-        amazon_competitors:   r.amazon_competitors   || null,
-        amazon_total_results: r.amazon_total_results || 0,
+        // Amazon fields: the engine stores these under snake_case keys
+        // (amazon_suggest_count etc.) but managerRowToReportRow restores
+        // them as camelCase (amazonSuggestCount). Check BOTH so restored
+        // rows don't push 0 for all Amazon data.
+        amazon_suggest_count: r.amazon_suggest_count ?? r.amazonSuggestCount ?? 0,
+        amazon_rank:          r.amazon_rank          ?? r.amazonRank          ?? 0,
+        amazon_price:         r.amazon_price         ?? r.amazonPrice         ?? null,
+        amazon_rating:        r.amazon_rating        ?? r.amazonRating        ?? null,
+        amazon_reviews:       r.amazon_reviews       ?? r.amazonReviews       ?? null,
+        amazon_title:         r.amazon_title         ?? r.amazonTitle         ?? null,
+        amazon_competitors:   r.amazon_competitors   ?? r.amazonCompetitors   ?? null,
+        amazon_total_results: r.amazon_total_results ?? r.amazonTotalResults ?? 0,
       };
     });
     try {
@@ -569,5 +597,5 @@ export async function pushToAdBrain(report) {
     }
   }
 
-  return { success, failed, rejectedOrphan, managerActiveBatchId, total: report.length, errors };
+  return { success, failed, rejectedOrphan, managerActiveBatchId, total: report.length, errors, droppedNoUrl };
 }

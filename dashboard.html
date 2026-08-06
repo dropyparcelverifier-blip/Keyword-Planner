@@ -800,6 +800,11 @@
     <select id="batchSelect">
       <option value="">All batches</option>
     </select>
+    <select id="speedProfileSelect" title="Global Speed Mode for Fleet">
+      <option value="fast">⚡ Fast Mode (2-5m/SKU)</option>
+      <option value="balanced" selected>⚖ Balanced Mode (5-8m/SKU)</option>
+      <option value="deep">🔬 Deep Mode (8-12m/SKU)</option>
+    </select>
     <div class="appbar-status">
       <span id="connHealth" title="Click to refresh" style="cursor: pointer; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line-2); font-weight: 600; font-size: var(--fs-xs); letter-spacing: 0.04em;">⋯ checking</span>
       <span class="dot-sep">·</span>
@@ -819,6 +824,7 @@
     <div class="appbar-controls">
       <button id="refreshBtn">↻ Refresh</button>
       <button id="requeueAllBtn">↻ Re-queue all failed</button>
+      <button id="requeueDoneEmptyBtn" title="Re-queue SKUs that completed with 0 keywords">↺ Re-queue zero-KW</button>
       <button id="releaseStaleBtn">⏰ Release stale</button>
       <button id="wakeAllBtn" class="primary">📢 Wake all workers</button>
       <button id="resumeAllBtn">▶ Resume all</button>

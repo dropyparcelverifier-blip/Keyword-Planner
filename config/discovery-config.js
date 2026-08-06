@@ -120,13 +120,49 @@ export const NOISE_FILTER_CLUSTER_HAMMING   = 5;
 // gracefully when Google does serve a verification page (sets
 // image_count=0 for affected rows and moves on). User can override any
 // of these in the popup Settings tab if they hit CAPTCHA repeatedly.
-export const SEARCH_DELAY_MIN_MS   =        3 * 1000;
-export const SEARCH_DELAY_MAX_MS   =        7 * 1000;
-export const PRODUCT_DELAY_MIN_MS  =        5 * 1000;
-export const PRODUCT_DELAY_MAX_MS  =       12 * 1000;
-export const CHUNK_SIZE            =       12;        // fewer chunk-rest breaks
-export const CHUNK_REST_MIN_MS     =  2 * 60 * 1000;  // 2 min
-export const CHUNK_REST_MAX_MS     =  4 * 60 * 1000;  // 4 min
+// Speed presets for operator convenience (Fast / Balanced / Deep).
+export const SPEED_PROFILES = {
+  fast: {
+    searchDelayMinMs: 1500,
+    searchDelayMaxMs: 3500,
+    productDelayMinMs: 2000,
+    productDelayMaxMs: 5000,
+    maxAmazonKeywords: 25,
+    maxLinkVerify: 2,
+    productDeadlineMs: 6 * 60 * 1000, // 6 min per SKU
+    backfillKpMetrics: false,
+  },
+  balanced: {
+    searchDelayMinMs: 2500,
+    searchDelayMaxMs: 5000,
+    productDelayMinMs: 3500,
+    productDelayMaxMs: 8000,
+    maxAmazonKeywords: 35,
+    maxLinkVerify: 3,
+    productDeadlineMs: 8 * 60 * 1000, // 8 min per SKU
+    backfillKpMetrics: true,
+  },
+  deep: {
+    searchDelayMinMs: 4000,
+    searchDelayMaxMs: 8000,
+    productDelayMinMs: 6000,
+    productDelayMaxMs: 12000,
+    maxAmazonKeywords: 50,
+    maxLinkVerify: 5,
+    productDeadlineMs: 12 * 60 * 1000, // 12 min per SKU
+    backfillKpMetrics: true,
+  },
+};
+
+export const DEFAULT_SPEED_PROFILE = 'balanced';
+
+export const SEARCH_DELAY_MIN_MS   =        2500;
+export const SEARCH_DELAY_MAX_MS   =        5000;
+export const PRODUCT_DELAY_MIN_MS  =        3500;
+export const PRODUCT_DELAY_MAX_MS  =        8000;
+export const CHUNK_SIZE            =       15;        // fewer chunk-rest breaks
+export const CHUNK_REST_MIN_MS     =  1.5 * 60 * 1000; // 1.5 min
+export const CHUNK_REST_MAX_MS     =  3.5 * 60 * 1000; // 3.5 min
 
 // Back-compat aliases used by the popup.js storage migration code:
 export const DEFAULT_SEARCH_DELAY_MIN_MS  = SEARCH_DELAY_MIN_MS;

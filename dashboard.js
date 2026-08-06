@@ -791,6 +791,42 @@ $('requeueAllBtn').addEventListener('click', async () => {
   refreshAll();
 });
 
+// Re-queue zero-keyword SKUs (completed SKUs that yielded 0 keywords)
+$('requeueDoneEmptyBtn').addEventListener('click', async () => {
+  const bId = state.batchId || '';
+  if (!confirm(`Re-queue all 0-keyword completed SKUs ${bId ? `in batch "${bId}"` : 'across all batches'} back to pending?`)) return;
+  $('requeueDoneEmptyBtn').disabled = true;
+  $('requeueDoneEmptyBtn').textContent = '↺ Re-queuing…';
+  const resp = await rpc('jobs:requeueDoneEmpty', { batchId: bId });
+  $('requeueDoneEmptyBtn').disabled = false;
+  $('requeueDoneEmptyBtn').textContent = '↺ Re-queue zero-KW';
+  if (resp?.ok) {
+    alert(`✓ Re-queued ${resp.count || 0} zero-keyword SKU(s) back to pending.`);
+    refreshAll();
+  } else {
+    alert(`Re-queue failed: ${resp?.error || 'unknown'}`);
+  }
+});
+
+// Global Speed Mode Preset selector — pushes config to all workers instantly
+$('speedProfileSelect').addEventListener('change', async () => {
+  const mode = $('speedProfileSelect').value;
+  const presets = {
+    fast: { searchDelayMinMs: 1500, searchDelayMaxMs: 3500, productDelayMinMs: 2000, productDelayMaxMs: 5000, maxAmazonKeywords: 25, maxLinkVerify: 2, productDeadlineMs: 6 * 60 * 1000, backfillKpMetrics: false },
+    balanced: { searchDelayMinMs: 2500, searchDelayMaxMs: 5000, productDelayMinMs: 3500, productDelayMaxMs: 8000, maxAmazonKeywords: 35, maxLinkVerify: 3, productDeadlineMs: 8 * 60 * 1000, backfillKpMetrics: true },
+    deep: { searchDelayMinMs: 4000, searchDelayMaxMs: 8000, productDelayMinMs: 6000, productDelayMaxMs: 12000, maxAmazonKeywords: 50, maxLinkVerify: 5, productDeadlineMs: 12 * 60 * 1000, backfillKpMetrics: true },
+  };
+  const patch = presets[mode];
+  if (!patch) return;
+  const res = await rpc('config:update', { patch });
+  if (res?.ok) {
+    alert(`✓ Fleet speed preset updated to "${mode.toUpperCase()}". Workers will apply settings on next SKU.`);
+    refreshAll();
+  } else {
+    alert(`Failed to push speed preset: ${res?.error || 'unknown'}`);
+  }
+});
+
 // Auto-refresh interval selector.
 $('refreshIntervalSelect').addEventListener('change', () => {
   const ms = parseInt($('refreshIntervalSelect').value, 10) || 0;

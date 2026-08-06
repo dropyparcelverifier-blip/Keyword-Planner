@@ -3144,7 +3144,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
   // leaves the product unmarked so a resume re-enters it, which is right for
   // a human interrupting and wrong for a deadline (the work is as complete
   // as it is going to get).
-  const PRODUCT_DEADLINE_MS = Number(opts.productDeadlineMs ?? 25 * 60_000) || 0;
+  const PRODUCT_DEADLINE_MS = Number(opts.productDeadlineMs ?? 8 * 60_000) || 0;
   let productDeadlineAt = 0;
   let deadlineFired = false;
   const productExpired = () => productDeadlineAt > 0 && Date.now() > productDeadlineAt;
@@ -3180,15 +3180,12 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
   //   product to fill kp_* columns on non-KP rows (autosuggest/PAA/related/amazon).
   const backfillKpMetrics = opts.backfillKpMetrics !== false;
   // maxAmazonKeywords: cap on keywords per product entering the Amazon Round.
-  // Raised default 30→50→80 to keep pace with the wider R1/R2 KP net + the
-  // R1 commercial-modifier expansion + the widened filter (anchor_commercial
-  // now accepted). Amazon Round rate is ~3s per seed → 80 seeds ≈ 4 min per
-  // product, still bounded. Total per-SKU output target: 100-300 rows.
-  const maxAmazonKeywords = Math.max(1, opts.maxAmazonKeywords || 80);
+  // Default tuned to 35 for fast, high-intent Amazon SERP coverage without wall-clock bloat.
+  const maxAmazonKeywords = Math.max(1, opts.maxAmazonKeywords || 35);
   // verifyMatchedLinks: open each matched result's destination page and re-check
   //   it carries our product image (bounded to matched links only).
   const verifyMatchedLinks = opts.verifyMatchedLinks !== false;
-  const maxLinkVerify = Math.max(1, opts.maxLinkVerify || 5);
+  const maxLinkVerify = Math.max(1, opts.maxLinkVerify || 3);
 
   if (!kpUrl) throw new Error('Keyword Planner URL is required (Settings tab).');
 
@@ -3502,7 +3499,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
   // searches during a block is exactly when parallelism looks least human, so
   // the two levers move together.
   const SERP_CONCURRENCY_MAX = Math.max(1, Number(opts.serpConcurrency ?? 3) || 3);
-  const serpConcurrency = () => (paceFactor > 1 ? 1 : SERP_CONCURRENCY_MAX);
+  const serpConcurrency = () => (paceFactor >= 4 ? 1 : SERP_CONCURRENCY_MAX);
 
   // Run tasks with a bounded number in flight. Order of completion does not
   // matter -- every task writes into `report` under its own composite key.
@@ -3700,6 +3697,66 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         productTotal: sorted.length,
         productsDone, productsTotal,
       });
+
+      // Normalise field names from manager-stored rows (snake_case) to the
+      // camelCase this engine uses. The manager's orphan_guard and SQLite
+      // storage use snake_case field names, but rows restored from the
+      // manager for resume carry those original names. Without this mapping,
+      // resumed rows lose productUrl → fail the orphan_guard → get rejected
+      // as no_product_url on the next push.
+      const normaliseRow = (row) => {
+        if (!row || typeof row !== 'object') return row;
+        // Map snake_case → camelCase for fields the engine reads.
+        const remap = {
+          product_url: 'productUrl',
+          product_image: 'productImage',
+          product_name: 'productName',
+          parent_keyword: 'parentKeyword',
+          batch_id: 'batchId',
+          kp_monthly_searches: 'kpMonthlySearches',
+          kp_competition: 'kpCompetition',
+          kp_bid_low: 'kpBidLow',
+          kp_bid_high: 'kpBidHigh',
+          image_count: 'imageCount',
+          total_thumbs: 'totalThumbs',
+          visibility_pct: 'visibilityPct',
+          match_sources: 'matchSources',
+          thumbs_captured: 'thumbsCaptured',
+          total_sellers: 'totalSellers',
+          ads_on_serp: 'adsOnSerp',
+          sellers_on_serp: 'sellersOnSerp',
+          seller_titles: 'sellerTitles',
+          top_match_seller: 'topMatchSeller',
+          top_match_price: 'topMatchPrice',
+          top_match_thumbnail: 'topMatchThumbnail',
+          autosuggest_count: 'autosuggestCount',
+          amazon_suggest_count: 'amazonSuggestCount',
+          amazon_total_results: 'amazonTotalResults',
+        };
+        for (const [snake, camel] of Object.entries(remap)) {
+          if (snake in row && !(camel in row)) {
+            row[camel] = row[snake];
+          }
+        }
+        // Ensure productUrl is present (the orphan_guard requires it).
+        // Some pre-fix rows or manager-restored rows may have lost it.
+        if (!row.productUrl && row.product_url) {
+          row.productUrl = row.product_url;
+        }
+        return row;
+      };
+
+      // Normalise any rows restored from the manager so downstream code
+      // (getProductImages, addRow, etc.) sees camelCase field names.
+      // NOTE: resumedRounds is a Set — it has no .priorRows. The rows live
+      // in resumedPriorRows, captured above. Without this fix the loop
+      // silently never ran and resumed rows kept their snake_case names,
+      // which is what fed the orphan_guard's no_product_url rejections.
+      for (let ri = 0; ri < resumedPriorRows.length; ri++) {
+        if (resumedPriorRows[ri]) {
+          resumedPriorRows[ri] = normaliseRow(resumedPriorRows[ri]);
+        }
+      }
 
       const productImages = await getProductImages(cleanUrl, (m) => {
         onProgress?.({ currentProduct: productName, currentAction: m });
@@ -6350,11 +6407,46 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                   const r = rRace.ok ? rRace.value : null;
                   amazonSugs = Array.isArray(r?.suggestions) ? r.suggestions : [];
                 } catch (e) {
-                  onProgress?.({
-                    currentProduct: productName, currentSource: 'amazon',
-                    currentAction: `Amazon suggest error for "${parent.keyword}": ${e.message}`,
-                    logKind: 'err',
-                  });
+                  const msg = String(e?.message || e || '');
+                  // "No tab with id" means the Amazon tab was closed/crashed.
+                  // Recreate it and retry once, then skip this keyword if
+                  // the retry also fails.
+                  if (/no tab with id/i.test(msg)) {
+                    onProgress?.({
+                      currentProduct: productName, currentSource: 'amazon',
+                      currentAction: `Amazon tab lost for "${parent.keyword}" — recreating`,
+                      logKind: 'warn',
+                    });
+                    try {
+                      amazonTabId = await Worker.navigate('https://www.amazon.in/');
+                      await sleep(randInt(2500, 4000));
+                      const ready = await pingContentScript(amazonTabId, 'AMAZON_PING', 15, 1000);
+                      if (ready) {
+                        const rRace = await withTimeout(chrome.tabs.sendMessage(amazonTabId, {
+                          type: 'AMAZON_GET_SUGGESTIONS', keyword: parent.keyword,
+                        }), 60_000, 'AMAZON_GET_SUGGESTIONS');
+                        const r = rRace.ok ? rRace.value : null;
+                        amazonSugs = Array.isArray(r?.suggestions) ? r.suggestions : [];
+                        onProgress?.({
+                          currentProduct: productName, currentSource: 'amazon',
+                          currentAction: `Amazon tab recreated — recovered ${amazonSugs.length} suggestion(s)`,
+                          logKind: 'ok',
+                        });
+                      }
+                    } catch (retryErr) {
+                      onProgress?.({
+                        currentProduct: productName, currentSource: 'amazon',
+                        currentAction: `Amazon suggest retry failed for "${parent.keyword}": ${retryErr.message}`,
+                        logKind: 'err',
+                      });
+                    }
+                  } else {
+                    onProgress?.({
+                      currentProduct: productName, currentSource: 'amazon',
+                      currentAction: `Amazon suggest error for "${parent.keyword}": ${e.message}`,
+                      logKind: 'err',
+                    });
+                  }
                 }
                 parent.amazon_suggest_count = amazonSugs.length;
                 onProgress?.({
@@ -6378,11 +6470,54 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                     amazonResults = Array.isArray(r?.results) ? r.results : [];
                   }
                 } catch (e) {
-                  onProgress?.({
-                    currentProduct: productName, currentSource: 'amazon',
-                    currentAction: `Amazon SERP error for "${parent.keyword}": ${e.message}`,
-                    logKind: 'err',
-                  });
+                  const msg = String(e?.message || e || '');
+                  // "No tab with id" means the Amazon tab was closed/crashed
+                  // between Step 1 (suggestions) and Step 2 (results). The
+                  // Step-1 recovery only handles the suggest call; without
+                  // this, a tab crash here silently skips the keyword with
+                  // no retry. Recreate the tab and retry once.
+                  if (/no tab with id/i.test(msg)) {
+                    onProgress?.({
+                      currentProduct: productName, currentSource: 'amazon',
+                      currentAction: `Amazon tab lost during SERP for "${parent.keyword}" — recreating`,
+                      logKind: 'warn',
+                    });
+                    try {
+                      amazonTabId = await Worker.navigate('https://www.amazon.in/');
+                      await sleep(randInt(2500, 4000));
+                      const ready = await pingContentScript(amazonTabId, 'AMAZON_PING', 15, 1000);
+                      if (ready) {
+                        await chrome.tabs.update(amazonTabId, {
+                          url: `https://www.amazon.in/s?k=${encodeURIComponent(parent.keyword)}`,
+                        });
+                        await sleep(randInt(2500, 4500));
+                        const ready2 = await pingContentScript(amazonTabId, 'AMAZON_PING', 10, 800);
+                        if (ready2) {
+                          const rRace = await withTimeout(
+                            chrome.tabs.sendMessage(amazonTabId, { type: 'AMAZON_GET_RESULTS' }), 90_000, 'AMAZON_GET_RESULTS');
+                          const r = rRace.ok ? rRace.value : null;
+                          amazonResults = Array.isArray(r?.results) ? r.results : [];
+                          onProgress?.({
+                            currentProduct: productName, currentSource: 'amazon',
+                            currentAction: `Amazon tab recreated — recovered ${amazonResults.length} result(s) for "${parent.keyword}"`,
+                            logKind: 'ok',
+                          });
+                        }
+                      }
+                    } catch (retryErr) {
+                      onProgress?.({
+                        currentProduct: productName, currentSource: 'amazon',
+                        currentAction: `Amazon SERP retry failed for "${parent.keyword}": ${retryErr.message}`,
+                        logKind: 'err',
+                      });
+                    }
+                  } else {
+                    onProgress?.({
+                      currentProduct: productName, currentSource: 'amazon',
+                      currentAction: `Amazon SERP error for "${parent.keyword}": ${e.message}`,
+                      logKind: 'err',
+                    });
+                  }
                 }
                 onProgress?.({
                   currentProduct: productName, currentSource: 'amazon',

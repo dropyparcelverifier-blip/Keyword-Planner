@@ -211,11 +211,42 @@
 
   // ============ Search-results scraping ============
   function scrapeSearchResults() {
+    // Amazon rotates class names frequently. Try multiple selector strategies:
+    // 1. Legacy data-component-type selectors
+    // 2. Recent Amazon layouts use [data-asin] on div.s-result-item
+    // 3. Fallback: any div with data-asin attribute
+    // 4. Broadest: any element with data-asin that looks like a result card
     const cards = document.querySelectorAll(
-      '[data-component-type="s-search-result"], [data-asin][data-component-type], div.s-result-item[data-asin]'
+      '[data-component-type="s-search-result"], ' +
+      '[data-asin][data-component-type], ' +
+      'div.s-result-item[data-asin], ' +
+      'div[data-asin][class*="s-result"], ' +
+      '[data-asin][class*="s-result"], ' +
+      'li[data-asin], ' +
+      'div[data-asin]'
     );
     const out = [];
     const diagSamples = [];
+    
+    // Diagnostic: if 0 cards found, capture page state so we can debug
+    if (cards.length === 0) {
+      try {
+        const pageInfo = {
+          url: window.location.href,
+          title: document.title,
+          bodyLen: document.body?.innerHTML?.length || 0,
+          searchResult: document.querySelector('[data-component-type="s-search-result"]') ? 'found' : 'not found',
+          anyAsin: document.querySelector('[data-asin]') ? 'found' : 'not found',
+          mainSection: document.querySelector('#search, #main, .s-main-sri, .s-search-results')?.id || 'none',
+        };
+        chrome.runtime.sendMessage({
+          action: 'logFromContent',
+          source: 'amazon-reader',
+          text: `Amazon scrape: 0 cards found — pageInfo=${JSON.stringify(pageInfo)} — check if Amazon rotated layout or served CAPTCHA`,
+        }).catch(() => {});
+      } catch {}
+    }
+    
     cards.forEach((card, idx) => {
       const asin = card.getAttribute('data-asin') || '';
       if (!asin) return; // skip non-product slots
@@ -261,6 +292,17 @@
       const price = priceWhole
         ? `${priceSymbol}${priceWhole}${priceFraction ? '.' + priceFraction : ''}`
         : '';
+      // Fallback: offscreen price (accessibility text) if visual price missing
+      if (!price) {
+        const offscreen = card.querySelector('.a-offscreen')?.textContent?.trim();
+        if (offscreen) {
+          const m = offscreen.match(/[₹$€£][\s\d,.]+/);
+          if (m) {
+            // Add to diag only — don't pollute price field with raw text
+            diagSamples.push(`  card[${idx + 1}] offscreen_price="${m[0]}"`);
+          }
+        }
+      }
       const origPrice =
         (card.querySelector('.a-price[data-a-strike] .a-offscreen, .a-text-price .a-offscreen')?.textContent || '').trim();
 
@@ -314,11 +356,17 @@
         );
       }
     });
+    // Diagnostic — capture first 3 cards so we can verify scraping picked
+    // up the right fields (and update selectors when Amazon rotates them).
+    // ALWAYS fires, including on 0-card results, so we can see selector breakage.
     try {
+      const diagText = cards.length === 0
+        ? `Amazon scrape: 0 CARDS FOUND — selector breakage likely`
+        : `Amazon scrape: cards=${cards.length} kept=${out.length}`;
       chrome.runtime.sendMessage({
         action: 'logFromContent',
         source: 'amazon-reader',
-        text: `Amazon scrape: cards=${cards.length} kept=${out.length}\n  ${diagSamples.join('\n  ')}`,
+        text: `${diagText}\n  ${diagSamples.join('\n  ')}`,
       }).catch(() => {});
     } catch {}
     return out;

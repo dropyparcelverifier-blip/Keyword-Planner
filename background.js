@@ -242,8 +242,24 @@ const coldStart = (async () => {
   // Restore pending-push queue so SW death mid-push doesn't lose data.
   // Re-trying on cold start is essential for the "batch shows done but
   // no data in the manager" bug class.
+  //
+  // FILTER STALE ENTRIES: rows captured before the productUrl fix (or by a
+  // buggy build) carry no product_url. The manager's orphan_guard rejects
+  // them with `no_product_url`, and retrying them 5× each just spams the
+  // activity log with err lines (60+ in one session). They are unrecoverable
+  // — the product URL is gone — so drop them at the door instead of
+  // replaying them forever. Only entries with at least one row that still
+  // has a productUrl are worth keeping.
   if (Array.isArray(data[PENDING_PUSH_STORAGE_KEY])) {
-    _pendingPushes.push(...data[PENDING_PUSH_STORAGE_KEY]);
+    const restored = data[PENDING_PUSH_STORAGE_KEY].filter(e =>
+      e && typeof e === 'object' && Array.isArray(e.rows) &&
+      e.rows.some(r => r && String(r.productUrl || r.product_url || '').trim())
+    );
+    const dropped = data[PENDING_PUSH_STORAGE_KEY].length - restored.length;
+    _pendingPushes.push(...restored);
+    if (dropped > 0) {
+      pushLog(`Dropped ${dropped} stale pending push(es) with no product_url (pre-fix data) — manager would reject them anyway`, 'warn');
+    }
     if (_pendingPushes.length > 0) {
       pushLog(`Restored ${_pendingPushes.length} pending push(es) from previous session — will retry`, 'ok');
     }
@@ -881,7 +897,15 @@ let _incrementalSent = new Set();
 let _lastIncrementalAt = 0;
 let _incrementalInFlight = false;
 
-function _rowKey(r) { return `${r.productUrl}|${(r.keyword || '').toLowerCase()}`; }
+function _rowKey(r) {
+  // Rows without a productUrl (pre-fix data) all collapse to the same
+  // `undefined|keyword` key, which would dedup them against each other
+  // incorrectly. Use a sentinel so each such row stays distinct — they
+  // should never be sent anyway (pushToAdBrain drops them), but if one
+  // slips through, it must not mask another.
+  const pu = String(r.productUrl || '').trim() || '(no-url)';
+  return `${pu}|${(r.keyword || '').toLowerCase()}`;
+}
 
 async function maybeFlushIncremental(force = false) {
   if (_incrementalInFlight) return;
@@ -898,7 +922,19 @@ async function maybeFlushIncremental(force = false) {
     // them unsent so the completion path can resync and retry properly.
     if (r && r.rejectedOrphan > 0) {
       bufferActivity({ level: 'warn', source: 'push',
-        message: `Incremental push: ${r.rejectedOrphan} row(s) rejected (stale batch id) — leaving them for the completion-time resync.` });
+        message: `Incremental push: ${r.rejectedOrphan} row(s) rejected (stale batch id). Resyncing active batch id (${r.managerActiveBatchId || 'unknown'})...` });
+      if (r.managerActiveBatchId && r.managerActiveBatchId !== state.queueBatchId) {
+        state.queueBatchId = r.managerActiveBatchId;
+        for (const row of unsent) { row.batchId = r.managerActiveBatchId; }
+        // Retry push once with active batch id
+        const retryRes = await pushToAdBrain(unsent).catch(() => null);
+        if (retryRes && (retryRes.success || 0) > 0) {
+          for (const row of unsent) _incrementalSent.add(_rowKey(row));
+          _lastIncrementalAt = Date.now();
+          bufferActivity({ level: 'ok', source: 'push',
+            message: `Incremental push: Auto-resynced batch id and successfully landed ${retryRes.success} row(s).` });
+        }
+      }
     } else {
       for (const row of unsent) _incrementalSent.add(_rowKey(row));
       _lastIncrementalAt = Date.now();
@@ -964,6 +1000,17 @@ async function flushPendingPushes() {
   entry.attempts++;
   try {
     const r = await pushToAdBrain(entry.rows);
+    // pushToAdBrain now drops rows without product_url locally. If ALL rows
+    // were dropped, the entry is unrecoverable — drop it immediately instead
+    // of retrying 5× and spamming the log.
+    if (r.droppedNoUrl > 0 && r.droppedNoUrl === entry.rows.length) {
+      const dropMsg = `Push dropped ${r.droppedNoUrl} row(s) for ${entry.productUrl} — all missing product_url (unrecoverable pre-fix data). Removing from retry queue.`;
+      pushLog(dropMsg, 'warn');
+      bufferActivity({ level: 'warn', source: 'push', message: dropMsg, productUrl: entry.productUrl });
+      _pendingPushes.shift();
+      _persistPendingPushes();
+      return;
+    }
     if (r.failed > 0) {
       entry.lastError = `${r.failed}/${r.success + r.failed} rows failed: ${(r.errors || []).slice(0, 1).join('') || 'unknown'}`;
       // Detect unrecoverable errors (data shape problems, not network).

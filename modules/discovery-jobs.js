@@ -130,7 +130,48 @@ export async function getJobSummary() {
 // report gives it neither, and the next push is rejected with `no_batch_id`
 // for product "(unknown)" -- 13,003 rows thrown away in three hours, all of
 // them work that had already been done.
+// Helper: convert a "url [conf]" joined string back into `{ url, conf }`
+// objects. pushToAdBrain stores matched thumbnails as "url [conf] | url
+// [conf]" (see discovery-export.js pairMatched), so the reverse needs to
+// split BOTH the pipe-joined entries AND the "[conf]" suffix.
+function _splitMatchedThumbs(v) {
+  const out = [];
+  if (typeof v === 'string') {
+    for (const part of v.split(' | ')) {
+      if (!part) continue;
+      const m = part.match(/^(.*?)\s*\[(\d+)\]$/);
+      if (m) out.push({ url: m[1], conf: Number(m[2]) || 0 });
+      else out.push({ url: part, conf: 0 });
+    }
+  } else if (Array.isArray(v)) {
+    for (const item of v) {
+      if (typeof item === 'string') out.push({ url: item, conf: 0 });
+      else if (item && typeof item.url === 'string') out.push({ url: item.url, conf: Number(item.conf) || 0 });
+    }
+  }
+  return out;
+}
+// Helper to convert a pipe-joined string into an array of plain strings.
+function _splitList(v) {
+  if (Array.isArray(v)) return v;
+  if (typeof v === 'string') return v.split(' | ').filter(Boolean);
+  return [];
+}
+
 export function managerRowToReportRow(x) {
+  if (!x || typeof x !== 'object') return {};
+  // matched_thumbnails is stored as "url [conf] | url [conf]" — split into
+  // {url, conf} pairs so the export layer's pairMatched() can rebuild the
+  // matchedThumbnails / matchedConfidences / matchedSellers / matchedPrices
+  // arrays from them. WITHOUT this, rows restored from the manager lose all
+  // image-match data on the next export (matchedThumbnails ends up empty).
+  const paired = _splitMatchedThumbs(x.matched_thumbnails);
+  const matchedThumbnails = paired.map(p => p.url);
+  const matchedConfidences = paired.map(p => p.conf);
+  // matched_sellers / matched_prices align 1:1 with matched_thumbnails.
+  const matchedSellers = _splitList(x.matched_sellers);
+  const matchedPrices  = _splitList(x.matched_prices);
+  const matchedQualities = _splitList(x.matched_qualities);
   return ({
     batchId: x.batch_id, sku: x.sku, keyword: x.keyword, source: x.source,
     parentKeyword: x.parent_keyword, productName: x.product_name, productUrl: x.product_url,
@@ -159,8 +200,20 @@ export function managerRowToReportRow(x) {
     amazonRating: x.amazon_rating, amazonReviews: x.amazon_reviews, amazonTitle: x.amazon_title,
     amazonCompetitors: x.amazon_competitors, amazonTotalResults: x.amazon_total_results,
     topMatchSeller: x.top_match_seller, topMatchPrice: x.top_match_price, topMatchThumbnail: x.top_match_thumbnail,
-    matched_thumbnails: x.matched_thumbnails, matched_sellers: x.matched_sellers, matched_prices: x.matched_prices,
-    matchedLinks: (x.matched_links || '').split(' | ').filter(Boolean), verifiedLinks: (x.verified_links || '').split(' | ').filter(Boolean),
+    // Rebuild the engine-shaped arrays (camelCase) the export layer reads:
+    // matchedThumbnails (urls), matchedConfidences (numbers),
+    // matchedSellers, matchedPrices, matchedQualities. Previously these were
+    // stored under snake_case keys with STRING values, so restored rows lost
+    // all match data on the next export.
+    matchedThumbnails,
+    matchedConfidences,
+    matchedSellers,
+    matchedPrices,
+    matchedQualities,
+    matchedLinks: _splitList(x.matched_links), verifiedLinks: _splitList(x.verified_links),
+    // sellers/unmatched sellers can't be round-tripped from the joined
+    // strings alone — leave them as empty arrays rather than undefined.
+    sellers: [],
   });
 }
 
