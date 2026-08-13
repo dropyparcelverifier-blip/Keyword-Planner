@@ -136,6 +136,16 @@ function getConfig({ res, url, ctx }) {
       );
       outCfg.kp_accounts = outCfg.kp_accounts.filter(a => a && !pinnedElsewhere.has(a.id));
     }
+    // Same scoping the accounts list just got, applied to the assignment
+    // map itself: no worker-side code reads kp_assignments at all (it's
+    // resolveKpForWorker-only, server-side) -- so a worker has no reason to
+    // receive every OTHER worker's PC-name -> account pinning. Keep only
+    // this worker's own entry, if it has one.
+    if (cfg?.kp_assignments && typeof cfg.kp_assignments === 'object') {
+      outCfg.kp_assignments = cfg.kp_assignments[workerId]
+        ? { [workerId]: cfg.kp_assignments[workerId] }
+        : {};
+    }
   }
   return send(res, 200, {
     ok: true,

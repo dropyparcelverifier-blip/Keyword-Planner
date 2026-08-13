@@ -2261,6 +2261,14 @@ async function run() {
   // cursor. The cache must force a full resync periodically or a keyword
   // upgraded after its first push stays counted as image-less forever.
   assert(/RESYNC_EVERY/.test(apiSrc), 'KWSTATS.4 cache force-resyncs periodically to catch in-place row updates');
+  // The keywords half of this poller was fixed first; a follow-up audit
+  // found the jobs half sitting right next to it still doing a full
+  // api.jobsPerProduct(batchId) with no cursor every 3s tick, despite the
+  // Analytics-tab poller (tickAnalyticsLive) a few thousand lines away
+  // already using the identical sinceChangedAt cursor correctly.
+  assert(/api\.jobsPerProduct\(batchId, needsFullSync \? null : cache\.lastChangedAt\)/.test(apiSrc),
+    'KWSTATS.5 jobs half of the poll also uses its cursor instead of a full re-fetch every tick');
+  assert(/cache\.jobsById/.test(apiSrc), 'KWSTATS.6 jobs are merged by id into the cache, not replaced wholesale');
 
   // Cross-tab polish: Config grouped into sections, Workers 2-col.
   assert(htmlFull.includes('<div class="an-layer-head">Batches</div>'),           'POLISH.1 Config has Batches section heading');
@@ -3229,6 +3237,17 @@ async function run() {
     'KPACCT.14 an unpinned (unclaimed) account remains a candidate for every worker');
   assert(!cfgForC.data.config.kp_accounts.some(a => a.id === 'acct-b'),
     'KPACCT.15 same protection applies to a worker with no assignment at all');
+  // kp_assignments is the map kp_accounts was filtered AGAINST — the whole
+  // fleet's PC-name -> account pinning. No worker-side code reads it (it's
+  // resolveKpForWorker-only, server-side; grep modules/discovery-jobs.js —
+  // no hits), so a worker has no reason to receive every OTHER worker's
+  // pinning, only its own (if any).
+  assertEq(cfgForA.data.config.kp_assignments?.['worker-A'], 'acct-b',
+    'KPACCT.16 a worker still sees its OWN assignment entry');
+  assert(!('worker-A' in (cfgForB.data.config.kp_assignments || {})),
+    "KPACCT.17 an unrelated worker's config drops every OTHER worker's assignment entry");
+  assert(Object.keys(cfgForC.data.config.kp_assignments || {}).length === 0,
+    'KPACCT.18 a worker with no assignment of its own sees an empty map, not the fleet map');
   await req('POST', '/api/config', { configPatch: { kp_accounts: null, kp_assignments: null } });
 
   // ── KP URL hygiene ────────────────────────────────────────────────────
