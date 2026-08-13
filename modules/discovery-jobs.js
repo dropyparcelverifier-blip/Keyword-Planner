@@ -516,3 +516,14 @@ export async function requeueJob(jobId) {
   try { const r = await _post('/api/jobs/requeue', { jobId }); return { updated: r.updated || 0 }; }
   catch (e) { return { updated: 0, error: e.message }; }
 }
+
+// Dashboard "Re-queue zero-KW" button — resets every 'done' job in
+// batchId (or across all batches when omitted) that has zero keyword rows
+// in the manager back to pending. Mirrors manager/public/app.js's own
+// jobsRequeueDoneEmpty call against the same manager endpoint.
+export async function requeueDoneEmptyJobs(batchId) {
+  try {
+    const r = await _post('/api/jobs/requeue-done-empty', { batchId: batchId || null });
+    return { count: r.updated || 0 };
+  } catch (e) { return { count: 0, error: e.message }; }
+}

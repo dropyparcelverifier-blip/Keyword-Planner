@@ -16,6 +16,14 @@
 // previous value.
 'use strict';
 
+// GraphQL string-literal values here are always meant to be a SKU/ASIN/
+// barcode (alphanumeric + hyphen). Stripping to that allowlist — rather
+// than just removing `"` — closes off query-syntax injection (backslash
+// escapes, colons, `OR`/parentheses) into Shopify's search query string.
+function _gqlSafeValue(v) {
+  return String(v == null ? '' : v).replace(/[^a-zA-Z0-9-]/g, '');
+}
+
   // ---------- Shopify integration ----------
   // Returns the field-impact hierarchy (what carries most SEO/CTR weight).
   // UI uses this to render a priority list; the Claude prompt inlines it too.
@@ -41,7 +49,7 @@ async function debugLookup({ req, res, url, ctx }) {
     const asin = asinMatch ? asinMatch[1].toUpperCase() : null;
     const rounds = [];
     const tryQuery = async (field, value, label) => {
-      const quoted = `${field}:\\"${String(value).replace(/"/g, '')}\\"`;
+      const quoted = `${field}:\\"${_gqlSafeValue(value)}\\"`;
       const graphqlText = `{
         productVariants(first: 3, query: "${quoted}") {
           edges { node { id sku barcode product { id handle title vendor productType } } }
@@ -91,7 +99,7 @@ async function debugLookup({ req, res, url, ctx }) {
     if (asin) {
       const asinLower = asin.toLowerCase();
       const graphqlText = `{
-        products(first: 3, query: "handle:*${asinLower}*") {
+        products(first: 3, query: "handle:*${_gqlSafeValue(asinLower)}*") {
           edges { node { id handle title vendor productType } }
         }
       }`;

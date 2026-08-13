@@ -348,11 +348,15 @@ function isFaqKeyword(keyword) {
 }
 function deriveKeywordRelevance(tier) {
   switch (tier) {
-    case 'brand_product':   return 'high';
-    case 'generic_product': return 'medium';
-    case 'anchor_only':     return 'low';
-    case 'brand_other':     return 'sibling-brand';
-    default:                return '';
+    case 'brand_product':     return 'high';
+    case 'generic_product':   return 'medium';
+    case 'anchor_only':       return 'low';
+    // Anchor + commercial-intent, no brand match — accepted so niche brands
+    // aren't starved (see classifyKeyword's Tier 3-Lite comment), but it's a
+    // weaker signal than a bare anchor match since brand is entirely absent.
+    case 'anchor_commercial': return 'low';
+    case 'brand_other':       return 'sibling-brand';
+    default:                  return '';
   }
 }
 
@@ -1413,14 +1417,22 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
   // the website-fallback block below runs as if the text-seed loop
   // produced zero keywords, sending KP the productUrl directly.
   const websiteOnly = kpOpts.websiteOnly === true;
+  // Set the moment a seed proves this profile's Ads session is dead. Every
+  // later seed would hit the identical account chooser.
+  //
+  // Declared HERE, at function top level, not inside the `else` block
+  // below — it's read after that block closes (near the end of this
+  // function, to surface accountChooserBroken to the caller), and a
+  // `let` scoped to the block threw ReferenceError: sessionBroken is not
+  // defined on every call that reached that return path. Same bug class
+  // as amazonSkippedIrrelevant / r2DegradedSeeds elsewhere in this file:
+  // declared-in-block, read-outside-block.
+  let sessionBroken = null;
   if (websiteOnly && productUrl) {
     log(`KP: website-only mode enabled — skipping text-seed flow, going straight to "Start with a website" on ${productUrl.slice(0, 80)}`);
     // Fall through to the website-fallback block below by leaving
     // accumulated empty and skipping the seedList loop.
   } else {
-  // Set the moment a seed proves this profile's Ads session is dead. Every
-  // later seed would hit the identical account chooser.
-  let sessionBroken = null;
 
   for (let i = 0; i < seedList.length; i++) {
     if (sessionBroken) {
@@ -1456,7 +1468,6 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
         const navUrl = forceUrl || urlForAttempt(attempt);
         log(`KP seed ${i + 1}/${seedList.length}: navigating to ${attempt <= 1 ? 'the configured KP page' : 'the /ideas/new deep link'}${attemptLabel}`);
         const tabId = await Worker.navigate(navUrl);
-        await sleep(randInt(2500, 4000));
 
         // Check WHERE we landed BEFORE waiting on the content script.
         //
@@ -1467,15 +1478,43 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
         // navigations in 24 hours of which 618 were the chooser: roughly two
         // and a half hours per day spent pinging a page that cannot answer.
         // Reading tab.url costs a millisecond and gives the same verdict.
-        // Confirm it has SETTLED before believing it. Google can pass through
-        // accounts.google.com mid-handshake and still land on Keyword Planner,
-        // and treating that instant as a dead session would fail seeds that
-        // were about to work. Two looks 2s apart costs 2 seconds on the
-        // failure path against the 15 it saves, and removes the false positive.
-        let earlyWhy = await explainKpLandingPage(tabId);
-        if (earlyWhy) {
-          await sleep(2000);
+        //
+        // Confirm it has SETTLED before believing it — Google can pass
+        // through accounts.google.com mid-handshake and still land on
+        // Keyword Planner, and treating that instant as a dead session
+        // fails seeds that were about to work. This used to be a single
+        // fixed sleep(2.5-4s) then one 2s recheck: correct on a warm
+        // session, but on a cold/idle worker profile (the common case
+        // after a PC has sat unattended for hours) confirmed BY HAND to
+        // reach Keyword Planner successfully via this exact same URL, the
+        // multi-hop redirect (ads.google.com -> accounts.google.com ->
+        // back to ads.google.com) can legitimately take longer than the
+        // ~4.5s this gave it, and the fixed-delay check called it a
+        // chooser before the second hop ever landed — a false positive
+        // burning through the whole account-fallback ladder for a session
+        // that was still settling, not actually broken.
+        //
+        // Poll instead: check every ~1.5s for up to 12s. Exit the moment
+        // the URL reaches Keyword Planner (fast path, same speed as
+        // before on a warm session) OR the URL stops changing across two
+        // consecutive checks on a non-KP page (genuinely settled on a
+        // chooser/error page, not mid-hop) — whichever happens first.
+        const KP_LANDING_POLL_MS = 1500;
+        const KP_LANDING_POLL_MAX_MS = 12000;
+        let earlyWhy = null;
+        let lastLandingUrl = null;
+        const landingDeadline = Date.now() + KP_LANDING_POLL_MAX_MS;
+        while (true) {
+          await sleep(KP_LANDING_POLL_MS);
           earlyWhy = await explainKpLandingPage(tabId);
+          if (!earlyWhy) break; // landed on Keyword Planner — done, fast path
+          let curUrl = '';
+          try { curUrl = String((await chrome.tabs.get(tabId))?.url || ''); } catch {}
+          // Same non-KP URL on two consecutive checks = settled on a
+          // chooser/error page, not still mid-redirect-hop.
+          if (curUrl && curUrl === lastLandingUrl) break;
+          lastLandingUrl = curUrl;
+          if (Date.now() >= landingDeadline) break; // give up — genuinely stuck
         }
         const ready = earlyWhy ? false : await pingContentScript(tabId, 'KP_PING', 15, 1000);
         if (!ready) {
@@ -1736,7 +1775,19 @@ async function getKeywordPlannerIdeas(seedTextOrSeeds, kpUrl, maxResults = 200, 
       // keywords so callers move on immediately instead of retrying.
       return { ok: true, keywords: [], empty: true };
     }
-    return { ok: false, error: seedErrors.join(' | '), keywords: [] };
+    // sessionBroken (set above when the whole account-fallback ladder was
+    // exhausted and every rung landed on the chooser) is surfaced here so
+    // the caller can arm the dead-streak circuit breaker. Previously this
+    // was invisible outside getKeywordPlannerIdeas — isKpSessionDeadError
+    // only matches tab-crash/channel-closed/timeout patterns, not "account
+    // chooser", so a worker whose profile is genuinely, persistently stuck
+    // on the chooser (confirmed: every rung of the fallback ladder fails,
+    // across multiple full retry cycles minutes apart — not a one-off
+    // timing blip) never tripped the breaker. It just kept retrying the
+    // full ladder on every seed of every product forever, at ~2 min/cycle
+    // for zero yield, instead of self-arming a skip like every other dead-
+    // session failure mode already does.
+    return { ok: false, error: seedErrors.join(' | '), keywords: [], accountChooserBroken: !!sessionBroken };
   }
   return { ok: true, keywords: accumulated, errors: seedErrors };
 }
@@ -2721,11 +2772,16 @@ async function loadProductSerp(seedQuery, referenceEmbeddings, productImageUrls,
             // catches the case where the SERP listing is hosted on the
             // brand's own domain (aquaphorus.com / nowfoods.com /
             // larocheposay.com) but the body text doesn't echo the
-            // brand word.
+            // brand word. Must use the same length + word-boundary guard
+            // as the multi-signal path's `brandInDomain` (see the comment
+            // there): a naive `.includes(a)` on a short/generic alias like
+            // "now" or "ad" false-matches unrelated domains such as
+            // `nownews.com` or `addtocart.com`.
             const dSellerDomain = String(dCtx.seller || '').toLowerCase();
-            const dBrandInDomain = (productContext.brandAliases || []).some(
-              a => a && dSellerDomain.includes(a)
-            );
+            const dBrandInDomain = (productContext.brandAliases || []).some(a => {
+              if (!a || a.length < 4) return false;
+              return new RegExp(`(?:^|[.\\-])${a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[.\\-]|$)`, 'i').test(dSellerDomain);
+            });
             if (ident && ident.tier === 'fail') {
               // Fail-tier rescue: dHash already says the image is
               // visually near-identical to our reference. If the seller
@@ -3566,6 +3622,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
 
       const p = sorted[pi];
       const cleanUrl = cleanProductUrl(p.url);
+      try {
 
       // Composite report key: (product, keyword).
       //
@@ -3644,11 +3701,17 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // and a skipped one usually means a broken KP session that may since
       // have recovered.
       let resumedRounds = new Set();
+      // Declared OUTSIDE the try block so the normalisation loop below can
+      // access it. The previous code declared `prior` inside the try, then
+      // referenced `_resumedPriorRows` (never declared) in the loop below —
+      // a ReferenceError on every product, which crashed the whole run.
+      let _resumedPriorRows = [];
       if (typeof opts.getResumeState === 'function') {
         try {
           const rs = await opts.getResumeState(cleanUrl);
           const prior = Array.isArray(rs?.priorRows) ? rs.priorRows : [];
           const done  = Array.isArray(rs?.completedRounds) ? rs.completedRounds : [];
+          _resumedPriorRows = prior;
           if (prior.length && done.length) {
             let restored = 0;
             for (const row of prior) {
@@ -3749,12 +3812,15 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // Normalise any rows restored from the manager so downstream code
       // (getProductImages, addRow, etc.) sees camelCase field names.
       // NOTE: resumedRounds is a Set — it has no .priorRows. The rows live
-      // in resumedPriorRows, captured above. Without this fix the loop
-      // silently never ran and resumed rows kept their snake_case names,
-      // which is what fed the orphan_guard's no_product_url rejections.
-      for (let ri = 0; ri < resumedPriorRows.length; ri++) {
-        if (resumedPriorRows[ri]) {
-          resumedPriorRows[ri] = normaliseRow(resumedPriorRows[ri]);
+      // in the `_resumedPriorRows` variable hoisted above the resume block.
+      // Without this fix the loop silently never ran (prior was try-scoped)
+      // and resumed rows kept their snake_case names, which is what fed the
+      // orphan_guard's no_product_url rejections.
+      // FIX: `_resumedPriorRows` is declared BEFORE the try block so it's
+      // accessible here, unlike the original `prior` which was try-scoped.
+      for (let ri = 0; ri < _resumedPriorRows.length; ri++) {
+        if (_resumedPriorRows[ri]) {
+          _resumedPriorRows[ri] = normaliseRow(_resumedPriorRows[ri]);
         }
       }
 
@@ -4231,10 +4297,36 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         // supposedly turned off.
         const websiteFallbackAllowed = opts.skipR1Kp !== true && !websiteFallbackUsedFor.has(cleanUrl);
         websiteFallbackUsedFor.add(cleanUrl);
-        kpResult = await getKeywordPlannerIdeas(kpSeeds, kpUrl, kpMaxPerProduct,
-          (m) => onProgress?.({ currentProduct: productName, currentAction: m }),
-          { productUrl: cleanUrl, websiteOnly: opts.kpWebsiteOnly === true,
-            allowWebsiteFallback: websiteFallbackAllowed });
+        // R1 with up to 2 retries on TRANSIENT failure, mirroring R2's
+        // retry+backoff (below, R2_KP_MAX_ATTEMPTS) — R1 feeds R2 seed
+        // selection, PAA, and the main SERP cycle, so it's the higher-value
+        // round, yet previously had no call-site retry: one transient KP
+        // hiccup (hydrate timeout, Discover-card click miss) dropped a SKU
+        // to near-zero yield with no second attempt, while the identical
+        // condition in R2 would have recovered. Do NOT retry a confirmed
+        // dead session (isKpSessionDeadError) — that's a known-broken tab,
+        // not a one-off blip, and the existing hard-crash handling below
+        // (armKpDeadStreak) already exists specifically so we don't keep
+        // reopening a KP tab we know is crashed.
+        const R1_KP_MAX_ATTEMPTS = 3;
+        for (let r1Attempt = 1; r1Attempt <= R1_KP_MAX_ATTEMPTS; r1Attempt++) {
+          if (r1Attempt > 1) {
+            const backoff = randInt(8000, 15000) * (r1Attempt - 1);
+            onProgress?.({
+              currentProduct: productName,
+              currentSource: 'kp',
+              currentAction: `R1 KP attempt ${r1Attempt}/${R1_KP_MAX_ATTEMPTS} for "${kpSeeds.join(', ')}" — backing off ${Math.round(backoff/1000)}s before retry`,
+            });
+            const ok = await sleepInterruptible(backoff, shouldStop);
+            if (!ok) break;
+          }
+          kpResult = await getKeywordPlannerIdeas(kpSeeds, kpUrl, kpMaxPerProduct,
+            (m) => onProgress?.({ currentProduct: productName, currentAction: m }),
+            { productUrl: cleanUrl, websiteOnly: opts.kpWebsiteOnly === true,
+              allowWebsiteFallback: websiteFallbackAllowed });
+          if (kpResult?.ok || kpResult?.skipped) break;
+          if (isKpSessionDeadError(kpResult?.error)) break;
+        }
       }
       const kpKeywords = (kpResult?.ok ? (kpResult.keywords || []) : []).filter(Boolean);
       if (!kpResult?.ok && !kpResult?.skipped) {
@@ -4251,13 +4343,26 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         // threshold so the very NEXT SKU on this worker skips R1 KP.
         // Prevents the operator seeing 'many KP window openings' when the
         // tab crashes on every attempt.
-        if (isKpSessionDeadError(kpResult?.error)) {
+        //
+        // accountChooserBroken covers a DIFFERENT dead-session shape that
+        // isKpSessionDeadError's regex never matched: every rung of the
+        // account-fallback ladder (configured URL, deep link, no-authuser,
+        // every other configured account, bare URL) landed on Google's
+        // account chooser. Confirmed on live traffic to be a genuinely
+        // broken profile, not a timing false-positive — it repeated
+        // identically across multiple full retry cycles minutes apart.
+        // Without this, that worker retried the whole ladder on every
+        // seed of every product forever, at ~2 min/cycle for zero yield,
+        // instead of self-arming like every other dead-session failure.
+        if (isKpSessionDeadError(kpResult?.error) || kpResult?.accountChooserBroken) {
           const n = await armKpDeadStreak();
           if (n) {
             onProgress?.({
               currentProduct: productName,
               currentSource: 'kp',
-              currentAction: `⏭ KP TAB CRASHED — auto-arming skip for next SKU (streak=${n}, expires in 30 min). No more KP window openings until the session recovers or the streak times out.`,
+              currentAction: kpResult?.accountChooserBroken
+                ? `⏭ KP ACCOUNT CHOOSER — this profile cannot open any configured Ads account. Auto-arming skip for next SKU (streak=${n}, expires in 30 min). Fix: sign this Chrome profile into the Ads account by hand, or update the KP URL in the manager Config tab.`
+                : `⏭ KP TAB CRASHED — auto-arming skip for next SKU (streak=${n}, expires in 30 min). No more KP window openings until the session recovers or the streak times out.`,
               logKind: 'warn',
             });
           }
@@ -4325,6 +4430,10 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // alt text doesn't carry our brand but the image really is ours.
       const productMatchedUrls = new Set();
       const productMatchedConfidences = new Map(); // url -> confidence (0-100)
+      // Per-product link-verification cache. The same destination URL
+      // appears on many keyword SERPs; without a cache every matched
+      // keyword re-fetches + re-matches the same page. Check once per SKU.
+      const linkVerifyCache = new Map(); // url -> { isMatch }
       onProgress?.({
         currentProduct: productName,
         currentSource: 'serp',
@@ -5098,14 +5207,23 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                 const verifiedLinks = [];
                 for (const link of uniqueLinks) {
                   if (shouldStop()) break;
+                  // Cache hit — this destination was already verified on an
+                  // earlier keyword's SERP. Skip the redundant fetch+match.
+                  const cachedVerdict = linkVerifyCache.get(link);
+                  if (cachedVerdict != null) {
+                    checked++;
+                    if (cachedVerdict) { verified++; verifiedLinks.push(link); }
+                    continue;
+                  }
                   try {
                     const destImages = await getProductImages(link, () => {});
-                    if (!destImages || destImages.length === 0) { checked++; continue; }
+                    if (!destImages || destImages.length === 0) { checked++; linkVerifyCache.set(link, false); continue; }
                     const results = await matchImages(productFps, destImages, clipThreshold);
                     const isMatch = Array.isArray(results) && results.some(r => r && r.isMatch);
+                    linkVerifyCache.set(link, isMatch);
                     checked++;
                     if (isMatch) { verified++; verifiedLinks.push(link); }
-                  } catch { checked++; }
+                  } catch { checked++; linkVerifyCache.set(link, false); }
                   await sleep(randInt(600, 1500));
                 }
                 row.linkCheckedCount  = checked;
@@ -5155,14 +5273,23 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                 const verifiedLinks = [];
                 for (const link of fallbackLinks) {
                   if (shouldStop()) break;
+                  // Cache hit — this destination was already verified on an
+                  // earlier keyword's SERP. Skip the redundant fetch+match.
+                  const cachedVerdict = linkVerifyCache.get(link);
+                  if (cachedVerdict != null) {
+                    checked++;
+                    if (cachedVerdict) { verified++; verifiedLinks.push(link); }
+                    continue;
+                  }
                   try {
                     const destImages = await getProductImages(link, () => {});
-                    if (!destImages || destImages.length === 0) { checked++; continue; }
+                    if (!destImages || destImages.length === 0) { checked++; linkVerifyCache.set(link, false); continue; }
                     const results = await matchImages(productFps, destImages, clipThreshold);
                     const isMatch = Array.isArray(results) && results.some(r => r && r.isMatch);
+                    linkVerifyCache.set(link, isMatch);
                     checked++;
                     if (isMatch) { verified++; verifiedLinks.push(link); }
-                  } catch { checked++; }
+                  } catch { checked++; linkVerifyCache.set(link, false); }
                   await sleep(randInt(600, 1500));
                 }
                 row.linkCheckedCount  = (row.linkCheckedCount  || 0) + checked;
@@ -5708,7 +5835,20 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
           } else {
             await onProductDone(cleanUrl);
           }
-        } catch {}
+        } catch (e) {
+          // If the failure-notification call ITSELF throws (manager down,
+          // network blip), this product silently never gets marked done OR
+          // failed anywhere — no local trace either, since this was a bare
+          // catch{}. That directly undermines the dashboard's "flags SKUs
+          // that finished with zero rows" feature: an operator would see
+          // neither a done-with-zero-rows row nor a failed row for it.
+          onProgress?.({
+            currentProduct: productName,
+            currentSource: 'done',
+            currentAction: `⚠ Failed to report product failure to caller (${failReason}): ${e?.message || e}. This product may be stuck "claimed" until the manager's stale-claim reaper reclaims it.`,
+            logKind: 'err',
+          });
+        }
         continue; // to next product in the outer loop
       }
 
@@ -5901,6 +6041,17 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
       // it keeps closing over the per-product state, so naming the phase
       // cannot change behaviour. This is the phase the KP dead-streak
       // counter disables, which is why its streak-reset could never run.
+      //
+      // r2DegradedSeeds declared HERE, outside the closure, because the
+      // per-product completion summary (post-mortem / R2_DEGRADED note /
+      // row.run_status, ~1100 lines below) reads it after runRound2Kp has
+      // returned. It was previously `let`-declared INSIDE runRound2Kp,
+      // scoped to that closure only — every read at the completion summary
+      // threw ReferenceError: r2DegradedSeeds is not defined, crashing the
+      // whole product via the per-product exception boundary. Same bug
+      // class as amazonSkippedIrrelevant above (declared-in-block,
+      // read-outside-block).
+      let r2DegradedSeeds = 0;
       const runRound2Kp = async () => {
         if (roundAlreadyDone('round2')) {
           emitRound('round2', 'ok', null, 'skipped on resume — already completed for this SKU');
@@ -5948,10 +6099,10 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         }
         let kp1Idx = 0;
         let kp2RowCount = 0;
-        // R2 degradation tracking. Each seed that exhausts retries increments
-        // this; the per-product completion summary surfaces the count so a
-        // silently-degraded run is visible without grepping the log.
-        let r2DegradedSeeds = 0;
+        // r2DegradedSeeds is declared OUTSIDE this closure (see comment
+        // above runRound2Kp's own declaration) — reused here, not
+        // redeclared, so the per-product completion summary can read the
+        // final count after this function returns.
         // R2 fast-bail counter. If 2 consecutive R2 seeds fail with the same
         // channel-closed / tab-crashed error, the KP session is dead for
         // this SKU. Every subsequent seed will burn ~4 min hitting the same
@@ -6165,7 +6316,21 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
               }
             }
           }
-        } catch {}
+        } catch (e) {
+          // This circuit breaker has a documented history of getting
+          // permanently wedged when its state-transition logic broke
+          // silently (the "KP death spiral" — see the comments at the top
+          // of this file for readKpDeadStreak/bumpKpDeadStreak). A bare
+          // catch{} here would hide a NEW instance of that class of bug
+          // with zero diagnostic trail, so surface it instead of
+          // swallowing it.
+          onProgress?.({
+            currentProduct: productName,
+            currentSource: 'round2',
+            currentAction: `⚠ KP dead-streak update failed: ${e?.message || e}. Streak state may be stale — will self-correct via its 30-min TTL.`,
+            logKind: 'warn',
+          });
+        }
 
         // ----- Related-search drain -----
         // Process the related-searches discovered during R1/R2 SERPs as
@@ -6364,6 +6529,15 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
             }
 
             let amazonStored = 0, amazonRejected = 0;
+            // Declared OUTSIDE the `amazonTabId !== null` block (unlike the
+            // vars it's grouped with conceptually) because the skip-note
+            // built below at the end of runAmazonRound reads it regardless
+            // of whether the Amazon tab ever opened. It was previously
+            // declared inside that block and referenced after it closed —
+            // a ReferenceError on every product whose Amazon tab failed to
+            // open, aborting the whole batch (same bug class as the
+            // `_resumedPriorRows` fix above).
+            let amazonSkippedIrrelevant = 0;
             if (amazonTabId !== null) {
               const brandAliases = (productContext?.brandAliases || []).filter(a => a && a.length > 2);
               const handleWords  = (productContext?.handleWords  || []).filter(w => w && w.length > 3);
@@ -6374,7 +6548,6 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
               // Always Maxi Pads worker hammering 'best over the counter fish
               // oil price' etc — 100% off-topic queries that came in via KP
               // then got modifier-multiplied. Skip them cheaply.
-              let amazonSkippedIrrelevant = 0;
               const isAmazonRelevant = (kw) => {
                 const lo = String(kw || '').toLowerCase();
                 if (!lo) return false;
@@ -6457,6 +6630,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
 
                 // --- Step 2: navigate to Amazon search results ---
                 let amazonResults = [];
+                let amazonCaptcha = false;
                 try {
                   await chrome.tabs.update(amazonTabId, {
                     url: `https://www.amazon.in/s?k=${encodeURIComponent(parent.keyword)}`,
@@ -6468,6 +6642,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                       chrome.tabs.sendMessage(amazonTabId, { type: 'AMAZON_GET_RESULTS' }), 90_000, 'AMAZON_GET_RESULTS');
                     const r = rRace.ok ? rRace.value : null;
                     amazonResults = Array.isArray(r?.results) ? r.results : [];
+                    amazonCaptcha = !!r?.captcha;
                   }
                 } catch (e) {
                   const msg = String(e?.message || e || '');
@@ -6497,6 +6672,7 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                             chrome.tabs.sendMessage(amazonTabId, { type: 'AMAZON_GET_RESULTS' }), 90_000, 'AMAZON_GET_RESULTS');
                           const r = rRace.ok ? rRace.value : null;
                           amazonResults = Array.isArray(r?.results) ? r.results : [];
+                          amazonCaptcha = !!r?.captcha;
                           onProgress?.({
                             currentProduct: productName, currentSource: 'amazon',
                             currentAction: `Amazon tab recreated — recovered ${amazonResults.length} result(s) for "${parent.keyword}"`,
@@ -6518,6 +6694,19 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
                       logKind: 'err',
                     });
                   }
+                }
+                if (amazonCaptcha) {
+                  // Previously indistinguishable from "0 legitimate
+                  // results" — amazon-reader.js had no CAPTCHA detection
+                  // at all, unlike the KP/SERP content scripts, which both
+                  // signal this so the caller can back off instead of
+                  // hammering a bot-flagged session at the same pace.
+                  onProgress?.({
+                    currentProduct: productName, currentSource: 'amazon',
+                    currentAction: `Amazon SERP "${parent.keyword}" — anti-bot verification page served, no listings scraped. Back off / slow down if this recurs.`,
+                    logKind: 'warn',
+                  });
+                  await sleep(randInt(4000, 8000));
                 }
                 onProgress?.({
                   currentProduct: productName, currentSource: 'amazon',
@@ -7118,6 +7307,33 @@ export async function runKeywordDiscovery(products, onProgress, opts = {}) {
         });
         const pdOk = await sleepInterruptible(pdMs, shouldStop);
         if (!pdOk) break;
+      }
+      } catch (productErr) {
+        // Per-product exception boundary. Without this, ANY uncaught error
+        // anywhere in a product's ~3000-line processing body (a bad
+        // refactor, an unexpected undefined, a new code path someone
+        // forgets to wrap) propagates out of runKeywordDiscovery entirely —
+        // the product that threw is marked neither done nor failed (stuck
+        // "claimed" until the manager's stale-claim reaper reclaims it),
+        // and every OTHER product still queued in this batch is silently
+        // dropped for the rest of the run with no per-SKU record of why.
+        // Catch here, report this one product as failed, and move on —
+        // the same "a stuck SERP costs one keyword, not the whole run"
+        // philosophy already applied to R1 leaves and the Amazon round.
+        const failedName = p?.productName || cleanUrl;
+        onProgress?.({
+          currentProduct: failedName,
+          currentSource: 'done',
+          currentAction: `✖ PRODUCT CRASHED: "${failedName}" — ${productErr?.message || productErr} — marking failed and continuing with the next product.`,
+          logKind: 'err',
+        });
+        try {
+          if (typeof opts.onProductFailed === 'function') {
+            await opts.onProductFailed(cleanUrl, `uncaught_exception: ${String(productErr?.message || productErr).slice(0, 200)}`);
+          } else {
+            await onProductDone(cleanUrl);
+          }
+        } catch {}
       }
     }
   } finally {

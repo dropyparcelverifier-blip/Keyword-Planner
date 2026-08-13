@@ -125,27 +125,67 @@ export const api = {
 };
 
 // Live keyword stats — mirrors the extension's dashboard fetchBatchKeywordStats.
-// Two round-trips: per-product jobs + all keyword rows for the batch. Groups
-// by product_url so we can show per-SKU counts.
+// Two round-trips: per-product jobs + keyword rows for the batch. Groups by
+// product_url so we can show per-SKU counts.
+//
+// Keyword rows, NOT the jobs call, are the expensive half — one batch already
+// runs 6,500+ rows and grows every push. refreshLivePanels() in app.js calls
+// this on a 3s cadence for as long as the dashboard tab is open, and this
+// used to hand api.keywordsGet(batchId) NO sinceId every single tick — a
+// full re-fetch + full re-JSON-parse of the WHOLE batch, 1200 times an hour,
+// even though the manager's /api/keywords already has incremental-fetch
+// support built for exactly this (see keywordsByBatchSince's own comment:
+// "Analytics live-poll uses this to avoid re-sending the whole batch every
+// 4s" — it didn't; this was the caller that was supposed to). That request
+// already produced one real "Error: out of memory" on the manager
+// (2026-08-11, GET /api/keywords) — sustained multi-MB allocations every 3s
+// is exactly the kind of load that exhausts a long-running process even
+// when no single request is enormous.
+//
+// Fix: keep a per-batch cache and only request rows newer than the last
+// poll (sinceId=cache.lastMaxId), merging deltas into the running per-URL
+// counts instead of rebuilding them from scratch. The one thing sinceId
+// can't see is an EXISTING row's data changing in place — insertKeyword
+// upserts on (batch_id, product_url, keyword) conflict, so a later pass
+// (e.g. matched-link verification updating image_count after the initial
+// push) updates a row without bumping its id. That would let withImages
+// drift stale for a URL whose already-seen keyword got upgraded later. So
+// the cache force-resyncs with a full pull every RESYNC_EVERY ticks
+// (~60s) — bounds any drift to under a minute on a panel whose whole
+// purpose is a live, not exact-to-the-second, view.
+const _statsCache = new Map(); // batchId -> { lastMaxId, perUrl: Map<url,{count,withImages}>, totalKeywords, ticks }
+const RESYNC_EVERY = 20; // ~60s at the 3s poll cadence
 export async function fetchBatchKeywordStats(batchId, limit = 100) {
   if (!batchId) return null;
+  let cache = _statsCache.get(batchId);
+  const needsFullSync = !cache || cache.ticks >= RESYNC_EVERY;
+  if (needsFullSync) {
+    cache = { lastMaxId: null, perUrl: new Map(), totalKeywords: 0, ticks: 0 };
+  }
   const [ppR, kwR] = await Promise.all([
     api.jobsPerProduct(batchId),
-    api.keywordsGet(batchId),
+    api.keywordsGet(batchId, needsFullSync ? null : cache.lastMaxId),
   ]);
   const jobs = ppR.rows || [];
   const kwRows = kwR.rows || [];
-  const kwByUrl = new Map();
-  let totalKeywords = 0;
-  let mostRecentDoneAt = null;
+  if (needsFullSync) { cache.perUrl.clear(); cache.totalKeywords = 0; }
   for (const r of kwRows) {
     const u = r.product_url; if (!u) continue;
-    const cur = kwByUrl.get(u) || { count: 0, withImages: 0 };
+    const cur = cache.perUrl.get(u) || { count: 0, withImages: 0 };
     cur.count++;
     if ((r.image_count || 0) > 0) cur.withImages++;
-    kwByUrl.set(u, cur);
-    totalKeywords++;
+    cache.perUrl.set(u, cur);
+    cache.totalKeywords++;
   }
+  if (Number.isFinite(kwR.maxId)) cache.lastMaxId = kwR.maxId;
+  cache.ticks++;
+  _statsCache.set(batchId, cache);
+  // Stale caches for other batches (switched away from) just sit unused —
+  // small (a few hundred bytes per URL), and the tab is closed/reloaded
+  // between real sessions far more often than batches accumulate.
+  const kwByUrl = cache.perUrl;
+  const totalKeywords = cache.totalKeywords;
+  let mostRecentDoneAt = null;
   const perSku = jobs.map(j => {
     const s = kwByUrl.get(j.product_url) || { count: 0, withImages: 0 };
     if (j.done_at && (!mostRecentDoneAt || j.done_at > mostRecentDoneAt)) mostRecentDoneAt = j.done_at;

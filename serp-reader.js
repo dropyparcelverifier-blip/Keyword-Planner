@@ -124,22 +124,14 @@
       const hasShell = !!search;
       const resultsEmpty = !rso || rso.querySelectorAll(':scope > div').length === 0;
       if (!hasShell) return false; // network error or non-Google page — not "blocked"
-      if (!resultsEmpty) return false; // real results present
-
-      // Optional secondary check: all captured img URLs look like
-      // Google-asset URLs (doodle / logo / gstatic chrome).
-      const list = Array.isArray(urls) ? urls : [];
-      if (list.length > 0) {
-        const allGoogleAssets = list.every(u => {
-          const src = String((u && u.url) || u || '').toLowerCase();
-          return /google\.com\/logos\//.test(src) ||
-                 /googlelogo/.test(src) ||
-                 /gstatic\.com\/images/.test(src) ||
-                 /www\.google\.com\/images\/branding/.test(src);
-        });
-        if (!allGoogleAssets) return false;
-      }
-      return true;
+      // #rso empty/missing already means no organic results — that alone is
+      // "blocked" regardless of what else is captured elsewhere on the page
+      // (ads, favicons, an image pack outside #rso). `urls` used to be able
+      // to flip this back to false whenever even one captured image wasn't
+      // a recognized Google-asset URL, which meant a genuinely blocked SERP
+      // that also happened to have picked up one unrelated thumbnail via a
+      // different collector was misclassified as a legitimate 0-result page.
+      return resultsEmpty;
     } catch { return false; }
   }
 
@@ -1826,9 +1818,5 @@
     // = better yield on niche products where each source might contribute
     // only 2-3 unique queries.
     return Array.from(out).slice(0, 24);
-  }
-
-  function addIfImage(src, out) {
-    if (_acceptableImageSrc(src)) out.add(src);
   }
 })();

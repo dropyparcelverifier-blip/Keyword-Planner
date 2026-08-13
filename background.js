@@ -16,6 +16,7 @@ import {
   getActiveWorkers,
   getFailedJobs,
   requeueJob,
+  requeueDoneEmptyJobs,
   fetchBatchReportFromManager,
   getActiveBatchId,
   pushActivityLog,
@@ -1147,7 +1148,12 @@ async function maybeAutoMigrateKpUrl() {
     pushLog(`Auto-migrated local KP URL to central worker_config (workers will pick it up on next claim)`, 'ok');
     _kpUrlMigrationDone = true;
   } catch (e) {
-    // Quiet failure — manager can still manually push via Save Settings.
+    // Not fatal — manager can still manually push via Save Settings — but
+    // silent until now: nothing else signals that the auto-migration never
+    // happened, so a worker could keep using a stale/local KP URL
+    // indefinitely with no operator-visible reason why the central config
+    // never picked it up.
+    pushLog(`KP URL auto-migration to central config failed: ${e?.message || e}`, 'warn');
   }
 }
 
@@ -1250,9 +1256,18 @@ async function pollWorkerCommands() {
           try { payload = typeof c.payload === 'string' ? JSON.parse(c.payload) : (c.payload || {}); } catch {}
           const keys = payload?.keys || {};
           if (typeof keys === 'object' && Object.keys(keys).length > 0) {
-            try { await chrome.storage.local.set(keys); } catch {}
             const summary = Object.entries(keys).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
-            bufferActivity({ level: 'ok', source: 'cmd', message: `set_config applied: ${summary}` });
+            // The success log used to be unconditional, even when the
+            // storage write itself threw (quota exceeded, invalid value) —
+            // the manager would believe fleet-wide config landed on this
+            // worker when it silently didn't. Only report success on the
+            // path that actually succeeded.
+            try {
+              await chrome.storage.local.set(keys);
+              bufferActivity({ level: 'ok', source: 'cmd', message: `set_config applied: ${summary}` });
+            } catch (e) {
+              bufferActivity({ level: 'err', source: 'cmd', message: `set_config FAILED to apply (${summary}): ${e?.message || e}` });
+            }
           } else {
             bufferActivity({ level: 'warn', source: 'cmd', message: `set_config received with empty payload — nothing set` });
           }
@@ -1356,9 +1371,28 @@ async function pollWorkerCommands() {
             bufferActivity({ level: 'ok', source: 'cmd', message: `Resume command received — force-armed + claiming next chunk.` });
             // Fire async so we don't block command-ack (autoConnect can
             // take 5-10s claiming + fetching config).
+            //
+            // _doAutoConnectWorker never THROWS on failure — it catches its
+            // own errors internally and returns {ok:false, error}. The old
+            // bare `.catch(() => {})` here only guards against a rejection
+            // that can never happen, so a returned {ok:false} (no active
+            // batch, KP cooldown active, claimJobs returning 0, etc.) was
+            // completely invisible: no log line anywhere, nothing to
+            // diagnose a "resume was acknowledged but nothing happened"
+            // report against. Log the actual result either way.
             const wId = state.workerId;
             const cs  = state.continuousChunkSize || 5;
-            setTimeout(() => { _doAutoConnectWorker({ workerId: wId, chunkSize: cs }).catch(() => {}); }, 200);
+            setTimeout(() => {
+              _doAutoConnectWorker({ workerId: wId, chunkSize: cs }).then((r) => {
+                if (!r?.ok) {
+                  bufferActivity({ level: 'err', source: 'cmd', message: `Resume: auto-connect failed after force-arm: ${r?.error || 'unknown'}` });
+                } else if (r.claimed === 0) {
+                  bufferActivity({ level: 'warn', source: 'cmd', message: `Resume: auto-connect ran but claimed 0 jobs (${r.message || 'no reason given'})` });
+                }
+              }).catch((e) => {
+                bufferActivity({ level: 'err', source: 'cmd', message: `Resume: auto-connect threw unexpectedly: ${e?.message || e}` });
+              });
+            }, 200);
           }
         } else if (c.command === 'reset_local') {
           // Manager did a full reset. Purge our local state that
@@ -1447,7 +1481,7 @@ async function tickHeartbeat() {
     // re-pin, etc.) and we have no in-flight work on the current cached
     // batch, resync. Never yank a running job — only self-correct when idle.
     if (r.activeBatchId && state.queueBatchId && r.activeBatchId !== state.queueBatchId) {
-      const busy = state.claimedJobs.length > 0 || state.isRunning;
+      const busy = state.claimedJobs.length > 0 || state.running;
       if (!busy) {
         pushLog(`Batch drift detected: cached ${state.queueBatchId} → manager ${r.activeBatchId}. Resyncing.`, 'warn');
         state.queueBatchId = r.activeBatchId;
@@ -1929,6 +1963,16 @@ async function _handleStartInner(msg) {
                       const pu = String(row.productUrl || '').trim();
                       if (!kw) continue;
                       reportMap.delete(pu ? `${pu}|${kw}` : kw);
+                      // _incrementalSent is keyed the same way (_rowKey,
+                      // productUrl|keyword) but is a SEPARATE Set from
+                      // reportMap — flushing a product's rows out of
+                      // reportMap did not also drop its entries here, so
+                      // this Set grew by one string per keyword row for
+                      // the entire life of the service worker, across
+                      // every product a continuous-claim worker ever
+                      // processed (hours/days of uptime). Prune it in
+                      // lockstep with reportMap.
+                      _incrementalSent.delete(_rowKey(row));
                     }
                     state.report = Array.from(reportMap.values());
                     await persistReport();
@@ -2224,6 +2268,58 @@ async function handleResetProgress() {
   return { ok: true };
 }
 
+// One debugger session at a time, and take over a leaked one.
+//
+// captureFrame and trustedClick each attached on their own, and they
+// overlap: trustedClick holds the tab for ~2.5s between its before and
+// after frames, and kp.js can fire captureFrame inside that window. Chrome
+// permits exactly one debugger per tab, so the second call died with
+// "Another debugger is already attached to the tab" -- 50 times in two
+// hours, and since the trusted click is what opens the Discover card, each
+// one is a lost click.
+//
+// Serialising is half the fix. The other half is that an attachment can
+// LEAK: if the service worker is recycled between attach and detach, the
+// session survives with no one to release it, and every subsequent attach
+// on that tab fails until the tab closes. So on "already attached" we
+// detach first and take the tab over, rather than giving up.
+//
+// MUST live at module scope, not inside the onMessage listener: the
+// listener callback re-runs on every incoming message, so a `let _dbgChain`
+// declared inside it was reset to a fresh Promise.resolve() per message
+// instead of persisting across calls. That made the "queue on both
+// fulfilment and rejection" serialisation below a no-op whenever
+// trustedClick and captureFrame arrived as separate messages (the normal
+// case), silently reintroducing the exact "already attached" race this
+// code exists to fix.
+let _dbgChain = Promise.resolve();
+function withDebugger(tabId, fn) {
+  const run = async () => {
+    let attached = false;
+    try {
+      try {
+        await chrome.debugger.attach({ tabId }, '1.3');
+      } catch (e) {
+        if (!/already attached/i.test(e?.message || '')) throw e;
+        try { await chrome.debugger.detach({ tabId }); } catch {}
+        await chrome.debugger.attach({ tabId }, '1.3');
+      }
+      attached = true;
+      return await fn();
+    } finally {
+      // Detach even on failure -- a stuck attachment leaves the "being
+      // debugged" banner up and blocks DevTools for whoever uses this
+      // machine next.
+      if (attached) { try { await chrome.debugger.detach({ tabId }); } catch {} }
+    }
+  };
+  // Queue on both fulfilment and rejection, so one failure does not wedge
+  // every later caller.
+  const p = _dbgChain.then(run, run);
+  _dbgChain = p.then(() => {}, () => {});
+  return p;
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const action = msg?.action;
 
@@ -2365,48 +2461,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Ship a diagnostic frame to the manager. Disk-backed there (newest N
   // only) so megabyte data URIs never reach the activity log.
-  // One debugger session at a time, and take over a leaked one.
-  //
-  // captureFrame and trustedClick each attached on their own, and they
-  // overlap: trustedClick holds the tab for ~2.5s between its before and
-  // after frames, and kp.js can fire captureFrame inside that window. Chrome
-  // permits exactly one debugger per tab, so the second call died with
-  // "Another debugger is already attached to the tab" -- 50 times in two
-  // hours, and since the trusted click is what opens the Discover card, each
-  // one is a lost click.
-  //
-  // Serialising is half the fix. The other half is that an attachment can
-  // LEAK: if the service worker is recycled between attach and detach, the
-  // session survives with no one to release it, and every subsequent attach
-  // on that tab fails until the tab closes. So on "already attached" we
-  // detach first and take the tab over, rather than giving up.
-  let _dbgChain = Promise.resolve();
-  function withDebugger(tabId, fn) {
-    const run = async () => {
-      let attached = false;
-      try {
-        try {
-          await chrome.debugger.attach({ tabId }, '1.3');
-        } catch (e) {
-          if (!/already attached/i.test(e?.message || '')) throw e;
-          try { await chrome.debugger.detach({ tabId }); } catch {}
-          await chrome.debugger.attach({ tabId }, '1.3');
-        }
-        attached = true;
-        return await fn();
-      } finally {
-        // Detach even on failure -- a stuck attachment leaves the "being
-        // debugged" banner up and blocks DevTools for whoever uses this
-        // machine next.
-        if (attached) { try { await chrome.debugger.detach({ tabId }); } catch {} }
-      }
-    };
-    // Queue on both fulfilment and rejection, so one failure does not wedge
-    // every later caller.
-    const p = _dbgChain.then(run, run);
-    _dbgChain = p.then(() => {}, () => {});
-    return p;
-  }
+  // _dbgChain / withDebugger live at module scope above (see the comment
+  // there) — captureFrame and trustedClick below both call that shared
+  // helper, not a local copy.
 
   async function postDebugScreenshot(label, dataUrl) {
     try {
@@ -2750,129 +2807,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     _doAutoConnectWorker(msg).then(sendResponse);
     return true;
   }
-  // Legacy inline block preserved below solely to keep the diff small —
-  // it's unreachable because the branch above returns early. Retained
-  // during a follow-up cleanup.
-  if (false && action === 'jobs:autoConnectWorker') {
-    (async () => {
-      try {
-        const workerId = (msg.workerId || state.workerId || '').trim();
-        if (!workerId) throw new Error('Set a Worker ID first.');
-        // Bail clearly if the engine is already running. Without this
-        // check, a re-apply of setup code or a stray Wake command would
-        // silently return "already running" from handleStart with no
-        // user-visible feedback.
-        if (state.running || state.starting) {
-          pushLog(`Auto-connect ignored: engine already running. Worker stays armed; will pick up next chunk when this one finishes.`, 'info');
-          sendResponse({ ok: true, claimed: 0, message: 'engine already running — already armed' });
-          return;
-        }
-        const chunkSize = Math.max(1, Math.min(50, Number(msg.chunkSize) || 5));
-        const explicitBatch = (msg.batchId || '').trim();
-        const batchId = explicitBatch || (await getActiveBatchId());
-        if (!batchId) {
-          sendResponse({ ok: false, error: 'No batches with pending work found. Ask the manager to upload a batch first.' });
-          return;
-        }
-        // Mark this run as continuous AND armed BEFORE starting. The
-        // armed flag persists across browser restart + engine completion
-        // so the worker auto-resumes pulling work from any new batch
-        // the manager uploads — without the user needing to click
-        // Connect again on each PC.
-        state.continuousClaim = true;
-        state.continuousChunkSize = chunkSize;
-        state.workerId = workerId;
-        state.workerArmed = true;
-        // User explicitly armed this PC — clear the "user stopped"
-        // flag so future Wake broadcasts will be honored again.
-        state.userStoppedArm = false;
-        await chrome.storage.local.set({
-          [STORAGE_KEY_WORKER_ID]: workerId,
-          adbrainContinuousClaim: true,
-          adbrainContinuousChunkSize: chunkSize,
-          adbrainWorkerArmed: true,
-          adbrainUserStoppedArm: false,
-        }).catch(() => {});
-        // Release any stale claims from offline workers first.
-        await releaseStaleJobs(10).catch(() => null);
-        // Fetch the manager's pushed config (KP URL, pacing, profile,
-        // caps) BEFORE claiming so the engine starts with the central
-        // settings. Worker's local Settings tab is now a fallback only.
-        let centralConfig = null;
-        try { centralConfig = await fetchWorkerConfig(state.workerId); } catch {}
-        const centralRunOpts = centralConfig ? workerConfigToRunOpts(centralConfig) : {};
-        if (centralRunOpts.kpUrl) {
-          // Mirror the central KP URL into chrome.storage so the KP
-          // content script (which reads from storage) picks it up.
-          await chrome.storage.local.set({ [STORAGE_KEY_KP_URL]: centralRunOpts.kpUrl }).catch(() => {});
-        }
-        // HARD GUARD: KP URL is mandatory. Without it, the engine
-        // skips KP entirely, processes a product in 2-3 min instead
-        // of the 10-15 min it should take, generates almost no
-        // keyword rows, and silently marks the job done. Bail loudly
-        // here with a clear next step.
-        const localKpUrl = (await chrome.storage.local.get([STORAGE_KEY_KP_URL]))[STORAGE_KEY_KP_URL] || '';
-        const effectiveKpUrl = (centralRunOpts.kpUrl || localKpUrl || '').trim();
-        if (!effectiveKpUrl || !effectiveKpUrl.includes('ads.google.com')) {
-          sendResponse({
-            ok: false,
-            error: 'No Keyword Planner URL configured. Manager: Settings → paste your Google Ads KP URL → Save Settings (also pushes to all workers). Without this, the engine skips KP entirely and processes each product in 2-3 minutes producing almost no keywords.',
-          });
-          return;
-        }
-        // Claim a chunk and start the engine (re-uses the existing
-        // claimAndStart code path).
-        if (isKpCooldownActive()) {
-          sendResponse({ ok: false, error: 'KP session cooldown active. Fix Google Ads / KP session first, then Force reconnect.' });
-          return;
-        }
-        const jobs = await claimJobs({ workerId, batchId, limit: chunkSize });
-        if (jobs.length === 0) {
-          // Nothing to claim right now — clear continuous flag so we
-          // don't infinite-loop, and report back.
-          state.continuousClaim = false;
-          await chrome.storage.local.set({ adbrainContinuousClaim: false }).catch(() => {});
-          sendResponse({ ok: true, claimed: 0, batchId, message: 'No pending jobs in this batch right now.' });
-          return;
-        }
-        state.queueBatchId = batchId;
-        state.claimedJobs  = jobs.map(j => ({ id: j.id, productUrl: j.product_url }));
-        await chrome.storage.local.set({
-          [STORAGE_KEY_QUEUE_BATCH_ID]: batchId,
-          [STORAGE_KEY_CLAIMED_JOBS]:   state.claimedJobs,
-        }).catch(() => {});
-        await setRunIntent(true);
-        // Log what came from the manager's pushed config so the worker
-        // log shows who's in charge of pacing / profile / KP URL.
-        const centralKeys = Object.keys(centralRunOpts);
-        const centralNote = centralKeys.length > 0
-          ? ` · applied ${centralKeys.length} setting(s) from manager: ${centralKeys.slice(0, 6).join(', ')}`
-          : '';
-        pushLog(`Auto-connect: claimed ${jobs.length} job(s) from batch "${batchId}" — continuous mode ON${centralNote}`, 'ok');
-        const products = jobs.map(j => ({
-          url: j.product_url, sku: j.sku,
-          productName: j.product_name, priority: j.priority,
-          handles: j.handles ? String(j.handles).split('|').filter(Boolean) : [],
-          brands:  j.brands  ? String(j.brands).split('|').filter(Boolean)  : [],
-        }));
-        // Merge order: manager's central config WINS over the caller's
-        // runOpts (the worker's local Settings tab values), which still
-        // beat hard-coded defaults. So the manager truly controls every
-        // worker; local settings are only a fallback when the manager
-        // hasn't pushed a value for a given field.
-        const mergedRunOpts = { ...(msg.runOpts || {}), ...centralRunOpts };
-        const startResult = await handleStart({ products, ...mergedRunOpts });
-        sendResponse({ ok: true, claimed: jobs.length, batchId, startResult, centralConfig: !!centralConfig });
-      } catch (e) {
-        // Always send a useful error string. If e is a plain Error,
-        // .message works; if it's an object or null, fall back to
-        // toString / JSON / stack so we never collapse to "unknown".
-        const errStr = (e && e.message) || (e && e.toString && e.toString()) || JSON.stringify(e) || 'unspecified exception in autoConnectWorker';
-        sendResponse({ ok: false, error: errStr, stack: e?.stack?.split('\n')?.[1]?.trim() });
-      }
-    })();
-    return true;
-  }
   // Worker explicitly turns OFF continuous mode (without stopping the
   // current engine run).
   if (action === 'jobs:stopContinuous') {
@@ -2949,6 +2883,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       try {
         const result = await requeueJob(msg.jobId);
         sendResponse({ ok: !!result.updated, ...result });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
+  // Dashboard "Re-queue zero-KW" button — resets every done-but-0-keyword
+  // job in the batch back to pending.
+  if (action === 'jobs:requeueDoneEmpty') {
+    (async () => {
+      try {
+        const result = await requeueDoneEmptyJobs(msg.batchId);
+        sendResponse({ ok: !result.error, ...result });
       } catch (e) { sendResponse({ ok: false, error: e.message }); }
     })();
     return true;

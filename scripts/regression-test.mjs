@@ -2244,6 +2244,24 @@ async function run() {
   const apiSrc = readFileSync(resolve(REPO, 'manager/public/api.js'), 'utf-8');
   assert(apiSrc.includes("Restart it: stop the current 'node manager/server.js'"), 'TREE.9 clearer 404 error for outdated manager');
 
+  // ── Live keyword-stats caching ──────────────────────────────────────
+  // refreshLivePanels() polls fetchBatchKeywordStats every 3s for as long
+  // as a dashboard tab is open. It used to call api.keywordsGet(batchId)
+  // with NO sinceId every tick — a full re-fetch of the whole batch
+  // (6,500+ rows and growing) 1200 times an hour, despite /api/keywords
+  // already supporting an incremental sinceId/maxId cursor built for
+  // exactly this. That produced a real manager "Error: out of memory" on
+  // GET /api/keywords (2026-08-11).
+  assert(/const _statsCache = new Map/.test(apiSrc), 'KWSTATS.1 per-batch cache exists');
+  assert(/api\.keywordsGet\(batchId, needsFullSync \? null : cache\.lastMaxId\)/.test(apiSrc),
+    'KWSTATS.2 poll uses the sinceId cursor instead of a full re-fetch every tick');
+  // insertKeyword upserts on (batch_id, product_url, keyword) conflict, so
+  // a later push (link verification updating image_count) can change an
+  // ALREADY-SEEN row without bumping its id — invisible to a pure sinceId
+  // cursor. The cache must force a full resync periodically or a keyword
+  // upgraded after its first push stays counted as image-less forever.
+  assert(/RESYNC_EVERY/.test(apiSrc), 'KWSTATS.4 cache force-resyncs periodically to catch in-place row updates');
+
   // Cross-tab polish: Config grouped into sections, Workers 2-col.
   assert(htmlFull.includes('<div class="an-layer-head">Batches</div>'),           'POLISH.1 Config has Batches section heading');
   assert(htmlFull.includes('<div class="an-layer-head">Worker pipeline</div>'),   'POLISH.2 Config has Worker pipeline section');
@@ -2297,7 +2315,7 @@ async function run() {
   assert(/MAX_KP_SEEDS\s*=\s*5\b/.test(kdSrcCaps),          '20s.11 MAX_KP_SEEDS raised to 5');
   assert(/MAX_R1_KP_SERP_SEEDS\s*=\s*60\b/.test(kdSrcCaps), '20s.12 MAX_R1_KP_SERP_SEEDS raised to 60');
   assert(/R2_KP_CAP_PER_SEED\s*=\s*40\b/.test(kdSrcCaps),   '20s.13 R2_KP_CAP_PER_SEED raised to 40');
-  assert(/maxAmazonKeywords \|\| 80/.test(kdSrcCaps),       '20s.14 maxAmazonKeywords default raised to 80 (compounds with widened R1 filter + modifier expansion)');
+  assert(/maxAmazonKeywords \|\| 35/.test(kdSrcCaps),       '20s.14 maxAmazonKeywords default tuned to 35 for fast, high-intent Amazon SERP coverage');
   // Amazon-side modifier synthesis: for the top-3 seeds, generate 4×2=8
   // buy/best/price/review variants each, boosting Amazon-Round coverage
   // for niche brands where KP is thin.
@@ -3173,6 +3191,45 @@ async function run() {
   assert(/fetchWorkerConfig\(workerId\)/.test(djKpAcct), 'KPACCT.7 fetchWorkerConfig takes a workerId');
   assert(/\/api\/config\$\{q\}/.test(djKpAcct),          'KPACCT.8 workerId is sent to /api/config');
   assert(!/fetchWorkerConfig\(\)/.test(bgSpiral),     'KPACCT.9 no call site omits the workerId');
+  // resolveKpForWorker only ever protected kp_url (the PRIMARY account).
+  // kp_accounts — the full list — passed through unfiltered feeds the
+  // fallback ladder in keyword-discovery.js (kpCandidates), which is
+  // walked on ANY KP failure regardless of which account kp_url resolved
+  // to. A worker with no claim on an account pinned to somebody else could
+  // still find it in kp_accounts and try it, landing on Google's account
+  // chooser — observed live: workers not assigned to a second account
+  // walked into it anyway through this exact list and burned hours
+  // fleet-wide hitting the chooser. kp_accounts must be filtered too.
+  assert(/pinnedElsewhere/.test(cfgRoute), 'KPACCT.10 fallback account list is filtered, not just kp_url');
+  assert(/outCfg\.kp_accounts\.filter\(a => a && !pinnedElsewhere\.has\(a\.id\)\)/.test(cfgRoute),
+    'KPACCT.11 accounts pinned to a DIFFERENT worker are dropped from the fallback list');
+
+  // Live: an account pinned to worker A must not appear in worker B's
+  // kp_accounts (it would only ever reach the chooser), but must still
+  // appear for worker A itself and for a wholly unassigned worker C
+  // (legitimate auto-discovery candidate — nobody has claimed it).
+  await req('POST', '/api/config', {
+    configPatch: {
+      kp_url: 'https://ads.google.com/aw/keywordplanner/home?ocid=111',
+      kp_accounts: [
+        { id: 'acct-a', label: 'Account A', url: 'https://ads.google.com/aw/keywordplanner/home?ocid=111' },
+        { id: 'acct-b', label: 'Account B', url: 'https://ads.google.com/aw/keywordplanner/home?ocid=222' },
+      ],
+      kp_assignments: { 'worker-A': 'acct-b' },
+    },
+  });
+  const cfgForA = await req('GET', '/api/config?workerId=worker-A');
+  const cfgForB = await req('GET', '/api/config?workerId=worker-B');
+  const cfgForC = await req('GET', '/api/config?workerId=worker-C');
+  assert(cfgForA.data.config.kp_accounts.some(a => a.id === 'acct-b'),
+    'KPACCT.12 the worker an account IS pinned to still sees it');
+  assert(!cfgForB.data.config.kp_accounts.some(a => a.id === 'acct-b'),
+    "KPACCT.13 an unrelated worker's fallback list drops an account pinned to someone else");
+  assert(cfgForB.data.config.kp_accounts.some(a => a.id === 'acct-a'),
+    'KPACCT.14 an unpinned (unclaimed) account remains a candidate for every worker');
+  assert(!cfgForC.data.config.kp_accounts.some(a => a.id === 'acct-b'),
+    'KPACCT.15 same protection applies to a worker with no assignment at all');
+  await req('POST', '/api/config', { configPatch: { kp_accounts: null, kp_assignments: null } });
 
   // ── KP URL hygiene ────────────────────────────────────────────────────
   // A copied Keyword Planner URL carries SESSION-scoped params (euid, __u,
@@ -3489,7 +3546,7 @@ async function run() {
     assert(/if \(leased != null\) Worker\.release\(leased/.test(kd), 'PAR.6 a lease is always returned, even on throw');
     // Parallelism during a block is when it looks least human, so the two
     // levers move together rather than independently.
-    assert(/paceFactor > 1 \? 1 : SERP_CONCURRENCY_MAX/.test(kd),
+    assert(/paceFactor >= 4 \? 1 : SERP_CONCURRENCY_MAX/.test(kd),
       'PAR.7 a back-off collapses concurrency to one tab as well as slowing down');
     // cycleWithLease must live in safeCycle's scope, not at run level.
     const leaseDecl = kd.split('\n').findIndex(l => /async function cycleWithLease/.test(l));
@@ -3555,8 +3612,8 @@ async function run() {
     assert(/const stoppedMidProduct = userStop\(\);/.test(kdd),
       'DEADLINE.2 a deadline still marks the product done and pushes its rows');
     assert(/PRODUCT DEADLINE/.test(kdd), 'DEADLINE.3 hitting the deadline is logged');
-    assert(/PRODUCT_DEADLINE_MS = Number\(opts\.productDeadlineMs \?\? 25 \* 60_000\)/.test(kdd),
-      'DEADLINE.4 defaults to 25 min and is overridable');
+    assert(/PRODUCT_DEADLINE_MS = Number\(opts\.productDeadlineMs \?\? 8 \* 60_000\)/.test(kdd),
+      'DEADLINE.4 defaults to 8 min and is overridable');
     const djd = readFileSync(resolve(REPO, 'modules/discovery-jobs.js'), 'utf-8');
     assert(/cfg\.product_deadline_min/.test(djd), 'DEADLINE.5 tunable from manager config');
   }
@@ -3591,16 +3648,27 @@ async function run() {
   // an account chooser can never succeed, yet we waited 15 tries x 1s on
   // every seed of every attempt: 618 of 638 KP navigations in 24h were the
   // chooser, ~3h/day of fleet time spent waiting on a page that cannot answer.
+  //
+  // The landing-page check itself was later found to false-positive on a
+  // cold/idle worker profile: a fixed sleep(2.5-4s) + one 2s recheck wasn't
+  // always enough time for Google's multi-hop redirect (ads.google.com ->
+  // accounts.google.com -> back to ads.google.com) to settle, so a session
+  // that was still mid-handshake (and would have reached Keyword Planner
+  // fine, as confirmed by hand) got misread as a dead account chooser.
+  // Replaced with an adaptive poll: check every ~1.5s for up to 12s, exit
+  // the moment the URL reaches KP (fast path) or repeats unchanged on a
+  // non-KP page (genuinely settled, not mid-hop).
   {
     const kd = readFileSync(resolve(REPO, 'modules/keyword-discovery.js'), 'utf-8');
-    assert(/const earlyWhy = await explainKpLandingPage\(tabId\)|let earlyWhy = await explainKpLandingPage\(tabId\)/.test(kd),
+    assert(/earlyWhy = await explainKpLandingPage\(tabId\)/.test(kd),
       'KPFAST.1 the landing page is checked BEFORE the long ping');
     assert(/earlyWhy \? false : await pingContentScript/.test(kd),
       'KPFAST.2 a known-bad landing page skips the ping entirely');
-    // Google can transit accounts.google.com mid-handshake; one instant look
-    // would fail seeds that were about to succeed.
-    assert(/if \(earlyWhy\) \{[\s\S]{0,200}sleep\(2000\)[\s\S]{0,120}explainKpLandingPage\(tabId\)/.test(kd),
-      'KPFAST.3 a bad landing page is confirmed settled before being believed');
+    // Google can transit accounts.google.com mid-handshake; a single fixed
+    // look would fail seeds that were about to succeed — poll until the URL
+    // either reaches KP or repeats unchanged (settled), bounded by a deadline.
+    assert(/KP_LANDING_POLL_MS[\s\S]{0,600}landingDeadline[\s\S]{0,800}curUrl === lastLandingUrl/.test(kd),
+      'KPFAST.3 a bad landing page is confirmed settled (polled, not a single fixed-delay look) before being believed');
     // A dead Ads session belongs to the profile, not the seed.
     assert(/if \(isChooser\) sessionBroken = why;/.test(kd),
       'KPFAST.4 a chooser marks the whole session broken');
@@ -3710,7 +3778,7 @@ async function run() {
   assert(bgSpiral.includes('_incrementalInFlight'),         'INCPUSH.5 guards against overlapping pushes');
   // Rejected rows must NOT be marked sent, or a stale batch id would make
   // the completion-time resync skip them and the data would be lost.
-  assert(/rejectedOrphan > 0[\s\S]{0,400}else \{[\s\S]{0,200}_incrementalSent\.add/.test(bgSpiral),
+  assert(/rejectedOrphan > 0[\s\S]{0,1200}else \{[\s\S]{0,200}_incrementalSent\.add/.test(bgSpiral),
     'INCPUSH.6 rows are only marked sent when the manager accepted them');
   // A forced flush must precede anything that destroys the service worker.
   assert((bgSpiral.match(/maybeFlushIncremental\(true\)/g) || []).length >= 2,

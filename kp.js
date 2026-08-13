@@ -153,7 +153,16 @@
         sendResponse({ ok: false, error: 'no keywords provided', keywords: [] });
         return false;
       }
-      runKPMetricsFlow(keywords, msg.maxResults || (keywords.length + 50), msg.hydrateTimeoutMs || 45000, msg.tableTimeoutMs || 90000)
+      // Unlike KP_GET_IDEAS / KP_GET_IDEAS_WEBSITE, this flow had no hard
+      // timeout — only scrapeIdeasTable's own internal wait was bounded.
+      // A stall in any OTHER awaited step (waitForReact,
+      // openSearchVolumeForecasts, switchToHistoricalMetrics) on a DOM
+      // selector Google changed would hang this sendResponse forever, and
+      // since PRODUCT_DEADLINE_MS is only checked between awaited engine
+      // stages (not preemptive), that one await could block a whole
+      // product indefinitely — the same hang class already fixed for the
+      // Amazon round and the other two KP flows.
+      _withHardTimeout(runKPMetricsFlow(keywords, msg.maxResults || (keywords.length + 50), msg.hydrateTimeoutMs || 45000, msg.tableTimeoutMs || 90000), 165_000, 'KP_GET_METRICS')
         .then(result => sendResponse(result))
         .catch(err => sendResponse({ ok: false, error: err.message, keywords: [] }));
       return true;
@@ -636,13 +645,6 @@
     // fails, the outer engine retry + hard-crash streak arm still
     // handles worker-level KP disable.
     try { await chrome.storage.local.remove('kp_click_broken'); } catch {}
-    const clickBroken = false;
-    if (clickBroken) {
-      kpLog('unreachable', 'warn');
-      throw new Error('KP_NEEDS_FRESH_NAV: unreachable');
-      // Fast path failed too — clear the flag and fall through to full flow.
-      try { await chrome.storage.local.remove('kp_click_broken'); } catch {}
-    }
 
     // Shorter hydrate wait (12s vs 45s). If Google's DOM was going to hydrate
     // the interactive card, it does so within a few seconds. Waiting 45s
@@ -907,64 +909,6 @@
       kpLog(`gave up — dialogs:${dialogs} inputs:${inputs}; visible buttons: [${btnText}]. Skipping manual-click wait for the rest of this session (unattended worker detected).`, 'err');
       throw e;
     }
-  }
-
-  // Recovery path used between multi-seed runs when findSeedInput fails on
-  // the results page. The results page only exposes the "+ Add another
-  // keyword" chip-input when results are non-sparse; for a 1-result KP run
-  // that input is hidden and findSeedInput times out. Walk through several
-  // strategies to return to a page where the seed input exists again.
-  async function navigateBackToInputPane() {
-    // Strategy 1: aria-label hint for an edit / modify / back affordance.
-    const editBtn = Array.from(document.querySelectorAll(
-      '[aria-label*="edit" i], [aria-label*="back" i], [aria-label*="modify" i], ' +
-      'button[aria-label*="change" i], [data-tooltip*="edit" i]'
-    )).find(visible);
-    if (editBtn) {
-      kpLog(`clicking edit/back affordance "${(editBtn.getAttribute('aria-label') || '').slice(0, 40)}"`);
-      await aggressiveClick(editBtn);
-      await humanPause(1500, 0.3);
-      if (findSeedInput()) return true;
-    }
-
-    // Strategy 2: text button matching "New search" / "Start over" / etc.
-    const txtBtn = findByText('button, [role="button"], a', SELECTORS.backToInputTexts);
-    if (txtBtn) {
-      kpLog(`clicking "${(txtBtn.innerText || '').trim().slice(0, 30)}" to return to input`);
-      await aggressiveClick(txtBtn);
-      await humanPause(1500, 0.3);
-      if (findSeedInput()) return true;
-    }
-
-    // Strategy 3: dismiss the existing seed chip — sometimes collapses the
-    // results pane and exposes the input.
-    const chipDismiss = Array.from(document.querySelectorAll(
-      '.mdc-chip__icon--trailing, [aria-label*="Remove" i], [aria-label*="remove" i], ' +
-      '.mdc-evolution-chip__action--trailing, button[aria-label*="delete" i]'
-    )).find(visible);
-    if (chipDismiss) {
-      kpLog('dismissing existing seed chip to reset view');
-      try { chipDismiss.click(); } catch {}
-      await humanPause(1200, 0.3);
-      if (findSeedInput()) return true;
-    }
-
-    // Strategy 4 (last resort): request engine re-navigation. Was
-    // location.href = fresh (kills content script mid-message). Now
-    // throws so engine's outer retry can Worker.navigate cleanly.
-    kpLog(`no seed input available — signalling engine to re-navigate to /ideas/new`, 'warn');
-    throw new Error('KP_NEEDS_FRESH_NAV: seed input recovery required, engine must re-navigate to /ideas/new');
-    // eslint-disable-next-line no-unreachable
-    await sleep(3500);
-    await waitFor(() => document.querySelectorAll('button, [role="button"]').length > 5,
-      { timeoutMs: 30000, name: 'KP shell re-hydration' });
-    await humanPause(800);
-    try {
-      await openDiscoverKeywords();
-    } catch (e) {
-      kpLog(`re-open Discover failed after reload: ${e.message}`, 'err');
-    }
-    return !!findSeedInput();
   }
 
   // Clear any existing chips in the seed input — needed when running KP

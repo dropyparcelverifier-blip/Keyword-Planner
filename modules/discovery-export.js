@@ -28,10 +28,6 @@ function safeCell(value) {
   return value.slice(0, MAX_CELL) + ` … [truncated ${value.length - MAX_CELL} chars]`;
 }
 
-function pairConfidences(thumbs, confs) {
-  return (thumbs || []).map((url, i) => ({ url, conf: (confs && confs[i]) || 0 }));
-}
-
 // Inline base64 thumbnails (data:image/jpeg|png) are captured for CLIP
 // matching but would bloat the CSV (~2 KB per thumb). Replace with a
 // placeholder for export — the user can audit by checking the matched
@@ -579,13 +575,30 @@ export async function pushToAdBrain(report) {
         // queueBatchId drift, and reports how many rows it rejected as
         // orphan-batch writes. Surface both to the caller so background.js
         // can log + force a batch resync.
-        let data = null; try { data = await resp.json(); } catch {}
-        const inserted = Number(data?.inserted ?? slice.length);
-        const rej = Number(data?.rejected || 0);
-        success += inserted;
-        rejectedOrphan += rej;
-        if (data?.active_batch_id) managerActiveBatchId = data.active_batch_id;
-        if (rej > 0) errors.push(`${rej} row(s) rejected as orphan_batch — manager active is ${data?.active_batch_id || 'unknown'}`);
+        let data = null, parseFailed = false;
+        try { data = await resp.json(); } catch { parseFailed = true; }
+        if (parseFailed || data == null) {
+          // A 200/201 with a body that isn't valid JSON (truncated
+          // response, HTML from a misconfigured proxy, etc.) is NOT the
+          // same as "the manager didn't report a count, so assume every
+          // row landed." Falling back to `slice.length` here previously
+          // reported full success for a write we have no confirmation
+          // actually happened — rows got marked sent (defeating the
+          // pending-push retry queue) on the strength of an unparseable
+          // response. Treat it as failed so the retry queue picks it up;
+          // a genuinely-successful insert is idempotent server-side
+          // (ON CONFLICT ... DO UPDATE), so retrying a row that DID land
+          // is safe, while never retrying a row that DIDN'T is not.
+          failed += slice.length;
+          errors.push(`HTTP ${resp.status} but response body did not parse as JSON — treating as failed, not silently assuming success`);
+        } else {
+          const inserted = Number(data?.inserted ?? slice.length);
+          const rej = Number(data?.rejected || 0);
+          success += inserted;
+          rejectedOrphan += rej;
+          if (data?.active_batch_id) managerActiveBatchId = data.active_batch_id;
+          if (rej > 0) errors.push(`${rej} row(s) rejected as orphan_batch — manager active is ${data?.active_batch_id || 'unknown'}`);
+        }
       } else {
         failed += slice.length;
         const text = await resp.text();

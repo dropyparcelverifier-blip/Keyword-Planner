@@ -60,18 +60,6 @@ export async function initMatcher() {
   initialized = true;
 }
 
-// Get a single image's CLIP embedding (512-dim, L2-normalised Float32Array).
-export async function getEmbedding(imageUrl) {
-  if (!imageUrl) return null;
-  try {
-    await initMatcher();
-    const resp = await sendToOffscreen('embed', { url: imageUrl });
-    return resp?.embedding ? new Float32Array(resp.embedding) : null;
-  } catch {
-    return null;
-  }
-}
-
 // Embed each of N product image URLs. Each reference now carries BOTH:
 //   - .data    Float32Array — CLIP 512-dim embedding (semantic match)
 //   - .dhash   {hi, lo}      — 64-bit perceptual hash (fast identity check)

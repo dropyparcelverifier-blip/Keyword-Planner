@@ -15,6 +15,14 @@
 // LIKE guard making it a no-op if already listed).
 'use strict';
 
+// GraphQL string-literal values here are always meant to be a SKU/ASIN/
+// barcode (alphanumeric + hyphen). Stripping to that allowlist — rather
+// than just removing `"` — closes off query-syntax injection (backslash
+// escapes, colons, `OR`/parentheses) into Shopify's search query string.
+function _gqlSafeValue(v) {
+  return String(v == null ? '' : v).replace(/[^a-zA-Z0-9-]/g, '');
+}
+
 // Bulk SKU import. Body:
 //   { batchId, skus: ['Dropy-B002OTT3US', ...],
 //     resolve: 'amazon' | 'shopify' | 'both', dryRun?: true }
@@ -56,7 +64,7 @@ async function uploadBySku({ req, res, ctx }) {
   const batchGqlLookup = async (field, values) => {
     if (values.length === 0) return {};
     // Shopify's OR operator with double-quoted values (preserves hyphens).
-    const clauses = values.map(v => `${field}:\\"${String(v).replace(/"/g, '')}\\"`).join(' OR ');
+    const clauses = values.map(v => `${field}:\\"${_gqlSafeValue(v)}\\"`).join(' OR ');
     const first = Math.min(250, values.length * 3);   // a SKU may have several variants
     const graphqlText = `{
           productVariants(first: ${first}, query: "${clauses}") {
@@ -82,7 +90,7 @@ async function uploadBySku({ req, res, ctx }) {
   // still one round trip for the whole batch.
   const batchGqlHandleWildcard = async (asinTokens) => {
     if (asinTokens.length === 0) return {};
-    const clauses = asinTokens.map(a => `handle:*${a}*`).join(' OR ');
+    const clauses = asinTokens.map(a => `handle:*${_gqlSafeValue(a)}*`).join(' OR ');
     const first = Math.min(250, asinTokens.length * 2);
     const graphqlText = `{
           products(first: ${first}, query: "${clauses}") {
@@ -358,10 +366,14 @@ async function bulkDelete({ req, res, ctx }) {
   const force = !!b.force;
   if (ids.length === 0) return send(res, 400, { ok: false, error: 'jobIds required' });
   let deleted = 0, keywordsDeleted = 0;
+  // Prepared once outside the loop — `db.prepare()` recompiled the same SQL
+  // on every id before, instead of using the same pattern as the rest of
+  // this file's hot paths (the `Q` object, prepared once at module load).
+  const selectJob = db.prepare('SELECT id, batch_id, product_url, status FROM jobs WHERE id=?');
   db.exec('BEGIN');
   try {
     for (const id of ids) {
-      const row = db.prepare('SELECT id, batch_id, product_url, status FROM jobs WHERE id=?').get(id);
+      const row = selectJob.get(id);
       if (!row) continue;
       if (row.status === 'claimed' && !force) continue;
       keywordsDeleted += Q.deleteKeywordsForProduct.run(row.batch_id, row.product_url).changes;

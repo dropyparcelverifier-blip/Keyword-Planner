@@ -2035,7 +2035,11 @@ function familyValuesAll(text, values, cachedRes) {
     const v = sorted[i];
     let re = cachedRes && cachedRes[v];
     if (!re) {
-      re = new RegExp(`(^|[^a-z])(${_escapeForFamilyRe(v)})([^a-z]|$)`, 'gi');
+      // Boundary class excludes digits as well as letters — otherwise a
+      // shorter numeric value matches inside a longer one that merely
+      // shares a prefix (e.g. "spf 50" would match inside "spf 500", since
+      // the trailing "0" of "500" reads as a valid non-letter boundary).
+      re = new RegExp(`(^|[^a-z0-9])(${_escapeForFamilyRe(v)})([^a-z0-9]|$)`, 'gi');
       if (cachedRes) cachedRes[v] = re;
     } else {
       re.lastIndex = 0;

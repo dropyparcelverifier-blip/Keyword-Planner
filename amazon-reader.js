@@ -18,6 +18,29 @@
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const rand  = (a, b) => a + Math.random() * (b - a);
 
+  // Amazon's anti-bot interstitial ("Sorry, we just need to make sure
+  // you're not a robot", or a bare captcha-image challenge page) renders
+  // zero [data-asin] cards — indistinguishable, before this check, from a
+  // query that legitimately has no results. Unlike kp.js/serp-reader.js
+  // (which both detect + signal this so the engine can back off), this
+  // file had no check at all: a 0-card diagnostic comment even said "check
+  // if Amazon rotated layout or served CAPTCHA" but nothing ever did.
+  // Without the signal, the engine can't distinguish the two and keeps
+  // retrying at the same pace, risking a harder/longer block.
+  function detectAmazonCaptcha() {
+    if (/\/errors\/validateCaptcha/i.test(location.pathname)) return true;
+    const text = (document.body?.innerText || '').toLowerCase();
+    const markers = [
+      "sorry, we just need to make sure you're not a robot",
+      'type the characters you see in this image',
+      'enter the characters you see below',
+      'to discuss automated access to amazon data',
+    ];
+    for (const m of markers) if (text.includes(m)) return true;
+    if (document.querySelector('form[action*="validateCaptcha"], img[src*="captcha"]')) return true;
+    return false;
+  }
+
   // ============ RPC ============
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg?.type === 'AMAZON_PING') {
@@ -32,7 +55,8 @@
     }
     if (msg?.type === 'AMAZON_GET_RESULTS') {
       try {
-        sendResponse({ ok: true, results: scrapeSearchResults() });
+        const captcha = detectAmazonCaptcha();
+        sendResponse({ ok: true, results: captcha ? [] : scrapeSearchResults(), captcha });
       } catch (e) {
         sendResponse({ ok: false, results: [], error: e?.message || String(e) });
       }

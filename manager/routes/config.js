@@ -115,6 +115,27 @@ function getConfig({ res, url, ctx }) {
     outCfg.kp_url = resolved.url;
     outCfg.kp_account_id    = resolved.account?.id    || null;
     outCfg.kp_account_label = resolved.account?.label || null;
+    // kp_accounts feeds the OTHER thing that reads this config: the
+    // fallback ladder in keyword-discovery.js (kpCandidates), which is
+    // walked on ANY KP failure regardless of resolved.reason above. That
+    // ladder had no idea an account was pinned to somebody else, so it
+    // still handed every worker every account in the fleet -- including
+    // ones explicitly pinned (kp_assignments) to a DIFFERENT worker's
+    // Chrome profile. Trying such an account can only land on Google's
+    // account chooser, which kp.js cannot get past; observed live, workers
+    // with no claim on acct-8258883732 walked into it anyway through this
+    // exact list and burned hours fleet-wide hitting the chooser. Strip
+    // accounts pinned to someone else; keep this worker's own pin (if any)
+    // and any account nobody has claimed, since those stay legitimate
+    // auto-discovery candidates for an unassigned worker.
+    if (Array.isArray(outCfg.kp_accounts)) {
+      const pinnedElsewhere = new Set(
+        Object.entries(cfg?.kp_assignments || {})
+          .filter(([w, acctId]) => w !== workerId && acctId)
+          .map(([, acctId]) => acctId)
+      );
+      outCfg.kp_accounts = outCfg.kp_accounts.filter(a => a && !pinnedElsewhere.has(a.id));
+    }
   }
   return send(res, 200, {
     ok: true,

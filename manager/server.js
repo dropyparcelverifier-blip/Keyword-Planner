@@ -919,6 +919,13 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status, priority DESC, id ASC);
 CREATE INDEX IF NOT EXISTS jobs_batch_idx  ON jobs (batch_id);
+-- Q.workerStats (WHERE claimed_by IS NOT NULL GROUP BY claimed_by, batch_id)
+-- is polled every 15s by the dashboard's stats bar. jobs_status_idx doesn't
+-- help it (leftmost column is status, not claimed_by), so without this it's
+-- a full table scan on every poll — and since jobs rows are never pruned
+-- (only status-updated), that scan grows with total lifetime job count, not
+-- active job count.
+CREATE INDEX IF NOT EXISTS jobs_claimed_by_idx ON jobs (claimed_by, batch_id);
 -- Cross-batch duplicate check (Q.existsActiveUrl) runs once per uploaded
 -- SKU. Without this the planner falls back to jobs_status_idx and, because
 -- status has only four distinct values, effectively scans every 'done' job
@@ -1063,11 +1070,20 @@ function readJson(req) {
     req.on('error', () => resolve({}));
   });
 }
+// Constant-time string compare. crypto.timingSafeEqual throws on
+// mismatched lengths, so hash both sides to a fixed-length digest first —
+// the actual token is never compared at its own variable length, which
+// would otherwise leak length/prefix info through response timing.
+function _timingSafeStrEqual(a, b) {
+  const ah = crypto.createHash('sha256').update(String(a)).digest();
+  const bh = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ah, bh);
+}
 function tokenOk(req, url) {
   if (!TOKEN) return true;
   const h = req.headers['x-manager-token'];
-  if (typeof h === 'string' && h === TOKEN) return true;
-  try { if (url.searchParams.get('token') === TOKEN) return true; } catch {}
+  if (typeof h === 'string' && _timingSafeStrEqual(h, TOKEN)) return true;
+  try { const qt = url.searchParams.get('token'); if (qt && _timingSafeStrEqual(qt, TOKEN)) return true; } catch {}
   return false;
 }
 function serveStatic(res, urlPath) {
@@ -1225,7 +1241,19 @@ const Q = {
   jobsForBatch: db.prepare(`SELECT id, batch_id, sku, product_url, product_name, priority, status, claimed_by, claimed_at, heartbeat_at, done_at, failed_reason, attempts, handles, brands FROM jobs WHERE batch_id=? ORDER BY priority DESC, id ASC`),
   deleteKeywordsForProduct: db.prepare(`DELETE FROM keywords WHERE batch_id=? AND product_url=?`),
   jobIdByBatchAndUrl: db.prepare(`SELECT id FROM jobs WHERE batch_id=? AND product_url=?`),
-  summary: db.prepare(`SELECT j.batch_id,
+  // Pre-filter to the 20 most-recent batch_ids via jobs_batch_idx BEFORE
+  // the per-row aggregation + correlated done_empty subquery, instead of
+  // scanning + aggregating + subquerying every job that ever existed and
+  // only applying LIMIT 20 at the very end. Same output shape/order
+  // (batch_id DESC, 20 rows) — this only bounds the cost, polled every
+  // ~10s by the dashboard, to the 20 shown batches rather than the whole
+  // table's lifetime job count (jobs rows are never pruned, only
+  // status-updated, so that cost only grows over months of operation).
+  summary: db.prepare(`
+    WITH recent_batches AS (
+      SELECT DISTINCT batch_id FROM jobs ORDER BY batch_id DESC LIMIT 20
+    )
+    SELECT j.batch_id,
       COUNT(*) total,
       SUM(j.status='pending') pending, SUM(j.status='claimed') claimed,
       SUM(j.status='done') done, SUM(j.status='failed') failed,
@@ -1239,7 +1267,9 @@ const Q = {
       SUM(CASE WHEN j.status='done' AND NOT EXISTS
           (SELECT 1 FROM keywords k WHERE k.batch_id=j.batch_id AND k.product_url=j.product_url)
         THEN 1 ELSE 0 END) done_empty
-    FROM jobs j GROUP BY j.batch_id ORDER BY j.batch_id DESC LIMIT 20`),
+    FROM jobs j
+    WHERE j.batch_id IN (SELECT batch_id FROM recent_batches)
+    GROUP BY j.batch_id ORDER BY j.batch_id DESC`),
   /* List individual done-empty jobs so the UI can offer a per-job requeue
      (e.g. the user might want to skip one that they know has no results). */
   doneEmptyJobs: db.prepare(`SELECT id, batch_id, sku, product_url, product_name, done_at, claimed_by
@@ -2007,6 +2037,36 @@ function reclaimSpace() {
   }
 }
 
+// Retention sweep — same statements + same defaults (7-day activity log,
+// 1-day acked commands) as the dashboard's manual "Cleanup" button
+// (routes/destructive.js `cleanup`). That button was the ONLY thing that
+// ever ran this: a fleet running unattended for weeks accumulates one
+// activity_log row roughly every 1-3s per active worker (per-keyword /
+// per-click progress events), so the table grows without bound unless an
+// operator remembers to click it. Mirrors the WAL-checkpoint interval
+// above — periodic, best-effort, non-blocking.
+const CLEANUP_SWEEP_MS = 6 * 60 * 60_000; // every 6 hours
+setInterval(() => {
+  try {
+    const a = Q.cleanupActivity.run(now() - 7 * 86400000);
+    const c = Q.cleanupCommands.run(now() - 1 * 86400000);
+    // Worker roster prune — same statement + same 4-hour default as the
+    // dashboard's manual "Prune stale workers" button (routes/workers.js
+    // `pruneStale`). That button was the ONLY thing that ever ran this:
+    // a worker PC that's powered off / reimaged / retired just sits in
+    // the fleet list forever (its job CLAIMS get reclaimed automatically
+    // by releaseStaleJobs elsewhere, but the worker ROW itself doesn't),
+    // so the dashboard accumulates dead entries indefinitely.
+    const w = Q.deleteStaleWorkers.run(now() - 4 * 60 * 60_000);
+    if (a.changes + c.changes + w.changes > 0) {
+      console.log(`[manager] periodic retention sweep: ${a.changes} activity row(s), ${c.changes} acked command(s), ${w.changes} stale worker(s) removed.`);
+      reclaimSpace();
+    }
+  } catch (e) {
+    console.error('[manager] periodic retention sweep failed (non-fatal):', e.message);
+  }
+}, CLEANUP_SWEEP_MS).unref?.();
+
 const routerCtx = {
   db, Q,
   send, readJson, now,
@@ -2121,6 +2181,13 @@ const server = http.createServer(async (req, res) => {
 
     return send(res, 404, { ok: false, error: 'no such route' });
   } catch (e) {
+    // This is the backstop for every uncaught error from every route
+    // handler. It sent e.message to the client but never logged
+    // server-side — so a real bug (a DB constraint violation, a TypeError
+    // from an unexpected payload shape) reached the client as an opaque
+    // 500 while the manager's OWN logs (what an operator checks first when
+    // "the fleet went weird") showed nothing at all.
+    console.error(`[manager] request error: ${req.method} ${url?.pathname || req.url}:`, e?.stack || e);
     return send(res, 500, { ok: false, error: e.message });
   }
 });
